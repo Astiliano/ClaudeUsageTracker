@@ -1,7 +1,7 @@
 # Claude Usage Tracker — Design Spec
 
 Date: 2026-09-15
-Status: **spec v3 — under adversarial review** (see §15 Review log)
+Status: **spec v4 — hostile review passed; consistency confirmation pending** (see §15 Review log)
 
 ## 1. Goal
 
@@ -134,7 +134,7 @@ dir.** No in-app OAuth. "Log in" opens a visible terminal with
 | D7 | One cycle at a time. Every poll path goes through the same `decide` → `begin_cycle` pair (§6.5); anything arriving while a cycle runs is **skipped, never queued** | Bounded resource use; one state machine |
 | D8 | Every poll outcome is persisted and displayed; **raw text is stored with every snapshot** (success or failure) so any snapshot can be re-parsed after a parser fix | Failure visibility, not silence. Storage: ~1.1 KB/poll; at 60 s, 8 h/day, 3 accounts ≈ 1.6 MB/day ≈ 50 MB per retention window — acceptable |
 | D9 | Tray icon reflects the **worst percentage across all enabled accounts and all their windows** (session, week-all, every per-model line); tooltip lists every enabled account | Worst-of is what you act on |
-| D10 | History retention: snapshot rows older than **30 days** are deleted at startup and every 24 h, followed by `PRAGMA incremental_vacuum` (DB opened with `auto_vacuum=INCREMENTAL`) so the file actually shrinks. No separate raw pruning | Bounds DB size; D8 stays true for the whole window. Worst case at the 10 s floor, 3 accounts, 24 h/day ≈ 285 MB per window — the user chose that gap; the default is ~50 MB |
+| D10 | History retention: snapshot rows older than **30 days** are deleted at startup and every 24 h, followed by `PRAGMA incremental_vacuum` (DB opened with `auto_vacuum=INCREMENTAL`) so the file actually shrinks. No separate raw pruning | Bounds DB size; D8 stays true for the whole window. Worst case at the 10 s floor, 3 accounts, Claude running 24 h/day: 8640 cycles × 3 × 1.1 KB ≈ 28.5 MB/day ≈ **855 MB** per window — the user chose that gap and the gate makes 24 h/day unrealistic; the default is ~50 MB |
 | D11 | The "What's contributing" section is **not parsed or displayed** in v1; it is preserved inside `raw` | YAGNI; unstable heuristics text |
 | D12 | Threshold notifications: **deferred to v1.1** | Not core to the "task manager" value |
 | D13 | Logging: `tracing` JSON lines to a daily-rotating file in the app log dir; runtime level toggle via `reload::Handle`; "Open log folder" menu item | Debuggable in production without adding code; firehose one switch away |
@@ -169,7 +169,7 @@ src-tauri/src/
     schema.rs        migrations (PRAGMA user_version), pragmas
     accounts.rs / snapshots.rs / settings.rs
   commands.rs        #[tauri::command] surface (§8)
-  tray.rs            tray_state(latest) -> (Level, tooltip)  [pure] + apply
+  tray.rs            tray_state(latest, halted) -> (Level, tooltip)  [pure] + apply
   login.rs           open_terminal_for_login(binary, config_dir) per OS
   logging.rs         tracing init, reload handle
 src/                 React: App, Header, AccountsTable, Sparkline, Settings,
@@ -209,7 +209,7 @@ pub enum PollOutcome {
   SpawnError(String),   // binary missing/not executable, non-zero exit,
                         // stdout not JSON — message = stderr/stdout tail
   Timeout,              // killed after timeout_secs; error = "timed out after {n}s"
-  GuardTripped(String), // §6.3 violated — fatal for the account
+  GuardTripped(String), // §6.3 violated — halts the whole poller
 }
 
 pub struct Snapshot { id: i64, account_id: String, taken_at: i64 /*epoch ms*/,
@@ -279,20 +279,28 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
 - Timeout `settings.timeout_secs` (default 30, min 5, max 120) via
   `tokio::time::timeout`; on expiry `kill().await`, then `wait().await`,
   return `Timeout`.
-- **Envelope guard** (evaluated before parsing), split into two classes:
-  - **Shape problems → `SpawnError`** (backs off, self-recovers): stdout is
-    not JSON, or `type != "result"`, or `num_turns` is absent/non-numeric.
-    Message = `"unexpected envelope: <reason>"`, raw stored.
-  - **Turn evidence → `GuardTripped`** (halts, §below): the envelope is a
-    well-formed `result` **and** any of: `local_command` absent or not equal
-    to `"usage"` (primary — a model turn has no such field);
-    `num_turns > 0` (secondary); `total_cost_usd > 0` or non-empty
-    `modelUsage` (advisory: under subscription auth cost can read 0 for a
-    billed turn, so these can add a trip, never excuse one).
-  On a trip: raw envelope logged at ERROR, the outcome is persisted for that
-  account, **the current cycle is aborted immediately** (remaining accounts
-  are not polled — same binary, same argv, same fault), and a persisted
-  **global halt** is set (`settings.polling_halted = "guard_tripped:<ts>"`).
+- **Envelope guard** (evaluated before parsing), in this order:
+  1. stdout is not JSON, or has no `type`, or `type != "result"` →
+     `SpawnError("unexpected envelope: <reason>")` (backs off; raw stored).
+  2. The envelope is a `result`. `local_command` absent or not equal to
+     `"usage"` → **`GuardTripped`** (primary turn evidence — a model turn
+     has no such field). This is checked before anything else about the
+     envelope's shape, so a malformed turn envelope can never be
+     misclassified as a shape problem and retried.
+  3. `num_turns > 0`, or `total_cost_usd > 0`, or non-empty `modelUsage` →
+     `GuardTripped` (secondary/advisory: under subscription auth cost can
+     read 0 for a billed turn, so these add trips, never excuse one).
+  4. `local_command == "usage"` but `num_turns` absent/non-numeric or
+     `result` missing → `SpawnError("unexpected envelope: <reason>")`.
+  5. **Escalation:** five consecutive `unexpected envelope` spawn errors on
+     one account → treated as `GuardTripped("unclassifiable envelope ×5")`,
+     because an envelope the app cannot classify is exactly the case where
+     it cannot prove no turn was spent.
+  On a trip, in this order: (1) persist the **global halt**
+  (`settings.polling_halted = "guard_tripped:<ts>"`) — the flag is the safety
+  property, so it goes to disk first; (2) log the raw envelope at ERROR;
+  (3) persist the outcome for that account; (4) **abort the current cycle**
+  (remaining accounts are not polled — same binary, same argv, same fault).
   While halted, `decide` returns `Skip(Halted)` for **every** trigger
   including `Manual`. The header shows a red banner "Polling halted: a
   /usage call reached the model (see log). Clear only after confirming the
@@ -340,7 +348,7 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
 pub enum Gate { Idle, Active }
 pub struct Machine { gate: Gate, cycle: Option<CycleToken>,
                      backoff: HashMap<AccountId, Backoff> }
-pub enum Trigger { Timer, Manual, Startup, AccountChanged(AccountId) }
+pub enum Trigger { Timer, Manual, Startup, AccountChanged(Vec<AccountId>) }
 pub enum Decision { Run { accounts: Vec<AccountId>, reason: Trigger,
                           gate_transition: Option<Gate> },   // driver emits gate:changed
                     Skip(SkipReason) }
@@ -363,9 +371,10 @@ Rules, evaluated in this order:
    gate.)
 2. `!binary_present` → `Skip(NoBinary)` for every trigger.
 3. `enabled.is_empty()` → `Skip(NoEnabledAccounts)` for every trigger.
-4. Compute the candidate list: `Timer` requires `claude_running == Some(_)`;
+4. Compute the candidate list: `Timer` requires `claude_running == Some(_)`
+   (`None` is a driver bug: `debug_assert!`, then `Skip(GateIdle)`);
    Idle&!running → `Skip(GateIdle)`; otherwise all enabled.
-   `Manual`/`Startup`: all enabled. `AccountChanged(id)`: `[id]`.
+   `Manual`/`Startup`: all enabled. `AccountChanged(ids)`: `ids ∩ enabled`.
 5. Filter by backoff (D16): drop accounts whose `next_allowed > now` unless
    trigger is `Manual` or `AccountChanged` (both reset that account's
    backoff). Empty → `Skip(AllBackedOff)` — which therefore always means
@@ -396,16 +405,22 @@ boundary serialises as `snake_case`, like `outcome`: `DisabledReason` →
   `Mutex<Option<Child>>` shared with the driver). The loop therefore stays
   responsive: any trigger arriving during a cycle is decided immediately and
   gets `Skip(Busy)` (D7). Triggers reach the driver through a
-  `tokio::sync::Notify`/capacity-1 channel per trigger kind, never an
-  unbounded queue, so five Refresh clicks coalesce into at most one pending
-  trigger.
+  `tokio::sync::Notify` per trigger kind (never an unbounded queue), so five
+  Refresh clicks coalesce into at most one pending trigger.
+  `AccountChanged` is backed by a `Mutex<HashSet<AccountId>>` that
+  **accumulates** ids; the driver drains it into one
+  `AccountChanged(ids)` decision, so enabling two accounts in quick
+  succession polls both. (`Trigger::AccountChanged` therefore carries
+  `Vec<AccountId>`.)
 - Loop:
   ```
   select! {
     _ = sleep_until(deadline)        => Timer,
-    _ = settings_rx.changed()        => deadline = last_cycle_end + new_gap (clock not restarted),
+    _ = settings_rx.changed()        => deadline = last_cycle_end + new_gap (clock not restarted);
+                                        machine.reset_all_backoff()  (D16),
     Some(t) = trigger_rx.recv()      => t,
-    _ = watchdog.tick()  (every 5 s) => if cycle_age > enabled × timeout_secs + 10 s:
+    _ = watchdog.tick(), if machine.cycle_age(now).is_some()   (5 s; arm disabled when idle)
+                                     => if cycle_age > enabled × timeout_secs + 10 s:
                                          abort cycle task (JoinHandle::abort), kill child via
                                          its handle, log ERROR, emit poller:stalled,
     _ = shutdown.cancelled()         => break,
@@ -446,8 +461,8 @@ boundary serialises as `snake_case`, like `outcome`: `DisabledReason` →
   rely on `kill_on_drop`: `app.exit()` ends in `process::exit`, which skips
   destructors), wait ≤ 2 s for the cycle task, then `app.exit(0)` again with
   a flag set so the second `ExitRequested` is allowed through.
-- A guard trip inside a cycle aborts the remaining accounts of that cycle
-  (§6.3) before the halt flag is persisted.
+- A guard trip inside a cycle persists the halt flag first, then aborts the
+  remaining accounts of that cycle (§6.3 order).
 - Sleep/wake: nothing special in v1; the next `Timer` after wake runs late.
   On macOS the monotonic clock behind `Instant` pauses during suspend, so at
   the 3600 s maximum the first post-wake poll can be up to an hour late.
@@ -485,7 +500,10 @@ Queries: `latest_per_account()` (max `taken_at`, tiebreak max `id`),
 `max(week_all_pct)` over `ok` rows, **only for hours that have at least one
 row** (no zero-filling — the process gate guarantees overnight gaps, which
 must render as breaks, not crashes), `prune(now)` deletes rows with
-`taken_at < now − 30 d` and logs the count at WARN if > 0.
+`taken_at < now − 30 d`, logs the count at WARN if > 0, then runs
+`PRAGMA incremental_vacuum` (D10). `record` in the machine resets an
+account's backoff on `ok`; `reset_all_backoff()` exists for the settings
+watch.
 
 Settings keys: `interval_secs`, `timeout_secs`, `claude_binary` (override
 path or empty), `close_to_tray` (default true), `log_level`
@@ -500,7 +518,8 @@ the autostart plugin's live state and `set_settings` writes through to it.
   shows + focuses the window where the platform delivers click events
   (Windows, macOS); on Linux AppIndicator the default menu item is the path.
 - Window close → hide when `close_to_tray`, else quit.
-- `tray_state(latest: &[(Account, Option<SnapshotDto>)]) -> (Level, String)`
+- `tray_state(latest: &[(Account, Option<SnapshotDto>)], halted: bool) -> (Level, String)`
+  (`halted` is read from the same store key `get_dashboard` uses)
   is pure and unit-tested. `Level` ∈ `Halted` (global guard halt set — a
   distinct icon with a warning badge, tooltip "polling halted — guard
   tripped", takes precedence over everything), `Grey` (no enabled account
@@ -520,8 +539,13 @@ Opens a visible terminal running the discovered binary with `/login` and
 line, so `&`, `%`, spaces and quotes in paths cannot break or expand):
 - Windows: `login.cmd` containing `@echo off`, `set "CLAUDE_CONFIG_DIR=<dir>"`,
   `"<binary>" /login`, then `pause`; launched with
-  `Command::new("cmd.exe").args(["/c", "start", "", "cmd.exe", "/k", script])`
-  (no CREATE_NO_WINDOW). The env var is written with cmd's `set "K=V"` form,
+  `Command::new("cmd.exe")` with
+  `raw_arg(format!("/s /c \"start \"\" cmd.exe /k \"{script}\"\""))` — the
+  script path is always explicitly double-quoted (Rust's automatic quoting
+  only quotes when it sees a space, and cmd would split an unquoted `&`,
+  reachable when the username contains one); the path is under
+  `app_data_dir`, which the app controls, and it is rejected if it contains
+  a `"` (no CREATE_NO_WINDOW). The env var is written with cmd's `set "K=V"` form,
   which takes the value literally including `&` and `%` until expansion is
   attempted — and it is not expanded again because the binary is invoked
   directly by cmd, not through a second shell.
@@ -551,7 +575,9 @@ Single window, dark/light follows OS.
 - **Header**: state banner, first match wins — "Polling halted: …" (red,
   §6.3, with Clear halt button), "Poller stalled at HH:MM — recovered",
   "Claude binary not found — set it in Settings" (with a button), "Polling
-  paused: no enabled accounts", "Claude running — polling 60 s after each
+  paused: no enabled accounts" (derived in the frontend as "every returned
+  account has `enabled == false`" — a presentational derivation, not a
+  usage computation), "Claude running — polling 60 s after each
   cycle", "Idle — will resume when Claude Code starts". Refresh now,
   Settings.
 - **Accounts table** (D17 order): label · Session % bar + "resets in 3h 12m"
@@ -575,15 +601,15 @@ Single window, dark/light follows OS.
 
 | Command | Args → Result |
 |---|---|
-| `get_dashboard` | → `{ accounts: [{ account: Account, latest: SnapshotDto?, backoff_until: i64? }], gate, busy, halted: string?, stalled_at: i64?, binary: { path?, source? }, interval_secs }` — cheap; called on every `usage:updated` (debounced) |
+| `get_dashboard` | → `{ accounts: [{ account: Account, latest: SnapshotDto?, backoff_until: i64? }], gate, busy, halted: string?, stalled_at: i64?, binary: { path?, source? }, interval_secs }` — cheap; called on every `usage:updated` (debounced). `stalled_at` and `backoff_until` live in the shared `AppState` (`Arc<Mutex<DriverStatus>>`, written by the driver, read by commands), reset on restart; `stalled_at` is set by the watchdog arm and cleared on the next `cycle:finished`; `halted` comes from the store |
 | `get_history` | `{account_id}` → `[{t, pct}]` hourly, last 7 days — called once per account on `cycle:finished` and on mount, not per `usage:updated` |
 | `poll_now` | → `"started" \| "skipped:<reason>"` |
 | `add_account` | `{config_dir}` → Account. Canonicalises; rejects missing dir (`not_found`) or duplicate (`duplicate`) |
 | `update_account` | `{id, label?, enabled?}` → Account. `enabled: false` sets `disabled_reason = user`; `enabled: true` clears it and triggers `AccountChanged` |
 | `remove_account` | `{id}` → () (cascades snapshots) |
 | `rescan_profiles` | → `[Account]` newly added (disabled) |
-| `get_settings` / `set_settings` | full settings struct; clamps rejected with `out_of_range`; change triggers settings watch |
-| `clear_halt` | → () — clears `polling_halted`, logs WARN with the previous value, triggers `Manual` |
+| `get_settings` / `set_settings` | user-facing settings struct (`interval_secs`, `timeout_secs`, `claude_binary`, `close_to_tray`, `launch_at_login`, `log_level`); clamps rejected with `out_of_range`; a successful change publishes on the settings watch (moves the deadline, resets backoff per D16). `polling_halted` is **not** part of this struct and writes to it do **not** touch the watch |
+| `clear_halt` | → () — clears `polling_halted` and logs WARN with the previous value. **Does not poll**: every quota-spending action stays a separate, explicit act (the user presses Refresh) |
 | `open_login` | `{id}` → () |
 | `open_log_dir` | → () via opener plugin |
 | `get_snapshot_raw` | `{snapshot_id}` → `{raw?, error?}` |
@@ -619,15 +645,15 @@ Linux needs `libayatana-appindicator3-dev` for the tray.
 | Module | Tests |
 |---|---|
 | parser | Fixtures: full three-line report; session 0 % without reset; no per-model line; two per-model lines; **missing session line**; **missing week-all line**; not-logged-in cost summary → `no_usage_data`; non-numeric pct → `parse_error`; **150 % → `parse_error`**; `8am` and `3:30am` clauses; Dec→Jan year wrap; DST-gap and ambiguous local times; unknown zone → `parse_error`; unknown extra lines ignored; CRLF input; R3-not-stealing-R2 (the all-models line never appears in `week_models`) |
-| runner | Envelope guard table: turn-evidence cases (missing `local_command`, `local_command: "cost"`, `num_turns: 1`) → `guard_tripped`; shape cases (non-JSON, `type: "system"`, missing `num_turns`) → `spawn_error`; parser fixture for 12am/12pm; non-zero exit → `spawn_error`; exit 0 + non-JSON → `spawn_error`; timeout via a fake binary `src-tauri/src/bin/fake_claude.rs` (modes selected by env: slow / echo-env / emit-fixture; located in tests via `env!("CARGO_BIN_EXE_fake_claude")`, excluded from the shipped bundle) → `timeout` and the child is gone; exact argv constant; env sanitisation (ANTHROPIC_/CLAUDE_ vars removed, `CLAUDE_CONFIG_DIR` set) using a fake binary that echoes its env |
-| scheduler/machine | `Halted` beats every trigger incl. `Manual`; guard trip mid-cycle aborts the remaining accounts (polls made after the trip: zero); `NoEnabledAccounts` vs `AllBackedOff` distinguished; gate does not move on a skipped decision (final poll survives backoff); decision table for `Timer` (4 gate×running combos), busy precedes process check, `NoBinary` for every trigger, `Manual` and `Startup` ignore gate, `AccountChanged` runs one account, final-poll-once property (running→stopped→stopped = exactly one Run), backoff schedule and reset rules, RAII token clears busy on drop (including panic via `catch_unwind`), watchdog force-clear |
+| runner | Envelope guard table in §6.3 order: turn-evidence cases (missing `local_command`, `local_command: "cost"`, `num_turns: 1`, **missing `local_command` AND missing `num_turns`** → still `guard_tripped`, **advisory rule in isolation: `local_command: "usage"` + `num_turns: 0` + `total_cost_usd: 0.01` → `guard_tripped`**, and the same with non-empty `modelUsage`); shape cases (non-JSON, `type: "system"`, `local_command: "usage"` with missing `num_turns`) → `spawn_error`; five consecutive unexpected-envelope errors escalate to `guard_tripped`; halt flag is persisted before the cycle abort (ordering test with a failing store after step 1); parser fixture for 12am/12pm; non-zero exit → `spawn_error`; exit 0 + non-JSON → `spawn_error`; timeout via a fake binary `src-tauri/src/bin/fake_claude.rs` (modes selected by env: slow / echo-env / emit-fixture; located in tests via `env!("CARGO_BIN_EXE_fake_claude")`, excluded from the shipped bundle) → `timeout` and the child is gone; exact argv constant; env sanitisation (ANTHROPIC_/CLAUDE_ vars removed, `CLAUDE_CONFIG_DIR` set) using a fake binary that echoes its env |
+| scheduler/machine | `Halted` beats every trigger incl. `Manual`; guard trip mid-cycle aborts the remaining accounts (polls made after the trip: zero); `NoEnabledAccounts` vs `AllBackedOff` distinguished; gate does not move on a skipped decision (final poll survives backoff); decision table for `Timer` (4 gate×running combos), busy precedes process check, `NoBinary` for every trigger, `Manual` and `Startup` ignore gate, `AccountChanged(ids)` runs `ids ∩ enabled`, `Timer` with `claude_running == None` → `Skip(GateIdle)`, final-poll-once property (running→stopped→stopped = exactly one Run), backoff schedule and reset rules, RAII token clears busy on drop (including panic via `catch_unwind`), `cycle_age` reporting |
 | discovery | Temp-home fixtures reproducing §2.3 (incl. exclusion of the `update-state.json`-only dir); label derivation; D17 ordering; binary precedence with a fake PATH; `.cmd` and `.bat` rejected on Windows (one extension check covers both); canonicalisation |
-| store | Migrations from empty; latest-per-account with same-ms tiebreak; hourly history buckets; prune at the 30 d boundary; **cascade on account removal (proves `foreign_keys=ON`)**; unique on canonical path |
+| store | Migrations from empty; latest-per-account with same-ms tiebreak; hourly history buckets (only populated hours); prune at the 30 d boundary; **cascade on account removal (proves `foreign_keys=ON`)**; unique on canonical path; **`polling_halted` survives close + reopen of the store** |
 | process | `matches_claude` on synthetic (name, cmd) tuples: native, npm, unrelated node, excluded pid |
-| tray | `tray_state`: grey/green/amber/red thresholds, multi-account worst-of, per-model segments, `err` rendering |
-| commands | `add_account` rejects missing/duplicate; `set_settings` boundary values (10/3600, 5/120) accept, one-off values reject; `update_account` enable clears `disabled_reason` |
+| tray | `tray_state`: `Halted` beats everything; grey/green/amber/red thresholds, multi-account worst-of, per-model segments, `err` rendering |
+| commands | `add_account` rejects missing/duplicate; `set_settings` boundary values (10/3600, 5/120) accept, one-off values reject; `update_account` enable clears `disabled_reason`, disable sets `user`; `clear_halt` clears the flag, logs, and does not poll |
 | frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → separate sub-paths), status pill precedence |
-| scheduler/driver | Tokio-based: triggers during a cycle coalesce to one `Skip(Busy)` and never queue; settings change moves the deadline without restarting the clock; watchdog aborts a deliberately hung cycle task and busy clears; shutdown kills a live fake child |
+| scheduler/driver | Tokio-based: triggers during a cycle coalesce to one `Skip(Busy)` and never queue; two `AccountChanged` in quick succession poll both accounts; `clear_halt` does not start a poll; settings change moves the deadline without restarting the clock; watchdog aborts a deliberately hung cycle task and busy clears; shutdown kills a live fake child |
 | integration (manual, documented in README) | Real poll against `~/.claude3`; Git Bash hazard reproduction is **not** run (costs quota) |
 
 Gate: `cargo test` + `cargo clippy -D warnings` + `npm test` + `npm run
@@ -640,7 +666,7 @@ build` green before any task is done.
   trigger, env vars stripped (first poll per account).
 - WARNING: skipped decisions with reason, timeout, spawn error, parse error,
   backoff entered, prune count, `.cmd` shim skipped.
-- ERROR: guard tripped (with raw envelope), watchdog force-clear, DB errors.
+- ERROR: guard tripped (with raw envelope), watchdog abort, DB errors.
 - DEBUG: process-check timing and matched PIDs, raw result text, env vars
   stripped (subsequent polls).
 - "Open log folder" in tray and settings; log level toggle at runtime.
@@ -651,10 +677,10 @@ build` green before any task is done.
 |---|---|
 | Claude Code changes `/usage` text | Fixture tests are the alarm; raw kept for every snapshot; status shows parse error instead of stale numbers |
 | A flag in §2.2 is removed in a future CLI | Non-zero exit → `spawn_error` with stderr shown; flag set lives in one constant |
-| The prompt reaches the model once (spends one turn) | Direct spawn, no shell, no batch shims, sanitised env; guard detects it and disables the account so it cannot repeat |
+| The prompt reaches the model once (spends one turn) | Direct spawn, no shell, no batch shims, sanitised env; guard detects it and halts the whole poller (persisted) so it cannot repeat |
 | Polling overhead on battery | Process gate; gap-based interval; serial polls; backoff |
 | npm-installed Claude not detected by gate | Matcher covers `node` + package path; manual refresh always works; gate state visible in header |
-| Orphaned child on quit | `kill_on_drop` + shutdown hook |
+| Orphaned child on quit | Explicit kill + wait in the `ExitRequested` hook (§6.5); `kill_on_drop` only as a fallback for abnormal task teardown |
 
 ## 13. Out of scope / deferred
 
@@ -701,4 +727,13 @@ Facts an implementer may rely on without re-testing, with the date verified:
   (machine purity → `decide` returns descriptions; `NoEnabledAccounts`),
   2 should-fix (snake_case wire forms for all enums; events are refetch
   triggers only), 4 nits applied.
-- Round 3: pending (confirmation round).
+- 2026-09-15 v3 → v4: round 3. Hostile: all round-2 items closed; 4
+  should-fix applied (guard order: `local_command` before shape checks +
+  5-strike escalation; `clear_halt` no longer polls; halt persisted before
+  cycle abort; `AccountChanged` accumulates ids); 10 nits applied. Verdict:
+  **ready to plan, no further round needed.** Consistency: all round-2 items
+  closed; 1 must-fix (`tray_state` takes `halted`) and 6 should-fix applied
+  (855 MB worst case, `incremental_vacuum` in `prune`, settings change
+  resets backoff, `stalled_at` home, no-enabled banner derivation,
+  `clear_halt` test, advisory-rule fixture).
+- Round 4: consistency confirmation only.
