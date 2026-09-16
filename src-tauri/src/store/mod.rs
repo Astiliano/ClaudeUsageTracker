@@ -1,8 +1,10 @@
 pub mod accounts;
 pub mod schema;
 pub mod settings;
+pub mod snapshots;
 
 pub use settings::{validate_settings, UserSettings};
+pub use snapshots::HistoryPoint;
 
 use rusqlite::Connection;
 use std::path::Path;
