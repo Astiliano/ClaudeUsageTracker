@@ -1,4 +1,5 @@
 pub mod parser;
+pub mod runner;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
