@@ -1,5 +1,6 @@
 pub mod discovery;
 pub mod error;
+pub mod login;
 pub mod logging;
 pub mod paths;
 pub mod process;
