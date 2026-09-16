@@ -24,6 +24,10 @@ envelope guard checks that the reply really was a local command; if it ever
 looks like a model turn, polling halts globally and the halt survives a
 restart until you clear it.
 
+Accounts can be reordered by dragging rows with the grip handle, or with the
+Move up/Move down buttons in the Actions column; the order is saved and
+survives a restart.
+
 ## Requirements
 
 - Rust 1.96 (MSVC toolchain on Windows) and a C compiler, for bundled SQLite

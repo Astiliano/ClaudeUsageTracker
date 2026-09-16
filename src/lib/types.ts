@@ -41,6 +41,7 @@ export interface Account {
   disabled_reason: DisabledReason | null;
   is_default: boolean;
   created_at: number;
+  sort_order: number;
 }
 
 export interface AccountRow {

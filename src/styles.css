@@ -84,6 +84,32 @@ body {
   opacity: 0.55;
 }
 
+.grip-cell {
+  width: 20px;
+  text-align: center;
+  cursor: grab;
+}
+.grip {
+  color: var(--muted);
+  user-select: none;
+}
+.accounts tr[draggable="true"] {
+  cursor: grab;
+}
+.row-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+.row-drag-over {
+  outline: 2px dashed var(--muted);
+  outline-offset: -2px;
+}
+.move-btn {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
 .bar {
   position: relative;
   width: 110px;

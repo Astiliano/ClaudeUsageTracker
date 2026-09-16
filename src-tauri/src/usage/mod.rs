@@ -187,6 +187,10 @@ pub struct Account {
     pub disabled_reason: Option<DisabledReason>,
     pub is_default: bool,
     pub created_at: i64,
+    /// Manual order (D17, revised 2026-09-16): lower sorts first. Authoritative
+    /// for `list_accounts`/`enabled_account_ids`; `is_default`/label remain a
+    /// tiebreak only.
+    pub sort_order: i64,
 }
 
 #[cfg(test)]
@@ -342,6 +346,7 @@ mod tests {
             disabled_reason: None,
             is_default: false,
             created_at: 1_700_000_000_000,
+            sort_order: 0,
         };
         let v = serde_json::to_value(&a).expect("serialise");
         assert_eq!(v["label"], "claude3");
@@ -349,5 +354,6 @@ mod tests {
         assert!(v["disabled_reason"].is_null());
         assert_eq!(v["is_default"], false);
         assert!(v["config_dir"].is_string());
+        assert_eq!(v["sort_order"], 0);
     }
 }

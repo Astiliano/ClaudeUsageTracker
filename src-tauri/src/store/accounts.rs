@@ -1,4 +1,5 @@
-use rusqlite::{params, Row};
+use rusqlite::{params, Connection, Row, ToSql};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::discovery::Candidate;
@@ -6,8 +7,12 @@ use crate::error::{AppError, AppResult};
 use crate::store::Store;
 use crate::usage::{Account, DisabledReason};
 
-/// D17: default account first, then case-insensitive label.
-const ORDER_D17: &str = "ORDER BY is_default DESC, lower(label) ASC, label ASC";
+/// D17 (revised 2026-09-16): `sort_order` is authoritative; `is_default`
+/// and label remain a tiebreak (relevant only while rows share a
+/// `sort_order`, which normal use never produces once every row has gone
+/// through an insert or `reorder_accounts`).
+const ORDER_ACCOUNTS: &str =
+    "ORDER BY sort_order ASC, is_default DESC, lower(label) ASC, label ASC";
 
 fn row_to_account(row: &Row<'_>) -> Result<Account, rusqlite::Error> {
     let reason: Option<String> = row.get("disabled_reason")?;
@@ -19,6 +24,7 @@ fn row_to_account(row: &Row<'_>) -> Result<Account, rusqlite::Error> {
         disabled_reason: reason.as_deref().and_then(DisabledReason::from_wire),
         is_default: row.get::<_, i64>("is_default")? != 0,
         created_at: row.get("created_at")?,
+        sort_order: row.get("sort_order")?,
     })
 }
 
@@ -30,7 +36,7 @@ fn label_for(dir: &Path) -> String {
 }
 
 const SELECT_COLS: &str =
-    "id, label, config_dir, enabled, disabled_reason, is_default, created_at";
+    "id, label, config_dir, enabled, disabled_reason, is_default, created_at, sort_order";
 
 /// True for a UNIQUE or PRIMARY KEY constraint violation, which is the
 /// signature of a raced insert against the `accounts.config_dir` UNIQUE
@@ -73,6 +79,7 @@ fn build_account(
     enabled: bool,
     disabled_reason: Option<DisabledReason>,
     is_default: bool,
+    sort_order: i64,
     now: i64,
 ) -> AppResult<(Account, String)> {
     if !config_dir.is_dir() {
@@ -92,8 +99,20 @@ fn build_account(
         disabled_reason,
         is_default,
         created_at: now,
+        sort_order,
     };
     Ok((account, canonical_str))
+}
+
+/// `sort_order` for a newly inserted row: one past the current maximum, or 0
+/// for the first account. Spec: new accounts from `add_account`,
+/// `seed_accounts_if_empty` and `rescan_accounts` append at the end.
+fn next_sort_order(conn: &Connection) -> AppResult<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Existence check plus `INSERT`, run against a single already-locked
@@ -115,8 +134,8 @@ fn insert_account(conn: &rusqlite::Connection, account: &Account, canonical_str:
         )));
     }
     conn.execute(
-        "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at, sort_order)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             account.id,
             account.label,
@@ -124,7 +143,8 @@ fn insert_account(conn: &rusqlite::Connection, account: &Account, canonical_str:
             i64::from(account.enabled),
             account.disabled_reason.map(|r| r.as_str()),
             i64::from(account.is_default),
-            account.created_at
+            account.created_at,
+            account.sort_order
         ],
     )
     .map_err(|e| map_unique_violation(e, canonical_str))?;
@@ -134,7 +154,7 @@ fn insert_account(conn: &rusqlite::Connection, account: &Account, canonical_str:
 impl Store {
     pub fn list_accounts(&self) -> AppResult<Vec<Account>> {
         self.with_conn(|c| {
-            let sql = format!("SELECT {SELECT_COLS} FROM accounts {ORDER_D17}");
+            let sql = format!("SELECT {SELECT_COLS} FROM accounts {ORDER_ACCOUNTS}");
             let mut stmt = c.prepare(&sql)?;
             let rows = stmt
                 .query_map([], row_to_account)?
@@ -177,10 +197,13 @@ impl Store {
         is_default: bool,
         now: i64,
     ) -> AppResult<Account> {
-        let (account, canonical_str) =
-            build_account(config_dir, enabled, disabled_reason, is_default, now)?;
-        self.with_conn(|c| insert_account(c, &account, &canonical_str))?;
-        Ok(account)
+        self.with_conn(|c| {
+            let sort_order = next_sort_order(c)?;
+            let (account, canonical_str) =
+                build_account(config_dir, enabled, disabled_reason, is_default, sort_order, now)?;
+            insert_account(c, &account, &canonical_str)?;
+            Ok(account)
+        })
     }
 
     /// `enabled: false` sets `disabled_reason = user`; `enabled: true` clears it.
@@ -258,11 +281,28 @@ impl Store {
                 return Ok(0);
             }
 
-            let mut added = 0usize;
+            // Resolve `is_default` for every candidate first, then sort to
+            // D17 order (default first, then case-insensitive label) before
+            // handing out `sort_order` 0..n-1, so a fresh seed's manual
+            // order matches the order it always displayed in (spec D17,
+            // revised 2026-09-16).
+            let mut built: Vec<(Account, String)> = Vec::with_capacity(candidates.len());
             for cand in candidates {
                 let (mut account, canonical_str) =
-                    build_account(&cand.config_dir, true, None, false, now)?;
+                    build_account(&cand.config_dir, true, None, false, 0, now)?;
                 account.is_default = account.config_dir == default_canonical;
+                built.push((account, canonical_str));
+            }
+            built.sort_by(|(a, _), (b, _)| {
+                b.is_default
+                    .cmp(&a.is_default)
+                    .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+                    .then_with(|| a.label.cmp(&b.label))
+            });
+
+            let mut added = 0usize;
+            for (i, (mut account, canonical_str)) in built.into_iter().enumerate() {
+                account.sort_order = i as i64;
                 match insert_account(c, &account, &canonical_str) {
                     Ok(()) => added += 1,
                     Err(AppError::Duplicate(_)) => {}
@@ -303,6 +343,70 @@ impl Store {
             }
         }
         Ok(added)
+    }
+
+    /// Spec: manual account ordering. Assigns `sort_order` = position for
+    /// each id in `ids`, in one transaction; any account NOT in `ids` keeps
+    /// its relative order, appended after the listed ones. Returns the new
+    /// full list. Unknown id -> `NotFound`; a duplicate id in `ids` ->
+    /// `OutOfRange`.
+    pub fn reorder_accounts(&self, ids: &[String]) -> AppResult<Vec<Account>> {
+        let mut seen = HashSet::with_capacity(ids.len());
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                return Err(AppError::OutOfRange("duplicate id in order".to_string()));
+            }
+        }
+
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction()?;
+
+            for id in ids {
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM accounts WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                if exists == 0 {
+                    return Err(AppError::NotFound(format!("no such account: {id}")));
+                }
+            }
+
+            for (pos, id) in ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE accounts SET sort_order = ?2 WHERE id = ?1",
+                    params![id, pos as i64],
+                )?;
+            }
+
+            // Untouched accounts keep their relative order, appended after
+            // the listed ones. Their current `sort_order` still reflects
+            // their pre-reorder relative order (only listed rows were just
+            // rewritten), so ordering by it here is correct.
+            if !ids.is_empty() {
+                let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT id FROM accounts WHERE id NOT IN ({placeholders}) {ORDER_ACCOUNTS}"
+                );
+                let mut stmt = tx.prepare(&sql)?;
+                let bound: Vec<&dyn ToSql> = ids.iter().map(|s| s as &dyn ToSql).collect();
+                let others: Vec<String> = stmt
+                    .query_map(bound.as_slice(), |r| r.get(0))?
+                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+
+                for (next, id) in (ids.len() as i64..).zip(others) {
+                    tx.execute(
+                        "UPDATE accounts SET sort_order = ?2 WHERE id = ?1",
+                        params![id, next],
+                    )?;
+                }
+            }
+
+            tx.commit()?;
+            Ok(())
+        })?;
+
+        self.list_accounts()
     }
 }
 
@@ -405,7 +509,11 @@ mod tests {
     }
 
     #[test]
-    fn list_accounts_puts_the_default_first_then_labels_case_insensitively() {
+    fn add_account_appends_in_call_order_regardless_of_label_or_default() {
+        // D17 revised 2026-09-16: sort_order is authoritative once accounts
+        // exist, so add_account (which only ever appends) no longer
+        // resorts by label or is_default -- that would silently fight any
+        // manual order the user has set via reorder_accounts.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let zed = make_dir(tmp.path(), ".claudeZed");
@@ -422,7 +530,32 @@ mod tests {
             .into_iter()
             .map(|a| a.label)
             .collect();
-        assert_eq!(labels, vec!["claudeMain", "claudealpha", "claudeZed"]);
+        assert_eq!(labels, vec!["claudeZed", "claudealpha", "claudeMain"]);
+    }
+
+    #[test]
+    fn seeding_orders_the_default_first_even_when_its_label_sorts_last() {
+        // The D17 tiebreak (default first, then label) still governs a
+        // fresh seed, which has no manual order yet to respect.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in_memory().expect("open");
+        let zzz = make_dir(tmp.path(), ".claudeZzzDefault");
+        let aaa = make_dir(tmp.path(), ".claudeAaa");
+
+        store
+            .seed_accounts_if_empty(
+                &[candidate(&aaa, "claudeAaa"), candidate(&zzz, "claudeZzzDefault")],
+                &zzz,
+                NOW,
+            )
+            .expect("seed");
+
+        let accounts = store.list_accounts().expect("list");
+        assert_eq!(accounts[0].label, "claudeZzzDefault");
+        assert!(accounts[0].is_default);
+        assert_eq!(accounts[0].sort_order, 0);
+        assert_eq!(accounts[1].label, "claudeAaa");
+        assert_eq!(accounts[1].sort_order, 1);
     }
 
     #[test]
@@ -589,5 +722,85 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         let err = store.remove_account("nope").expect_err("must reject");
         assert_eq!(err.code(), "not_found");
+    }
+
+    fn seed_three(store: &Store, tmp: &std::path::Path) -> (String, String, String) {
+        let a = make_dir(tmp, ".claudeA");
+        let b = make_dir(tmp, ".claudeB");
+        let c = make_dir(tmp, ".claudeC");
+        let a = store.add_account(&a, true, None, false, NOW).expect("a").id;
+        let b = store.add_account(&b, true, None, false, NOW).expect("b").id;
+        let c = store.add_account(&c, true, None, false, NOW).expect("c").id;
+        (a, b, c)
+    }
+
+    #[test]
+    fn reorder_accounts_reorders_a_full_list() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in_memory().expect("open");
+        let (a, b, c) = seed_three(&store, tmp.path());
+
+        let result = store
+            .reorder_accounts(&[c.clone(), a.clone(), b.clone()])
+            .expect("reorder");
+        let ids: Vec<String> = result.into_iter().map(|acc| acc.id).collect();
+        assert_eq!(ids, vec![c.clone(), a.clone(), b.clone()]);
+
+        // Persisted, not just returned.
+        let relisted: Vec<String> = store
+            .list_accounts()
+            .expect("list")
+            .into_iter()
+            .map(|acc| acc.id)
+            .collect();
+        assert_eq!(relisted, vec![c, a, b]);
+    }
+
+    #[test]
+    fn reorder_accounts_with_a_partial_list_appends_the_untouched_accounts_after() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in_memory().expect("open");
+        let (a, b, c) = seed_three(&store, tmp.path());
+
+        // Only move c to the front; a and b are untouched and must keep
+        // their relative order (a before b), appended after c.
+        let result = store
+            .reorder_accounts(std::slice::from_ref(&c))
+            .expect("reorder");
+        let ids: Vec<String> = result.into_iter().map(|acc| acc.id).collect();
+        assert_eq!(ids, vec![c, a, b]);
+    }
+
+    #[test]
+    fn reorder_accounts_rejects_an_unknown_id_and_touches_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in_memory().expect("open");
+        let (a, b, c) = seed_three(&store, tmp.path());
+
+        let err = store
+            .reorder_accounts(&[c.clone(), "nope".to_string(), a.clone()])
+            .expect_err("must reject");
+        assert_eq!(err.code(), "not_found");
+
+        // Original order is untouched.
+        let ids: Vec<String> = store
+            .list_accounts()
+            .expect("list")
+            .into_iter()
+            .map(|acc| acc.id)
+            .collect();
+        assert_eq!(ids, vec![a, b, c]);
+    }
+
+    #[test]
+    fn reorder_accounts_rejects_a_duplicate_id_in_the_list() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in_memory().expect("open");
+        let (a, b, _c) = seed_three(&store, tmp.path());
+
+        let err = store
+            .reorder_accounts(&[a.clone(), b.clone(), a])
+            .expect_err("must reject");
+        assert_eq!(err.code(), "out_of_range");
     }
 }

@@ -141,7 +141,7 @@ dir.** No in-app OAuth. "Log in" opens a visible terminal with
 | D14 | Frontend testing: Vitest on pure helpers only. No E2E in v1 | Logic lives in Rust; the webview is presentational |
 | D15 | Child environment is **sanitised**: inherit the parent environment, remove every variable whose name starts with `ANTHROPIC_` or `CLAUDE_` (**compared case-insensitively** — Windows env names are case-insensitive), then set `CLAUDE_CONFIG_DIR` | An inherited `ANTHROPIC_API_KEY` would turn a guard miss into metered spend; `CLAUDE_CODE_USE_BEDROCK` etc. would change the auth path |
 | D16 | Per-account **failure backoff**: on the k-th consecutive non-`ok` outcome (k ≥ 1) set `next_allowed = now + min(900 s, 60 s × 2^(k−1))`; reset to zero on `ok`, manual refresh, account edit, or a change to a **polling-relevant** setting (`interval_secs`, `timeout_secs`, `claude_binary`) — `close_to_tray`, `launch_at_login`, `log_level` do not touch the scheduler | A logged-out account or missing binary must not write an identical failure row every cycle; fixing the binary path or interval is a deliberate "try again" |
-| D17 | Account order: default account first, then by label (case-insensitive). No manual reordering in v1 | YAGNI (drag-to-reorder cut in review) |
+| D17 | Account order is manual (drag-and-drop or Move up/down), persisted as `sort_order`; a fresh seed and new accounts append in default-first, label order | Owner request 2026-09-16 (supersedes the v1 YAGNI cut) |
 
 Defaults D9–D12 were chosen by the implementing agent and can be changed
 without architectural impact.
@@ -506,7 +506,8 @@ in `tauri::async_runtime::spawn_blocking` — the mutex is never held across an
 accounts(id TEXT PRIMARY KEY, label TEXT NOT NULL,
          config_dir TEXT NOT NULL UNIQUE,          -- canonicalised
          enabled INTEGER NOT NULL, disabled_reason TEXT,   -- NULL|user|guard_tripped
-         is_default INTEGER NOT NULL, created_at INTEGER NOT NULL)
+         is_default INTEGER NOT NULL, created_at INTEGER NOT NULL,
+         sort_order INTEGER NOT NULL DEFAULT 0)    -- V2; manual order, D17
 settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 snapshots(id INTEGER PRIMARY KEY,
           account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -520,15 +521,25 @@ CREATE INDEX snapshots_acct_time ON snapshots(account_id, taken_at DESC, id DESC
 CREATE INDEX snapshots_time ON snapshots(taken_at);
 ```
 
-Queries: `latest_per_account()` (max `taken_at`, tiebreak max `id`),
-`history(account_id, since)` → hourly buckets `[{t, pct}]` of
+Queries: `list_accounts()`/`enabled_account_ids()` order
+`ORDER BY sort_order ASC, is_default DESC, lower(label) ASC, label ASC`
+(`sort_order` is authoritative; the rest is a tiebreak, relevant only while
+rows share a `sort_order`). `latest_per_account()` (max `taken_at`, tiebreak
+max `id`), `history(account_id, since)` → hourly buckets `[{t, pct}]` of
 `max(week_all_pct)` over `ok` rows, **only for hours that have at least one
 row** (no zero-filling — the process gate guarantees overnight gaps, which
 must render as breaks, not crashes), `prune(now)` deletes rows with
 `taken_at < now − 30 d`, logs the count at WARN if > 0, then runs
 `PRAGMA incremental_vacuum` (D10). `record` in the machine resets an
 account's backoff on `ok`; `reset_all_backoff()` exists for the settings
-watch.
+watch. `reorder_accounts(ids)` assigns `sort_order` = position for each id
+in `ids`, in one transaction; any account not in `ids` keeps its relative
+order, appended after the listed ones; an unknown id is `NotFound`, a
+duplicate id in `ids` is `OutOfRange`. New accounts (`add_account`,
+`rescan_accounts`) get `sort_order = COALESCE(MAX(sort_order), -1) + 1`,
+i.e. they append; `seed_accounts_if_empty` assigns `sort_order` 0..n-1 in
+default-first, label order (D17) since a fresh seed has no manual order yet
+to respect.
 
 Settings keys: `interval_secs`, `timeout_secs`, `claude_binary` (override
 path or empty), `close_to_tray` (default true), `log_level`
@@ -612,7 +623,10 @@ Single window, dark/light follows OS.
   breaks, never zeros) · last updated ("42 s ago", live) · status pill. Pill precedence: `disabled` (with reason
   tooltip) > `backing off (next in 4 min)` > latest outcome (`ok` / `no data
   — log in?` / `parse error` / `spawn error` / `timeout` / `guard tripped`).
-- **Row actions**: enable/disable, rename, log in, remove.
+- **Row actions**: a drag handle (`aria-label="Drag to reorder"`) at the row
+  start for manual reordering (native HTML5 drag and drop; drop persists via
+  `reorder_accounts`), plus Move up/Move down buttons as a keyboard/no-mouse
+  fallback, enable/disable, rename, log in, remove.
 - **Settings**: interval, timeout, binary path (with "detected: <path>
   (<source>)"), add account by path, rescan profiles, close-to-tray, launch
   at login, debug logging, open log folder, retention note (30 d fixed).
@@ -632,6 +646,7 @@ Single window, dark/light follows OS.
 | `add_account` | `{config_dir}` → Account. Canonicalises; rejects missing dir (`not_found`) or duplicate (`duplicate`) |
 | `update_account` | `{id, label?, enabled?}` → Account. `enabled: false` sets `disabled_reason = user`; `enabled: true` clears it and triggers `AccountChanged` |
 | `remove_account` | `{id}` → () (cascades snapshots) |
+| `reorder_accounts` | `{ids: [String]}` → `[Account]` the new full list (D17, revised 2026-09-16). Unknown id → `not_found`; duplicate id in `ids` → `out_of_range` |
 | `rescan_profiles` | → `[Account]` newly added (disabled) |
 | `get_settings` / `set_settings` | user-facing settings struct (`interval_secs`, `timeout_secs`, `claude_binary`, `close_to_tray`, `launch_at_login`, `log_level`); clamps rejected with `out_of_range`; a change to `interval_secs`, `timeout_secs` or `claude_binary` publishes on the settings watch (moves the deadline, resets backoff per D16); changes to the other three keys are applied directly (log reload handle, autostart plugin, in-memory flag) and do **not** touch the watch. `polling_halted` is **not** part of this struct and writes to it do **not** touch the watch |
 | `clear_halt` | → () — clears `polling_halted` and logs WARN with the previous value. **Does not poll**: every quota-spending action stays a separate, explicit act (the user presses Refresh) |
@@ -673,11 +688,11 @@ Linux needs `libayatana-appindicator3-dev` for the tray.
 | runner | Envelope guard table in §6.3 order: turn-evidence cases (missing `local_command`, `local_command: "cost"`, `num_turns: 1`, **missing `local_command` AND missing `num_turns`** → still `guard_tripped`, **advisory rule in isolation: `local_command: "usage"` + `num_turns: 0` + `total_cost_usd: 0.01` → `guard_tripped`**, and the same with non-empty `modelUsage`); shape cases (non-JSON, `type: "system"`, `local_command: "usage"` with missing `num_turns`) → `spawn_error`; five consecutive unexpected-envelope errors escalate to `guard_tripped`; halt flag is persisted before the cycle abort (ordering test with a failing store after step 1); parser fixture for 12am/12pm; non-zero exit → `spawn_error`; exit 0 + non-JSON → `spawn_error`; timeout via a fake binary `src-tauri/src/bin/fake_claude.rs` (modes selected by env: slow / echo-env / emit-fixture; located in tests via `env!("CARGO_BIN_EXE_fake_claude")`, excluded from the shipped bundle) → `timeout` and the child is gone; exact argv constant; env sanitisation (ANTHROPIC_/CLAUDE_ vars removed, `CLAUDE_CONFIG_DIR` set) using a fake binary that echoes its env |
 | scheduler/machine | `Halted` beats every trigger incl. `Manual`; guard trip mid-cycle aborts the remaining accounts (polls made after the trip: zero); `NoEnabledAccounts` vs `AllBackedOff` distinguished; gate does not move on a skipped decision (final poll survives backoff); decision table for `Timer` (4 gate×running combos), busy precedes process check, `NoBinary` for every trigger, `Manual` and `Startup` ignore gate, `AccountChanged(ids)` runs `ids ∩ enabled`, `Timer` with `claude_running == None` → `Skip(GateIdle)`, final-poll-once property (running→stopped→stopped = exactly one Run), backoff schedule and reset rules, RAII token clears busy on drop (including panic via `catch_unwind`), `cycle_age` reporting |
 | discovery | Temp-home fixtures reproducing §2.3 (incl. exclusion of the `update-state.json`-only dir); label derivation; D17 ordering; binary precedence with a fake PATH; `.cmd` and `.bat` rejected on Windows (one extension check covers both); canonicalisation |
-| store | Migrations from empty; latest-per-account with same-ms tiebreak; hourly history buckets (only populated hours); prune at the 30 d boundary; **cascade on account removal (proves `foreign_keys=ON`)**; unique on canonical path; **`polling_halted` survives close + reopen of the store** |
+| store | Migrations from empty; **V1→V2 migration backfills `sort_order` in D17 order and is idempotent (each step's DDL + `user_version` bump in one transaction)**; latest-per-account with same-ms tiebreak; hourly history buckets (only populated hours); prune at the 30 d boundary; **cascade on account removal (proves `foreign_keys=ON`)**; unique on canonical path; **`polling_halted` survives close + reopen of the store**; **`reorder_accounts`: full reorder, partial list (untouched accounts appended after, keeping relative order), unknown id → `not_found`, duplicate id → `out_of_range`** |
 | process | `matches_claude` on synthetic (name, cmd) tuples: native, npm, unrelated node, excluded pid |
 | tray | `tray_state`: `Halted` beats everything; grey/green/amber/red thresholds, multi-account worst-of, per-model segments, `err` rendering |
-| commands | `add_account` rejects missing/duplicate; `set_settings` boundary values (10/3600, 5/120) accept, one-off values reject; `update_account` enable clears `disabled_reason`, disable sets `user`; `clear_halt` clears the flag, logs, and does not poll |
-| frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → separate sub-paths), status pill precedence |
+| commands | `add_account` rejects missing/duplicate; `set_settings` boundary values (10/3600, 5/120) accept, one-off values reject; `update_account` enable clears `disabled_reason`, disable sets `user`; `clear_halt` clears the flag, logs, and does not poll; **`core_reorder_accounts` persists the new order and rejects an unknown id** |
+| frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → separate sub-paths), status pill precedence; **`moveItem` pure helper (move down, move up, same-index no-op, out-of-range returns a copy unchanged)** |
 | scheduler/driver | Tokio-based: triggers during a cycle coalesce to one `Skip(Busy)` and never queue; two `AccountChanged` in quick succession poll both accounts; `clear_halt` does not start a poll; settings change moves the deadline without restarting the clock; watchdog aborts a deliberately hung cycle task and busy clears; shutdown kills a live fake child |
 | integration (manual, documented in README) | Real poll against `~/.claude3`; Git Bash hazard reproduction is **not** run (costs quota) |
 
@@ -713,9 +728,11 @@ build` green before any task is done.
 - Per-account process attribution (which config dir a running claude uses).
 - API-org usage/cost reporting (Admin API) — possible later add-on.
 - v1.1 candidates: threshold notifications, configurable retention, parsing
-  the "What's contributing" section, manual account reordering, npm-shim
-  support on Windows, Windows job object for child cleanup, wake-from-sleep
-  detection (immediate poll after resume), auto-update.
+  the "What's contributing" section, npm-shim support on Windows, Windows job
+  object for child cleanup, wake-from-sleep detection (immediate poll after
+  resume), auto-update. (Manual account reordering, cut from v1.1 here in
+  earlier review, was added to v1 at owner request 2026-09-16; see D17 and
+  the review log.)
 
 ## 14. Verified-facts ledger
 
@@ -767,3 +784,7 @@ Facts an implementer may rely on without re-testing, with the date verified:
   `machine.rs`; `DriverStatus` declared in §5.1 as the sole cross-task
   scheduler view) and 1 nit (backoff reset limited to polling-relevant
   settings). **Spec closed; implementation planning started.**
+- 2026-09-16: D17 revised — manual ordering added at owner request. Schema
+  bumped to V2 (`sort_order`, backfilled to the prior D17 order on upgrade);
+  `reorder_accounts` store method and command added; drag-and-drop plus
+  Move up/down in the UI.

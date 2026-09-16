@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::AppResult;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Spec 6.6. `auto_vacuum` is set first because SQLite only honours a change
 /// while the database is still empty.
@@ -46,15 +46,44 @@ CREATE INDEX snapshots_acct_time ON snapshots(account_id, taken_at DESC, id DESC
 CREATE INDEX snapshots_time ON snapshots(taken_at);
 "#;
 
-/// Migrate forward using `PRAGMA user_version`. Idempotent.
-pub fn migrate(conn: &Connection) -> AppResult<()> {
+/// V2 (spec D17 revised 2026-09-16): manual account ordering. Backfilled in
+/// one pass to the pre-existing D17 order (default first, then
+/// case-insensitive label) so a fresh migration never reorders anyone's
+/// accounts on upgrade.
+const V2_ALTER: &str = "ALTER TABLE accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;";
+
+const V2_BACKFILL: &str = r#"
+WITH ordered AS (
+  SELECT id, ROW_NUMBER() OVER (
+    ORDER BY is_default DESC, lower(label) ASC, label ASC
+  ) - 1 AS rn
+  FROM accounts
+)
+UPDATE accounts SET sort_order = (SELECT rn FROM ordered WHERE ordered.id = accounts.id);
+"#;
+
+/// Migrate forward using `PRAGMA user_version`. Idempotent. Each step's DDL
+/// (and any backfill) is wrapped with its `user_version` bump in one
+/// transaction, so a crash or a failed step can never leave the database
+/// declaring a version it hasn't fully reached.
+pub fn migrate(conn: &mut Connection) -> AppResult<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current < 1 {
-        conn.execute_batch(V1)?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(V1)?;
+        tx.execute_batch("PRAGMA user_version=1;")?;
+        tx.commit()?;
     }
-    if current < SCHEMA_VERSION {
-        conn.execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;
+
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V2_ALTER)?;
+        tx.execute_batch(V2_BACKFILL)?;
+        tx.execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;
+        tx.commit()?;
     }
+
     Ok(())
 }
 
@@ -99,7 +128,7 @@ mod tests {
     fn migrating_twice_is_a_no_op() {
         let store = Store::open_in_memory().expect("open");
         store
-            .with_conn(migrate)
+            .with_conn_mut(migrate)
             .expect("second migrate must succeed");
         let v: i64 = store
             .with_conn(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?))
@@ -152,6 +181,79 @@ mod tests {
             .with_conn(|c| Ok(c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?))
             .expect("read pragma");
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn migrating_an_empty_database_adds_the_sort_order_column() {
+        let store = Store::open_in_memory().expect("open");
+        let has_column: bool = store
+            .with_conn(|c| {
+                let mut stmt = c.prepare("PRAGMA table_info(accounts)")?;
+                let names = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+                Ok(names.iter().any(|n| n == "sort_order"))
+            })
+            .expect("table_info");
+        assert!(has_column, "sort_order column must exist after a fresh migration");
+    }
+
+    #[test]
+    fn migrating_from_a_v1_database_backfills_sort_order_in_d17_order_and_is_idempotent() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        apply_pragmas(&conn).expect("pragmas");
+        conn.execute_batch(V1).expect("create v1 schema by hand");
+        conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+
+        // Two accounts, inserted in an order that is NOT D17 order, exactly
+        // as a real V1 database (pre-sort_order) would contain them.
+        conn.execute(
+            "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+             VALUES ('bravo', 'Bravo', '/bravo', 1, NULL, 0, 100)",
+            [],
+        )
+        .expect("insert bravo");
+        conn.execute(
+            "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+             VALUES ('alpha', 'Alpha', '/alpha', 1, NULL, 1, 50)",
+            [],
+        )
+        .expect("insert alpha (default)");
+
+        migrate(&mut conn).expect("migrate v1 -> v2");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("read user_version");
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let ordered: Vec<(String, i64)> = conn
+            .prepare("SELECT id, sort_order FROM accounts ORDER BY sort_order ASC")
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<(String, i64)>, rusqlite::Error>>()
+            .expect("collect");
+        // 'alpha' is the default account, so D17 order puts it first.
+        assert_eq!(
+            ordered,
+            vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]
+        );
+
+        // A second migrate is a no-op: same version, same sort_order values.
+        migrate(&mut conn).expect("second migrate must succeed");
+        let version_again: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("read user_version");
+        assert_eq!(version_again, SCHEMA_VERSION);
+        let ordered_again: Vec<(String, i64)> = conn
+            .prepare("SELECT id, sort_order FROM accounts ORDER BY sort_order ASC")
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<(String, i64)>, rusqlite::Error>>()
+            .expect("collect");
+        assert_eq!(ordered_again, ordered);
     }
 
     #[test]

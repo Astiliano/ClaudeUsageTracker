@@ -24,9 +24,9 @@ impl Store {
         if let Some(parent) = path.parent() {
             crate::paths::ensure_dir(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         schema::apply_pragmas(&conn)?;
-        schema::migrate(&conn)?;
+        schema::migrate(&mut conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
         })
@@ -35,9 +35,9 @@ impl Store {
     /// Tests only in practice, but not gated on `cfg(test)` so integration
     /// tests can use it too.
     pub fn open_in_memory() -> AppResult<Store> {
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         schema::apply_pragmas(&conn)?;
-        schema::migrate(&conn)?;
+        schema::migrate(&mut conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
         })
