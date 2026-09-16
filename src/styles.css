@@ -77,7 +77,7 @@ input, select, button { font-family: inherit; }
 .btn-ghost { background: transparent; color: var(--muted-2); border: 1px solid var(--btn-border); }
 .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger-border); }
 .btn-danger:hover { background: var(--danger-hover-bg); color: #f3a79d; }
-.btn-link { background: transparent; color: var(--muted); border: none; }
+.btn-link { font-family: var(--mono); font-size: 11px; color: var(--muted); background: transparent; border: none; cursor: pointer; padding: 0; }
 .btn-link:hover { background: transparent; color: #dde2e6; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
