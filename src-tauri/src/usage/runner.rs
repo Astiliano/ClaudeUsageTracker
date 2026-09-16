@@ -142,6 +142,15 @@ pub struct RunResult {
     pub duration_ms: u32,
 }
 
+/// Decode a child's captured pipe bytes losslessly-where-possible: invalid
+/// UTF-8 becomes `U+FFFD` per byte-sequence rather than discarding the whole
+/// buffer. `read_to_string` would instead fail outright on the first bad
+/// byte and hand back an empty buffer, turning one stray byte into a bogus
+/// unclassifiable-envelope result.
+fn decode_lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 fn tail(s: &str) -> String {
     if s.len() <= TAIL_BYTES {
         return s.trim().to_string();
@@ -244,15 +253,15 @@ pub async fn run_usage(
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let reader = tokio::spawn(async move {
-        let mut out = String::new();
-        let mut err = String::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
         if let Some(p) = stdout_pipe.as_mut() {
-            let _ = p.read_to_string(&mut out).await;
+            let _ = p.read_to_end(&mut out).await;
         }
         if let Some(p) = stderr_pipe.as_mut() {
-            let _ = p.read_to_string(&mut err).await;
+            let _ = p.read_to_end(&mut err).await;
         }
-        (out, err)
+        (decode_lossy(&out), decode_lossy(&err))
     });
 
     let waited = tokio::select! {
@@ -291,13 +300,14 @@ pub async fn run_usage(
         Some(Ok(Ok(s))) => s,
     };
 
-    // The child has exited on its own; leave `pid_slot` published rather than
-    // zeroing it here. It is only ever cleared above, on the paths where we
-    // kill the child ourselves — a pid that exited naturally is a harmless
-    // stale exclude-hint until the next spawn overwrites it, whereas zeroing
-    // it here would make the process gate blind between "child exited" and
-    // "caller inspected the result".
+    // The child has exited on its own (not via our kill paths above, which
+    // already clear the slot). Clear it here too, once output has been
+    // collected: `pid_slot` is a "this pid is one of ours, still alive"
+    // exclude-hint for the process gate, and a pid that has already exited
+    // can be recycled by the OS for an unrelated process, so it must not
+    // linger published after run_usage has finished with it.
     let (stdout, stderr) = reader.await.unwrap_or_else(|_| (String::new(), String::new()));
+    pid_slot.store(0, Ordering::SeqCst);
 
     if !status.success() {
         let code = status
@@ -343,6 +353,20 @@ pub async fn run_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_utf8_decodes_lossily_and_keeps_the_surrounding_bytes() {
+        let mut bytes = b"before-".to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b"-after");
+        let decoded = decode_lossy(&bytes);
+        assert!(decoded.contains("before-"), "{decoded:?}");
+        assert!(decoded.contains("-after"), "{decoded:?}");
+        assert!(
+            decoded.contains('\u{FFFD}'),
+            "the invalid byte must become the replacement character: {decoded:?}"
+        );
+    }
 
     fn tripped(v: &GuardVerdict) -> &str {
         match v {

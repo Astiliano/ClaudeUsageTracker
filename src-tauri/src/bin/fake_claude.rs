@@ -51,8 +51,14 @@ fn main() {
             print_line(&usage_envelope(&args.join("\u{1f}")));
         }
         "echo-env" => {
+            // CUT_TEST_ is an extra prefix, only ever set by our own test
+            // harness, so a test can plant a sentinel that survives the
+            // ANTHROPIC_/CLAUDE_ strip and prove the runner sanitises by
+            // removing specific names rather than wiping the environment.
             let mut lines: Vec<String> = std::env::vars()
-                .filter(|(k, _)| k.starts_with("ANTHROPIC_") || k.starts_with("CLAUDE_"))
+                .filter(|(k, _)| {
+                    k.starts_with("ANTHROPIC_") || k.starts_with("CLAUDE_") || k.starts_with("CUT_TEST_")
+                })
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
             lines.sort();

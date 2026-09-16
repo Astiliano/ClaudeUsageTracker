@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
@@ -17,6 +18,43 @@ fn now() -> chrono::DateTime<chrono::Utc> {
         .expect("fixed instant")
 }
 
+/// Every test in this file either sets process-wide env vars to configure
+/// the fake binary, or calls `run_usage`, which reads `std::env::vars()`.
+/// Both race under cargo's default multithreaded test harness, so every
+/// test acquires this lock for its whole body. `EnvGuard` also removes every
+/// variable it set (via `Drop`, before the lock itself is released), so no
+/// test leaks env state into whichever test acquires the lock next. This is
+/// what makes an ordinary parallel `cargo test` run reliable for this file.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    keys: Vec<String>,
+}
+
+impl EnvGuard {
+    fn acquire() -> Self {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        EnvGuard {
+            _lock,
+            keys: Vec::new(),
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &str) {
+        std::env::set_var(key, value);
+        self.keys.push(key.to_string());
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for key in &self.keys {
+            std::env::remove_var(key);
+        }
+    }
+}
+
 async fn run_with(
     mode: &str,
     extra: &[(&str, &str)],
@@ -25,10 +63,13 @@ async fn run_with(
     config_dir: &Path,
 ) -> RunResult {
     // The fake binary is configured through the parent environment, exactly
-    // as the real child inherits it.
-    std::env::set_var("FAKE_CLAUDE_MODE", mode);
+    // as the real child inherits it. `_env` holds the shared lock for this
+    // whole call and cleans up every variable it set before it releases the
+    // lock on drop, at the end of this function.
+    let mut _env = EnvGuard::acquire();
+    _env.set("FAKE_CLAUDE_MODE", mode);
     for (k, v) in extra {
-        std::env::set_var(k, v);
+        _env.set(k, v);
     }
     let pid = AtomicU32::new(0);
     let cancel = CancellationToken::new();
@@ -86,6 +127,13 @@ async fn the_child_environment_is_sanitised_and_the_config_dir_is_set() {
             ("ANTHROPIC_API_KEY", "leaked-key"),
             ("CLAUDE_CODE_USE_BEDROCK", "1"),
             ("CLAUDE_CONFIG_DIR", "/wrong/dir"),
+            // fake_claude's echo-env mode also echoes CUT_TEST_-prefixed
+            // names. env_names_to_strip only removes ANTHROPIC_/CLAUDE_
+            // names, so this sentinel must survive: it is what proves the
+            // runner does a *targeted* removal rather than wiping the whole
+            // environment (an env_clear() implementation would pass every
+            // other assertion in this test but drop this one).
+            ("CUT_TEST_SENTINEL", "1"),
         ],
         Duration::from_secs(20),
         tmp.path(),
@@ -120,6 +168,10 @@ async fn the_child_environment_is_sanitised_and_the_config_dir_is_set() {
     assert!(lines
         .iter()
         .any(|l| l == &format!("CLAUDE_CONFIG_DIR={}", cfg.display())));
+    assert!(
+        lines.iter().any(|l| l == "CUT_TEST_SENTINEL=1"),
+        "an unrelated variable must survive the strip: {lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -185,6 +237,7 @@ async fn exit_zero_with_non_json_stdout_is_a_spawn_error() {
 #[tokio::test]
 async fn a_missing_binary_is_a_spawn_error() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    let _env = EnvGuard::acquire();
     let pid = AtomicU32::new(0);
     let cancel = CancellationToken::new();
     let r = run_usage(
@@ -291,8 +344,9 @@ async fn a_not_logged_in_cost_summary_is_no_usage_data() {
 #[tokio::test]
 async fn cancelling_kills_the_child_promptly() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("FAKE_CLAUDE_MODE", "slow");
-    std::env::set_var("FAKE_CLAUDE_SLEEP_SECS", "60");
+    let mut env = EnvGuard::acquire();
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "60");
     let pid = AtomicU32::new(0);
     let cancel = CancellationToken::new();
     let child_cancel = cancel.clone();
@@ -325,9 +379,75 @@ async fn cancelling_kills_the_child_promptly() {
 
 #[tokio::test]
 async fn the_child_pid_is_published_for_the_process_gate() {
+    // Pins the real invariant: `pid_slot` is published WHILE the child is
+    // alive (so the process gate can exclude it), and cleared once
+    // `run_usage` is done with it. A prior version of this test only
+    // checked the slot after `run_usage` had already returned, which could
+    // not distinguish "published while alive, then cleared" from "never
+    // published at all" — both read back as zero afterwards.
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("FAKE_CLAUDE_MODE", "emit");
-    std::env::set_var("FAKE_CLAUDE_STDOUT", r#"{"type":"result"}"#);
+    let mut env = EnvGuard::acquire();
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "60");
+
+    let pid = AtomicU32::new(0);
+    let cancel = CancellationToken::new();
+    let bin = fake();
+
+    let run_fut = run_usage(
+        &bin,
+        tmp.path(),
+        tmp.path(),
+        Duration::from_secs(120),
+        now(),
+        &pid,
+        &cancel,
+        false,
+    );
+
+    let mut observed_nonzero = false;
+    let watch_and_cancel = async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if pid.load(Ordering::SeqCst) != 0 {
+                observed_nonzero = true;
+                cancel.cancel();
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+
+    let (r, ()) = tokio::join!(run_fut, watch_and_cancel);
+
+    assert!(
+        observed_nonzero,
+        "the runner must publish the child pid while it is alive"
+    );
+    assert_eq!(
+        pid.load(Ordering::SeqCst),
+        0,
+        "the pid must be cleared once run_usage has finished with the child"
+    );
+    match &r.outcome {
+        PollOutcome::SpawnError(m) => assert!(m.contains("cancelled"), "{m}"),
+        other => panic!("expected SpawnError(cancelled), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_child_pid_is_cleared_after_a_natural_successful_exit() {
+    // Complements the cancellation-path test above: this exercises the
+    // ordinary, most-common case — the child exits on its own, nothing
+    // killed it — and pins the exact fix (runner.rs clears `pid_slot` right
+    // after collecting output on that path, not only on the kill paths).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut env = EnvGuard::acquire();
+    env.set("FAKE_CLAUDE_MODE", "emit");
+    env.set("FAKE_CLAUDE_STDOUT", r#"{"type":"result"}"#);
     let pid = AtomicU32::new(0);
     let cancel = CancellationToken::new();
     let _ = run_usage(
@@ -341,15 +461,16 @@ async fn the_child_pid_is_published_for_the_process_gate() {
         false,
     )
     .await;
-    assert_ne!(
-        pid.load(std::sync::atomic::Ordering::SeqCst),
+    assert_eq!(
+        pid.load(Ordering::SeqCst),
         0,
-        "the runner must publish the child pid"
+        "a pid that exited on its own must not linger published after run_usage returns"
     );
 }
 
 #[test]
 fn the_unexpected_envelope_prefix_is_shared_between_guard_and_predicate() {
+    let _env = EnvGuard::acquire();
     let v = check_envelope("not json");
     match v {
         GuardVerdict::Shape(m) => assert!(is_unexpected_envelope(&m)),
