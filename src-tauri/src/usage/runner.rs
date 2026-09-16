@@ -119,6 +119,227 @@ pub fn env_names_to_strip(names: impl Iterator<Item = String>) -> Vec<String> {
     out
 }
 
+use chrono::{DateTime, Utc};
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info};
+
+use super::{parser::parse_usage, PollOutcome};
+
+/// Longest stderr / stdout tail kept in a spawn error message.
+const TAIL_BYTES: usize = 2048;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunResult {
+    pub outcome: PollOutcome,
+    /// D8: kept for every outcome, success or failure.
+    pub raw: Option<String>,
+    pub duration_ms: u32,
+}
+
+fn tail(s: &str) -> String {
+    if s.len() <= TAIL_BYTES {
+        return s.trim().to_string();
+    }
+    let start = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|i| *i >= s.len() - TAIL_BYTES)
+        .unwrap_or(0);
+    s[start..].trim().to_string()
+}
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Spawn the CLI directly — never through a shell — with the D15 sanitised
+/// environment, and classify the envelope it returns.
+///
+/// Spec resolution: spec 6.5 sketches a `Mutex<Option<Child>>` shared with the
+/// driver, but awaiting the child's exit while holding that mutex would
+/// deadlock the shutdown path that wants the same mutex to kill it. The cycle
+/// task therefore owns the `Child` outright and shutdown reaches it by
+/// cancelling `cancel`. The child is still only ever killed through its
+/// handle; `pid_slot` exists solely so the process gate can exclude it.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_usage(
+    binary: &Path,
+    config_dir: &Path,
+    cwd: &Path,
+    timeout: Duration,
+    now: DateTime<Utc>,
+    pid_slot: &AtomicU32,
+    cancel: &CancellationToken,
+    log_env_at_info: bool,
+) -> RunResult {
+    let started = Instant::now();
+    let timeout_secs = timeout.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
+
+    let finish = |outcome: PollOutcome, raw: Option<String>, started: Instant| RunResult {
+        outcome,
+        raw,
+        duration_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+    };
+
+    if let Err(e) = crate::paths::ensure_dir(cwd) {
+        return finish(
+            PollOutcome::SpawnError(format!("could not prepare poll cwd: {e}")),
+            None,
+            started,
+        );
+    }
+
+    let mut cmd = Command::new(binary);
+    cmd.args(USAGE_ARGV)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    // D15: strip, then set.
+    let stripped = env_names_to_strip(std::env::vars().map(|(k, _)| k));
+    for name in &stripped {
+        cmd.env_remove(name);
+    }
+    cmd.env("CLAUDE_CONFIG_DIR", config_dir);
+    if log_env_at_info {
+        info!(stripped = ?stripped, config_dir = %config_dir.display(), "sanitised child environment");
+    } else {
+        debug!(stripped = ?stripped, config_dir = %config_dir.display(), "sanitised child environment");
+    }
+
+    #[cfg(windows)]
+    {
+        // `creation_flags` is inherent on tokio's Command, so the std
+        // `CommandExt` trait must NOT be imported here: it would be an unused
+        // import and `-D warnings` would reject it. (login.rs does need it,
+        // because that one drives a std::process::Command.)
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return finish(
+                PollOutcome::SpawnError(format!(
+                    "could not spawn {}: {e}",
+                    binary.display()
+                )),
+                None,
+                started,
+            )
+        }
+    };
+
+    pid_slot.store(child.id().unwrap_or(0), Ordering::SeqCst);
+
+    // Drain the pipes concurrently so a chatty child cannot fill a buffer and
+    // deadlock the wait below.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let reader = tokio::spawn(async move {
+        let mut out = String::new();
+        let mut err = String::new();
+        if let Some(p) = stdout_pipe.as_mut() {
+            let _ = p.read_to_string(&mut out).await;
+        }
+        if let Some(p) = stderr_pipe.as_mut() {
+            let _ = p.read_to_string(&mut err).await;
+        }
+        (out, err)
+    });
+
+    let waited = tokio::select! {
+        r = tokio::time::timeout(timeout, child.wait()) => Some(r),
+        _ = cancel.cancelled() => None,
+    };
+
+    let status = match waited {
+        None => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            pid_slot.store(0, Ordering::SeqCst);
+            reader.abort();
+            return finish(
+                PollOutcome::SpawnError("cancelled during shutdown".into()),
+                None,
+                started,
+            );
+        }
+        Some(Err(_elapsed)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            pid_slot.store(0, Ordering::SeqCst);
+            reader.abort();
+            return finish(PollOutcome::Timeout(timeout_secs), None, started);
+        }
+        Some(Ok(Err(e))) => {
+            pid_slot.store(0, Ordering::SeqCst);
+            reader.abort();
+            return finish(
+                PollOutcome::SpawnError(format!("could not wait for child: {e}")),
+                None,
+                started,
+            );
+        }
+        Some(Ok(Ok(s))) => s,
+    };
+
+    // The child has exited on its own; leave `pid_slot` published rather than
+    // zeroing it here. It is only ever cleared above, on the paths where we
+    // kill the child ourselves — a pid that exited naturally is a harmless
+    // stale exclude-hint until the next spawn overwrites it, whereas zeroing
+    // it here would make the process gate blind between "child exited" and
+    // "caller inspected the result".
+    let (stdout, stderr) = reader.await.unwrap_or_else(|_| (String::new(), String::new()));
+
+    if !status.success() {
+        let code = status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        let detail = if stderr.trim().is_empty() {
+            tail(&stdout)
+        } else {
+            tail(&stderr)
+        };
+        return finish(
+            PollOutcome::SpawnError(format!("exit {code}: {detail}")),
+            Some(stdout.trim().to_string()),
+            started,
+        );
+    }
+
+    // D8: the raw envelope, trimmed of the trailing newline the CLI (and the
+    // fake binary's `writeln!`) always emits — the stored/compared raw text
+    // is the envelope itself, not incidental trailing whitespace.
+    let raw = Some(stdout.trim().to_string());
+    match check_envelope(&stdout) {
+        // Deliberately silent. Spec 6.3 fixes the trip order as: persist the
+        // halt flag, THEN log the raw envelope, then persist the outcome. If
+        // this arm logged, the ERROR line would appear before the flag
+        // reached disk and the log would misreport the ordering. The single
+        // trip log site is `StoreHalt::log_envelope` in the driver, which
+        // receives this exact stdout through `RunResult::raw`.
+        GuardVerdict::Tripped(reason) => {
+            finish(PollOutcome::GuardTripped(reason), raw, started)
+        }
+        GuardVerdict::Shape(reason) => {
+            finish(PollOutcome::SpawnError(reason), raw, started)
+        }
+        GuardVerdict::Usage(text) => {
+            debug!(result_len = text.len(), "usage envelope accepted");
+            finish(parse_usage(&text, now), raw, started)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
