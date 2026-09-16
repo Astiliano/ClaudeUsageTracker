@@ -18,7 +18,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::commands::{Core, SharedCore};
+use crate::commands::{lock_binary, Core, SharedCore};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
@@ -129,11 +129,25 @@ pub fn run() {
                 // this snapshot (spec 5.1); everything else only reads it.
                 status: Arc::new(Mutex::new(DriverStatus::default())),
                 binary: Arc::new(Mutex::new(None)),
+                halt_latched: AtomicBool::new(false),
+                // Seeded here so the window-close handler never reads the
+                // store; `core_set_settings` keeps it in step.
+                close_to_tray: AtomicBool::new(stored.close_to_tray),
                 settings_tx,
                 log,
                 app_data_dir,
                 log_dir,
             });
+            // Resolve the binary once, before anything can be asked about
+            // it. Until the driver's first `refresh_binary` the slot would
+            // otherwise be empty, and a Refresh click in that window answers
+            // `skipped:no_binary` even on a perfectly healthy install.
+            commands::seed_binary_slot(&core.binary, &stored.claude_binary);
+            info!(
+                binary = ?lock_binary(&core.binary).as_ref().map(|(p, _)| p.clone()),
+                "binary slot seeded"
+            );
+
             app.manage(Arc::clone(&core));
 
             // Tray. `tauri.conf.json` must NOT declare `app.trayIcon`: Tauri's
@@ -163,10 +177,21 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     MENU_OPEN => show_main_window(app),
                     MENU_REFRESH => {
-                        match commands::core_poll_now(&menu_core) {
-                            Ok(s) => info!(result = %s, "tray refresh"),
-                            Err(e) => error!(error = %e, "tray refresh failed"),
-                        };
+                        // `core_poll_now` reads the store, so it takes the
+                        // same `blocking` hop the command wrapper takes: a
+                        // contended read parks for up to `busy_timeout`, and
+                        // this handler runs on the UI thread.
+                        let poll_core = Arc::clone(&menu_core);
+                        tauri::async_runtime::spawn(async move {
+                            let result = commands::blocking(move || {
+                                commands::core_poll_now(&poll_core)
+                            })
+                            .await;
+                            match result {
+                                Ok(s) => info!(result = %s, "tray refresh"),
+                                Err(e) => error!(error = %e, "tray refresh failed"),
+                            }
+                        });
                     }
                     MENU_LOGS => {
                         use tauri_plugin_opener::OpenerExt;
@@ -219,10 +244,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
+                // Atomic only: a synchronous store read here would freeze
+                // the window for as long as the connection mutex is held.
                 let close_to_tray = app
                     .try_state::<SharedCore>()
-                    .and_then(|c| c.store.stored_settings().ok())
-                    .map(|s| s.close_to_tray)
+                    .map(|c| c.close_to_tray.load(Ordering::SeqCst))
                     .unwrap_or(true);
                 if should_hide_on_close(close_to_tray) {
                     api.prevent_close();

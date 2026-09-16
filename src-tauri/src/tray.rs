@@ -170,6 +170,7 @@ pub fn should_hide_on_close(close_to_tray: bool) -> bool {
 }
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::image::Image;
 use tracing::warn;
@@ -193,6 +194,13 @@ fn halted_fail_closed(result: AppResult<Option<String>>) -> bool {
     }
 }
 
+/// The tray's view of the halt, which is the same `latch || stored` rule the
+/// driver and the commands use: a guard trip whose store write failed has
+/// still stopped polling, so the icon must not stay green over it (F1).
+fn tray_halted(latched: bool, stored: AppResult<Option<String>>) -> bool {
+    latched || halted_fail_closed(stored)
+}
+
 /// Recomputes the level and tooltip from the store and pushes them onto the
 /// tray icon. Called after each account's poll (from the driver) and after
 /// every mutating command (account/settings/halt changes) so the icon never
@@ -200,11 +208,12 @@ fn halted_fail_closed(result: AppResult<Option<String>>) -> bool {
 /// so the async runtime worker never blocks on the connection mutex.
 pub async fn apply_tray(app: &tauri::AppHandle, core: &Core) {
     let store = Arc::clone(&core.store);
+    let latched = core.halt_latched.load(Ordering::SeqCst);
     let fetched: AppResult<(Vec<Account>, HashMap<String, SnapshotDto>, bool)> =
         blocking(move || {
             let accounts = store.list_accounts()?;
             let latest = store.latest_per_account()?;
-            let halted = halted_fail_closed(store.polling_halted());
+            let halted = tray_halted(latched, store.polling_halted());
             Ok((accounts, latest, halted))
         })
         .await;
@@ -555,6 +564,13 @@ mod tests {
     #[test]
     fn a_present_halt_value_is_halted() {
         assert!(halted_fail_closed(Ok(Some("guard_tripped:1".to_string()))));
+    }
+
+    #[test]
+    fn an_unpersisted_latch_still_shows_the_tray_as_halted() {
+        assert!(tray_halted(true, Ok(None)));
+        assert!(!tray_halted(false, Ok(None)));
+        assert!(tray_halted(false, Ok(Some("guard_tripped:1".to_string()))));
     }
 
     #[test]

@@ -38,6 +38,18 @@ impl Triggers {
         self.changed.notify_one();
     }
 
+    /// Puts ids back into the set without arming the notification. Used by
+    /// the driver when a drained `AccountChanged` decision was skipped: the
+    /// ids must survive, but re-notifying would spin the select loop, so the
+    /// driver's deferred flag re-arms them at the next flush point instead.
+    pub fn defer_changed(&self, ids: Vec<String>) {
+        let mut set = self
+            .changed_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        set.extend(ids);
+    }
+
     pub async fn notified_manual(&self) {
         self.manual.notified().await;
     }
@@ -95,6 +107,27 @@ mod tests {
         drained.sort();
         assert_eq!(drained, vec!["a".to_string(), "b".to_string()]);
         assert!(t.take_changed().is_empty(), "draining clears the set");
+    }
+
+    #[tokio::test]
+    async fn deferring_ids_keeps_them_without_arming_the_notification() {
+        let t = Arc::new(Triggers::new());
+        t.account_changed(vec!["a".into()]);
+        tokio::time::timeout(Duration::from_millis(200), t.notified_changed())
+            .await
+            .expect("notification");
+        let drained = t.take_changed();
+        assert_eq!(drained, vec!["a".to_string()]);
+
+        t.defer_changed(drained);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), t.notified_changed())
+                .await
+                .is_err(),
+            "deferring must not re-arm the notification; that would spin the driver loop"
+        );
+        assert_eq!(t.take_changed(), vec!["a".to_string()], "the id survived");
     }
 
     #[tokio::test]

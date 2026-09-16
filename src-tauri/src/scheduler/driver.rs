@@ -119,6 +119,37 @@ pub fn perform_halt<S: HaltSink>(sink: &S, now_ms: i64, raw: &str, reason: &str)
     Ok(())
 }
 
+/// Re-arms a deferred `AccountChanged` notification. The ids themselves are
+/// still accumulated inside `Triggers`; only the notification permit was
+/// consumed, so an empty `account_changed` is what carries them into the next
+/// decision. Called at every point where the reason for deferring has just
+/// gone away: a cycle ending normally, a cycle reaped by the watchdog, and a
+/// cycle reaped by the backstop.
+fn flush_deferred_changes(core: &Core, deferred: &mut bool) {
+    if *deferred {
+        *deferred = false;
+        core.triggers.account_changed(Vec::new());
+    }
+}
+
+/// Arms the in-memory halt latch and then runs the four halt steps.
+///
+/// The latch is raised *before* the `blocking` hop that persists the flag,
+/// because the persist can fail: without it `Driver::halted` would re-read
+/// `polling_halted`, get `None`, and poll the very account whose envelope
+/// just tripped the quota guard — with `disable_account` never having run
+/// either. A store write that fails is logged and the cycle is abandoned
+/// exactly as before; the difference is only that polling stays closed.
+async fn arm_and_perform_halt<S>(core: &Arc<Core>, sink: S, now_ms: i64, raw: String, reason: String)
+where
+    S: HaltSink + Send + 'static,
+{
+    core.halt_latched.store(true, Ordering::SeqCst);
+    if let Err(e) = blocking(move || perform_halt(&sink, now_ms, &raw, &reason)).await {
+        error!(error = %e, "could not fully record the guard trip");
+    }
+}
+
 /// Bundle passed into a cycle task, so the task owns everything it needs.
 struct CycleInputs {
     core: Arc<Core>,
@@ -277,12 +308,7 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
                 .raw
                 .clone()
                 .unwrap_or_else(|| "<no stdout captured>".to_string());
-            let reason_for_log = reason.clone();
-            if let Err(e) =
-                blocking(move || perform_halt(&sink, taken_at, &envelope, &reason_for_log)).await
-            {
-                error!(error = %e, "could not fully record the guard trip");
-            }
+            arm_and_perform_halt(&core, sink, taken_at, envelope, reason).await;
             events.usage_updated(&account_id);
             events.refresh_tray();
             events.cycle_finished();
@@ -490,6 +516,12 @@ impl Driver {
     /// An unreadable halt flag is treated as halted: the flag is the safety
     /// property, so the fail-closed answer is the only safe one.
     async fn halted(&self) -> bool {
+        // A latched halt is authoritative on its own: it is raised before the
+        // persist is attempted, so it covers the window in which the store
+        // write has failed and `polling_halted` still reads `None` (F1).
+        if self.core.halt_latched.load(Ordering::SeqCst) {
+            return true;
+        }
         let core = Arc::clone(&self.core);
         match blocking(move || core.store.polling_halted()).await {
             Ok(v) => v.is_some(),
@@ -507,6 +539,54 @@ impl Driver {
             Err(e) => {
                 error!(error = %e, "could not list enabled accounts");
                 Vec::new()
+            }
+        }
+    }
+
+    /// One `AccountChanged` notification.
+    ///
+    /// Draining is what consumes the ids, so it must not happen when the
+    /// decision is already known to be `Skip(Busy)`: the ids would be thrown
+    /// away and a just-enabled account would wait for the gate to open. The
+    /// same is true of *every other* skip — halted, no binary, no enabled
+    /// accounts — where the ids have already been drained into the trigger, so
+    /// those are put straight back.
+    ///
+    /// They are put back silently. Re-notifying here instead would spin the
+    /// select loop: the permit would be pending again on the next iteration,
+    /// which would drain, skip and re-notify, once per iteration, with a
+    /// store read each time. `deferred` is therefore what carries them, and
+    /// `flush_deferred_changes` re-arms the notification at the next point
+    /// where a decision can actually succeed.
+    async fn handle_account_changed(
+        &self,
+        settings: &UserSettings,
+        done_tx: &UnboundedSender<u64>,
+        deferred: &mut bool,
+    ) -> Option<LiveCycle> {
+        if lock_machine(&self.machine).is_busy() {
+            *deferred = true;
+            debug!("account change deferred until the running cycle ends");
+            return None;
+        }
+        // The permit and the id set are independent, so the set is drained
+        // only after the permit has been consumed, and an empty drain is a
+        // no-op rather than a decision.
+        let ids = self.core.triggers.take_changed();
+        if ids.is_empty() {
+            return None;
+        }
+        let restore = ids.clone();
+        match self
+            .decide_and_maybe_run(Trigger::AccountChanged(ids), None, settings, done_tx)
+            .await
+        {
+            Some(cycle) => Some(cycle),
+            None => {
+                self.core.triggers.defer_changed(restore);
+                *deferred = true;
+                debug!("account change skipped; its ids stay deferred");
+                None
             }
         }
     }
@@ -627,12 +707,7 @@ impl Driver {
                 lock_status(&self.core.status).stalled_at = None;
                 // The token has dropped, so busy is false again.
                 self.publish();
-                if changed_deferred {
-                    changed_deferred = false;
-                    // The ids are still accumulated in `Triggers`; this only
-                    // re-arms the notification that carries them.
-                    self.core.triggers.account_changed(Vec::new());
-                }
+                flush_deferred_changes(&self.core, &mut changed_deferred);
             }
 
             let deadline_ms = deadline_for(last_cycle_end, settings.interval_secs);
@@ -697,33 +772,11 @@ impl Driver {
                     }
                 }
                 _ = self.core.triggers.notified_changed() => {
-                    // Draining is what consumes the ids, so it must not happen
-                    // when the decision is already known to be `Skip(Busy)`:
-                    // the ids would be thrown away and a just-enabled account
-                    // would wait for the gate to open. Leave them accumulated
-                    // and re-notify when the cycle ends.
-                    if lock_machine(&self.machine).is_busy() {
-                        changed_deferred = true;
-                        debug!("account change deferred until the running cycle ends");
-                    } else {
-                        // The permit and the id set are independent, so the
-                        // set is drained only after the permit has been
-                        // consumed, and an empty drain is a no-op rather than
-                        // a decision.
-                        let ids = self.core.triggers.take_changed();
-                        if !ids.is_empty() {
-                            if let Some(cycle) = self
-                                .decide_and_maybe_run(
-                                    Trigger::AccountChanged(ids),
-                                    None,
-                                    &settings,
-                                    &done_tx,
-                                )
-                                .await
-                            {
-                                live = Some(cycle);
-                            }
-                        }
+                    if let Some(cycle) = self
+                        .handle_account_changed(&settings, &done_tx, &mut changed_deferred)
+                        .await
+                    {
+                        live = Some(cycle);
                     }
                 }
                 finished = done_rx.recv() => {
@@ -735,10 +788,7 @@ impl Driver {
                         last_cycle_end = chrono::Utc::now().timestamp_millis();
                         lock_status(&self.core.status).stalled_at = None;
                         self.publish();
-                        if changed_deferred {
-                            changed_deferred = false;
-                            self.core.triggers.account_changed(Vec::new());
-                        }
+                        flush_deferred_changes(&self.core, &mut changed_deferred);
                     }
                 }
                 _ = watchdog.tick(), if cycle_running => {
@@ -797,10 +847,10 @@ impl Driver {
                                 // woken by `poller:stalled` reads the settled
                                 // state rather than the stale one.
                                 self.events.poller_stalled(at, age_ms);
-                                if changed_deferred {
-                                    changed_deferred = false;
-                                    self.core.triggers.account_changed(Vec::new());
-                                }
+                                flush_deferred_changes(
+                                    &self.core,
+                                    &mut changed_deferred,
+                                );
                             }
                         }
                     }
@@ -838,6 +888,193 @@ mod tests {
     use crate::error::AppError;
     use crate::usage::UNEXPECTED_ENVELOPE_PREFIX;
     use std::cell::RefCell;
+
+    // ---- shared fixtures for the loop-level tests -------------------------
+
+    struct SilentEvents;
+    impl EventSink for SilentEvents {
+        fn usage_updated(&self, _account_id: &str) {}
+        fn cycle_finished(&self) {}
+        fn gate_changed(&self, _gate: &str) {}
+        fn poller_stalled(&self, _at: i64, _cycle_age_ms: u64) {}
+        fn refresh_tray(&self) {}
+    }
+
+    struct IdleProcess;
+    impl ProcessProbe for IdleProcess {
+        fn claude_running(&self, _exclude_pid: Option<u32>) -> bool {
+            false
+        }
+    }
+
+    /// Always reports a binary, so a decision is never skipped for want of
+    /// one. The path never has to exist: no test here lets a cycle spawn.
+    struct FakeBinary(PathBuf);
+    impl BinaryProbe for FakeBinary {
+        fn find(&self, _override_path: &str) -> Option<(PathBuf, &'static str)> {
+            Some((self.0.clone(), "override"))
+        }
+    }
+
+    fn test_settings() -> UserSettings {
+        UserSettings {
+            interval_secs: 3600,
+            timeout_secs: 5,
+            claude_binary: String::new(),
+            close_to_tray: true,
+            launch_at_login: false,
+            log_level: "info".to_string(),
+        }
+    }
+
+    /// A `Core` on an in-memory store, with one enabled account.
+    fn test_core() -> (tempfile::TempDir, Arc<Core>, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(crate::store::Store::open_in_memory().expect("open"));
+        store.save_settings(&test_settings()).expect("seed settings");
+        let dir = tmp.path().join(".claude3");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("settings.json"), "{}").expect("marker");
+        let account = store
+            .add_account(&dir, true, None, false, 1)
+            .expect("add account");
+        let (settings_tx, _rx) = tokio::sync::watch::channel(test_settings());
+        let core = Arc::new(Core {
+            store,
+            triggers: Arc::new(crate::scheduler::triggers::Triggers::new()),
+            status: Arc::new(Mutex::new(DriverStatus::default())),
+            binary: Arc::new(Mutex::new(None)),
+            halt_latched: std::sync::atomic::AtomicBool::new(false),
+            close_to_tray: std::sync::atomic::AtomicBool::new(true),
+            settings_tx,
+            log: None,
+            app_data_dir: tmp.path().to_path_buf(),
+            log_dir: tmp.path().join("logs"),
+        });
+        let id = account.id.clone();
+        (tmp, core, id)
+    }
+
+    fn test_driver(core: Arc<Core>, tmp: &std::path::Path) -> Driver {
+        Driver::new(
+            core,
+            Arc::new(SilentEvents),
+            Arc::new(IdleProcess),
+            Arc::new(FakeBinary(tmp.join("claude.exe"))),
+            CancellationToken::new(),
+        )
+    }
+
+    /// A sink whose very first step fails, like a store that cannot be
+    /// written. `Send` (unlike `RecordingHalt`) so it can cross the
+    /// `blocking` hop.
+    struct FailingHalt;
+    impl HaltSink for FailingHalt {
+        fn persist_halt(&self, _value: &str) -> AppResult<()> {
+            Err(AppError::Db("disk on fire".into()))
+        }
+        fn log_envelope(&self, _raw: &str, _reason: &str) {}
+        fn persist_outcome(&self) -> AppResult<()> {
+            Ok(())
+        }
+        fn disable_account(&self) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_halt_write_still_latches_the_halt_and_stops_polling() {
+        let (tmp, core, _id) = test_core();
+
+        arm_and_perform_halt(
+            &core,
+            FailingHalt,
+            1_700_000_000_000,
+            "{}".to_string(),
+            "no local_command".to_string(),
+        )
+        .await;
+
+        assert_eq!(
+            core.store.polling_halted().expect("read"),
+            None,
+            "the premise of this test is that the halt never reached disk"
+        );
+        assert!(
+            core.halt_latched.load(Ordering::SeqCst),
+            "the in-memory latch is what keeps the quota guard closed"
+        );
+
+        let driver = test_driver(Arc::clone(&core), tmp.path());
+        assert!(driver.halted().await, "the driver must read the latch");
+        assert_eq!(
+            crate::commands::core_poll_now(&core).expect("poll"),
+            "skipped:halted"
+        );
+
+        // ...and no further poll is started, by any trigger.
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        for trigger in [Trigger::Manual, Trigger::Startup] {
+            assert!(
+                driver
+                    .decide_and_maybe_run(trigger, None, &test_settings(), &done_tx)
+                    .await
+                    .is_none(),
+                "a latched halt must skip every trigger"
+            );
+        }
+
+        crate::commands::core_clear_halt(&core).expect("clear");
+        assert!(!driver.halted().await, "clear_halt must reset the latch");
+    }
+
+    #[tokio::test]
+    async fn an_account_changed_skipped_while_halted_keeps_its_ids() {
+        let (tmp, core, id) = test_core();
+        core.store.set_polling_halted("guard_tripped:1").expect("halt");
+        core.triggers.account_changed(vec![id.clone()]);
+
+        let driver = test_driver(Arc::clone(&core), tmp.path());
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let mut deferred = false;
+
+        assert!(
+            driver
+                .handle_account_changed(&test_settings(), &done_tx, &mut deferred)
+                .await
+                .is_none(),
+            "halted, so nothing runs"
+        );
+        assert!(deferred, "a skipped change must stay deferred");
+
+        crate::commands::core_clear_halt(&core).expect("clear");
+
+        let cycle = driver
+            .handle_account_changed(&test_settings(), &done_tx, &mut deferred)
+            .await;
+        let cycle = cycle.expect("the id survived the halted skip, so this polls it now");
+        cycle.cancel.cancel();
+        cycle.handle.abort();
+        let _ = cycle.handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_busy_account_changed_leaves_the_ids_undrained() {
+        let (tmp, core, id) = test_core();
+        core.triggers.account_changed(vec![id.clone()]);
+
+        let driver = test_driver(Arc::clone(&core), tmp.path());
+        let _token = begin_cycle(&driver.machine, 1);
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let mut deferred = false;
+
+        assert!(driver
+            .handle_account_changed(&test_settings(), &done_tx, &mut deferred)
+            .await
+            .is_none());
+        assert!(deferred);
+        assert_eq!(core.triggers.take_changed(), vec![id]);
+    }
 
     #[test]
     fn the_deadline_is_always_the_last_cycle_end_plus_the_gap() {

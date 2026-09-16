@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -39,6 +40,19 @@ pub struct Core {
     pub triggers: Arc<Triggers>,
     pub status: Arc<Mutex<DriverStatus>>,
     pub binary: BinarySlot,
+    /// In-memory mirror of the `polling_halted` flag, armed the instant the
+    /// guard trips and *before* the store write is attempted. The store write
+    /// can fail — a full disk, a locked database — and the flag is the
+    /// safety property, so nothing may re-arm polling on the strength of a
+    /// `polling_halted` read that only returned `None` because the write
+    /// never landed. Every halted check is `latch || stored`, and only
+    /// `core_clear_halt` lowers it.
+    pub halt_latched: AtomicBool,
+    /// Cache of `UserSettings::close_to_tray`, seeded at setup and rewritten
+    /// by `core_set_settings`. The window-close handler runs on the UI thread
+    /// and must never take the store's connection mutex, which parks for up
+    /// to `busy_timeout` under contention.
+    pub close_to_tray: AtomicBool,
     pub settings_tx: watch::Sender<UserSettings>,
     pub log: Option<Arc<LogHandle>>,
     pub app_data_dir: PathBuf,
@@ -98,7 +112,7 @@ pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
     let accounts = core.store.list_accounts()?;
     let latest = core.store.latest_per_account()?;
     let settings = core.store.stored_settings()?;
-    let halted = core.store.polling_halted()?;
+    let halted = halted_value(core)?;
 
     let status = lock_status(&core.status).clone();
     let binary = {
@@ -134,11 +148,36 @@ pub fn core_get_history(core: &Core, account_id: &str, now: i64) -> AppResult<Ve
     core.store.history(account_id, since)
 }
 
+/// Fills the binary slot from the same resolver the driver uses.
+///
+/// Called once at setup, before the driver starts. Without it the slot is
+/// empty until the driver's first `refresh_binary`, and a Refresh click in
+/// that window is answered `skipped:no_binary` on a perfectly healthy
+/// install. The driver keeps overwriting it from then on.
+pub fn seed_binary_slot(slot: &BinarySlot, override_path: &str) {
+    *lock_binary(slot) = find_claude_binary(Some(override_path))
+        .map(|f| (f.path.to_string_lossy().to_string(), f.source.as_str()));
+}
+
+/// The halt as the UI should see it: the persisted value when the write
+/// landed, and the synthetic `guard_tripped:unpersisted` when only the
+/// in-memory latch is up (the guard tripped but the store write failed).
+fn halted_value(core: &Core) -> AppResult<Option<String>> {
+    match core.store.polling_halted()? {
+        Some(v) => Ok(Some(v)),
+        None if core.halt_latched.load(Ordering::SeqCst) => {
+            Ok(Some("guard_tripped:unpersisted".to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
 /// `"started"` or `"skipped:<reason>"`. The preview reads the published
 /// snapshot, and it is exact because a Manual trigger bypasses both the gate
 /// and backoff.
 pub fn core_poll_now(core: &Core) -> AppResult<String> {
-    let halted = core.store.polling_halted()?.is_some();
+    let halted =
+        core.halt_latched.load(Ordering::SeqCst) || core.store.polling_halted()?.is_some();
     let binary_present = lock_binary(&core.binary).is_some();
     let enabled = core.store.enabled_account_ids()?;
     let status = lock_status(&core.status).clone();
@@ -230,6 +269,8 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
         }
     }
 
+    core.close_to_tray.store(next.close_to_tray, Ordering::SeqCst);
+
     let scheduler_affected = polling_relevant_changed(&previous, next);
     if scheduler_affected && core.settings_tx.send(next.clone()).is_err() {
         warn!("settings watch has no receiver; the driver may not be running");
@@ -249,7 +290,10 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
 /// every quota-spending action stays a separate, explicit act.
 pub fn core_clear_halt(core: &Core) -> AppResult<()> {
     let previous = core.store.clear_polling_halted()?;
-    warn!(previous = ?previous, "polling halt cleared by the user");
+    // Lowered only once the store write has succeeded, so a failed clear
+    // leaves the guard closed rather than half-open.
+    let latched = core.halt_latched.swap(false, Ordering::SeqCst);
+    warn!(previous = ?previous, latched, "polling halt cleared by the user");
     Ok(())
 }
 
@@ -364,9 +408,15 @@ pub async fn get_settings(
     app: tauri::AppHandle,
     core: State<'_, SharedCore>,
 ) -> AppResult<UserSettings> {
-    let launch_at_login = app.autolaunch().is_enabled().unwrap_or(false);
     let core = Arc::clone(&core);
-    blocking(move || core_get_settings(&core, launch_at_login)).await
+    // `is_enabled` reads the registry (Windows) or a launch-agent plist, so
+    // it belongs on the blocking pool with the store read, not on a runtime
+    // worker.
+    blocking(move || {
+        let launch_at_login = app.autolaunch().is_enabled().unwrap_or(false);
+        core_get_settings(&core, launch_at_login)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -383,16 +433,20 @@ pub async fn set_settings(
     crate::tray::apply_tray(&app, &tray_core).await;
 
     // Written through to the plugin's live state; never stored in the table.
-    let result = if want_autostart {
-        app.autolaunch().enable()
-    } else {
-        app.autolaunch().disable()
-    };
+    // Same reason as `get_settings`: this is a registry / plist write.
+    let autostart_app = app.clone();
+    let result = blocking(move || {
+        if want_autostart {
+            autostart_app.autolaunch().enable()
+        } else {
+            autostart_app.autolaunch().disable()
+        }
+        .map_err(|e| AppError::Internal(format!("could not update launch at login: {e}")))
+    })
+    .await;
     if let Err(e) = result {
         warn!(error = %e, want_autostart, "could not update launch-at-login");
-        return Err(AppError::Internal(format!(
-            "could not update launch at login: {e}"
-        )));
+        return Err(e);
     }
     Ok(())
 }
@@ -462,6 +516,8 @@ mod tests {
             triggers: Arc::new(Triggers::new()),
             status: Arc::new(std::sync::Mutex::new(DriverStatus::default())),
             binary: Arc::new(std::sync::Mutex::new(None)),
+            halt_latched: AtomicBool::new(false),
+            close_to_tray: AtomicBool::new(true),
             settings_tx,
             log: None,
             app_data_dir: tmp.path().to_path_buf(),
@@ -681,6 +737,96 @@ mod tests {
 
         let d = make_dir(tmp.path(), ".claude3");
         core_add_account(&core, &d, 1).expect("add");
+        assert_eq!(core_poll_now(&core).expect("poll"), "started");
+    }
+
+    #[test]
+    fn an_unpersisted_halt_latch_halts_poll_now_and_shows_in_the_dashboard() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        core_add_account(&core, &d, 1).expect("add");
+        with_binary(&core);
+        assert_eq!(core_poll_now(&core).expect("poll"), "started");
+
+        // The guard tripped but the store write failed, so only the
+        // in-memory latch is set (F1).
+        core.halt_latched.store(true, Ordering::SeqCst);
+
+        assert_eq!(core_poll_now(&core).expect("poll"), "skipped:halted");
+        assert_eq!(
+            core_get_dashboard(&core)
+                .expect("dashboard")
+                .halted
+                .as_deref(),
+            Some("guard_tripped:unpersisted")
+        );
+
+        core_clear_halt(&core).expect("clear");
+        assert!(!core.halt_latched.load(Ordering::SeqCst));
+        assert_eq!(core_get_dashboard(&core).expect("dashboard").halted, None);
+        assert_eq!(core_poll_now(&core).expect("poll"), "started");
+    }
+
+    #[test]
+    fn a_persisted_halt_value_is_reported_in_preference_to_the_latch() {
+        let (_tmp, core) = core();
+        core.store
+            .set_polling_halted("guard_tripped:1700000000000")
+            .expect("halt");
+        core.halt_latched.store(true, Ordering::SeqCst);
+        assert_eq!(
+            core_get_dashboard(&core)
+                .expect("dashboard")
+                .halted
+                .as_deref(),
+            Some("guard_tripped:1700000000000")
+        );
+    }
+
+    #[test]
+    fn set_settings_keeps_the_close_to_tray_cache_in_step() {
+        let (_tmp, core) = core();
+        assert!(core.close_to_tray.load(Ordering::SeqCst));
+
+        let mut next = defaults();
+        next.close_to_tray = false;
+        core_set_settings(&core, &next).expect("set");
+        assert!(!core.close_to_tray.load(Ordering::SeqCst));
+
+        next.close_to_tray = true;
+        core_set_settings(&core, &next).expect("set");
+        assert!(core.close_to_tray.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn seeding_the_binary_slot_removes_the_spurious_no_binary_answer() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        core_add_account(&core, &d, 1).expect("add");
+        // An empty slot is what the setup-to-first-decision window looked
+        // like before M4.
+        assert_eq!(core_poll_now(&core).expect("poll"), "skipped:no_binary");
+
+        let exe = tmp
+            .path()
+            .join(if cfg!(windows) { "claude.exe" } else { "claude" });
+        std::fs::write(&exe, b"#!/bin/sh
+exit 0
+").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        seed_binary_slot(&core.binary, &exe.to_string_lossy());
+
+        assert_eq!(
+            lock_binary(&core.binary).as_ref().map(|(_, s)| *s),
+            Some("override"),
+            "setup must publish the resolved binary"
+        );
         assert_eq!(core_poll_now(&core).expect("poll"), "started");
     }
 
