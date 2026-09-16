@@ -284,9 +284,9 @@ button.pill { cursor: pointer; background: transparent; }
 }
 .toggle-text { font-size: 13px; color: #dde2e6; }
 .toggle-hint { font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.switch { width: 36px; height: 20px; border-radius: 999px; padding: 2px; flex: none; background: var(--track-off); transition: background 160ms ease; }
+.switch { display: block; width: 36px; height: 20px; border-radius: 999px; padding: 2px; flex: none; background: var(--track-off); transition: background 160ms ease; }
 .switch-on { background: var(--track-on); }
-.knob { width: 16px; height: 16px; border-radius: 50%; background: var(--knob-off); transition: transform 160ms ease; }
+.knob { display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--knob-off); transition: transform 160ms ease; }
 .switch-on .knob { transform: translateX(16px); background: var(--knob-on); }
 .accounts-row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
 .input-grow { flex: 1; min-width: 220px; }
