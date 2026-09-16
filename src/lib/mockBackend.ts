@@ -101,9 +101,16 @@ function clampDays(requested: number | undefined): number {
   return Math.min(MAX_HISTORY_DAYS, Math.max(1, Math.trunc(days)));
 }
 
+const HISTORY_START_HOUR = 9;
+const HISTORY_PEAK_HOUR = 14;
+const HISTORY_END_HOUR = 18;
+
 /**
- * Day index `29` is today. Each non-null day value seeds three hourly
- * samples (10:00, 13:00, 16:00 local) at `v-8`, `v`, `v-3`, clamped to >= 0.
+ * Day index `29` is today. Each non-null day value seeds one hourly sample
+ * per hour from 09:00 to 18:00 local, so the sparkline renders as a
+ * connected run the way real hourly polling does. The value rises from
+ * `v-8` at 09:00 to `v` at 14:00, then eases (quadratic ease-in) down to
+ * `v-3` at 18:00, clamped to >= 0.
  */
 function buildHistory(days: ReadonlyArray<number | null>): HistoryPoint[] {
   const today = new Date();
@@ -113,14 +120,19 @@ function buildHistory(days: ReadonlyArray<number | null>): HistoryPoint[] {
     if (v === null) return;
     const date = new Date(today);
     date.setDate(date.getDate() - (days.length - 1 - i));
-    const sample = (hour: number, delta: number): void => {
+    for (let hour = HISTORY_START_HOUR; hour <= HISTORY_END_HOUR; hour++) {
+      let delta: number;
+      if (hour <= HISTORY_PEAK_HOUR) {
+        const t = (hour - HISTORY_START_HOUR) / (HISTORY_PEAK_HOUR - HISTORY_START_HOUR);
+        delta = -8 + 8 * t;
+      } else {
+        const t = (hour - HISTORY_PEAK_HOUR) / (HISTORY_END_HOUR - HISTORY_PEAK_HOUR);
+        delta = -3 * t * t;
+      }
       const at = new Date(date);
       at.setHours(hour, 0, 0, 0);
       points.push({ t: at.getTime(), pct: Math.max(0, v + delta) });
-    };
-    sample(10, -8);
-    sample(13, 0);
-    sample(16, -3);
+    }
   });
   return points;
 }

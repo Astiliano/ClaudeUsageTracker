@@ -1,6 +1,7 @@
 import type { JSX, KeyboardEvent } from "react";
 import { useState } from "react";
 import { backend } from "../lib/backend";
+import { errorMessage } from "../lib/errors";
 import { formatCountdown } from "../lib/format";
 import type { AccountRow as AccountRowData } from "../lib/types";
 
@@ -23,7 +24,7 @@ export function EditDrawer({ row, index, total, now, onClose, onMove, onChanged,
     try {
       await backend().invoke(command, args);
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError(errorMessage(e));
     }
     onChanged();
   };

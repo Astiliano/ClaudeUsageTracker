@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
+import { errorMessage } from "../lib/errors";
 import type { Dashboard, HistoryPoint } from "../lib/types";
 
 const DEBOUNCE_MS = 250;
@@ -32,7 +33,7 @@ export function useDashboard(): UseDashboard {
       setDashboard(next);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }, []);
 
@@ -50,7 +51,7 @@ export function useDashboard(): UseDashboard {
       );
       setHistory(Object.fromEntries(entries));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }, []);
 

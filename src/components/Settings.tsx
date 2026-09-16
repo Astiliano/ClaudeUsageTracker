@@ -1,6 +1,7 @@
 import type { JSX, KeyboardEvent } from "react";
 import { useEffect, useState } from "react";
 import { backend } from "../lib/backend";
+import { errorMessage } from "../lib/errors";
 import type { Prefs } from "../lib/prefs";
 import { FONT_KEYS, FONTS, SIZE_KEYS, SIZES } from "../lib/theme";
 import type { BinaryInfo, UserSettings } from "../lib/types";
@@ -38,7 +39,7 @@ export function Settings({
         setTimeoutDraft(String(loaded.timeout_secs));
         setBinaryDraft(loaded.claude_binary);
       } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
+        onError(errorMessage(e));
       }
     };
     void load();
@@ -65,7 +66,7 @@ export function Settings({
       setIntervalDraft(String(previous.interval_secs));
       setTimeoutDraft(String(previous.timeout_secs));
       setBinaryDraft(previous.claude_binary);
-      onError(e instanceof Error ? e.message : String(e));
+      onError(errorMessage(e));
     }
   };
 
@@ -77,7 +78,7 @@ export function Settings({
       await backend().invoke(command, args);
       onChanged();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError(errorMessage(e));
     }
   };
 

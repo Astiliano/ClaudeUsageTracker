@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { COLUMNS, type ColumnKey, gridTemplate } from "../lib/columns";
 import { type Rect, colDragTarget, colLineX, rowDragTarget } from "../lib/drag";
+import { errorMessage } from "../lib/errors";
 import { moveItem } from "../lib/reorder";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
 import { AccountRow } from "./AccountRow";
@@ -60,7 +61,7 @@ export function AccountsTable({ rows, history, now, columnOrder, onColumnOrder, 
       await backend().invoke("reorder_accounts", { ids: next.map((r) => r.account.id) });
       onChanged();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError(errorMessage(e));
       onChanged(); // optimistic order may not match what was persisted; resync
     }
   };

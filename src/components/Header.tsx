@@ -1,6 +1,7 @@
 import type { JSX } from "react";
 import { backend } from "../lib/backend";
 import { bannerFor } from "../lib/banner";
+import { errorMessage } from "../lib/errors";
 import { accountCountLabel, chipFor } from "../lib/present";
 import type { Dashboard } from "../lib/types";
 
@@ -21,7 +22,7 @@ export function Header({ dashboard, settingsOpen, onToggleSettings, onChanged, o
       await backend().invoke(command);
       onChanged();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError(errorMessage(e));
     }
   };
 

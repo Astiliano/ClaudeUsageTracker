@@ -1,6 +1,7 @@
 import type { JSX, KeyboardEvent } from "react";
 import { useEffect, useState } from "react";
 import { backend } from "../lib/backend";
+import { errorMessage } from "../lib/errors";
 import type { RawSnapshot } from "../lib/types";
 
 interface Props {
@@ -17,7 +18,7 @@ export function FailureDetail({ snapshotId, onClose }: Props): JSX.Element {
       try {
         setData(await backend().invoke<RawSnapshot>("get_snapshot_raw", { snapshotId }));
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(errorMessage(e));
       }
     };
     void load();
