@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { backend } from "../lib/backend";
+import { errorMessage } from "../lib/errors";
+import { HISTORY_DAYS } from "../lib/series";
 import type { Dashboard, HistoryPoint } from "../lib/types";
 
 const DEBOUNCE_MS = 250;
@@ -25,33 +26,50 @@ export function useDashboard(): UseDashboard {
   const [now, setNow] = useState<number>(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guards against two in-flight get_dashboard calls resolving out of
+  // order (a debounced refetch racing a cycle:finished load, say): only
+  // the call that is still the most recently *started* one when it
+  // resolves is allowed to write dashboard/error.
+  const seqRef = useRef(0);
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (): Promise<Dashboard | null> => {
+    const seq = ++seqRef.current;
     try {
-      const next = await invoke<Dashboard>("get_dashboard");
-      setDashboard(next);
-      setError(null);
+      const next = await backend().invoke<Dashboard>("get_dashboard");
+      if (seq === seqRef.current) {
+        setDashboard(next);
+        setError(null);
+      }
+      return next;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (seq === seqRef.current) {
+        setError(errorMessage(e));
+      }
+      return null;
     }
   }, []);
 
-  const loadHistory = useCallback(async (): Promise<void> => {
+  const loadHistoryFor = useCallback(async (accountIds: string[]): Promise<void> => {
     try {
-      const current = await invoke<Dashboard>("get_dashboard");
       const entries = await Promise.all(
-        current.accounts.map(async (row) => {
-          const points = await invoke<HistoryPoint[]>("get_history", {
-            accountId: row.account.id,
+        accountIds.map(async (id) => {
+          const points = await backend().invoke<HistoryPoint[]>("get_history", {
+            accountId: id,
+            days: HISTORY_DAYS,
           });
-          return [row.account.id, points] as const;
+          return [id, points] as const;
         }),
       );
       setHistory(Object.fromEntries(entries));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }, []);
+
+  const loadWithHistory = useCallback(async (): Promise<void> => {
+    const d = await load();
+    if (d !== null) await loadHistoryFor(d.accounts.map((r) => r.account.id));
+  }, [load, loadHistoryFor]);
 
   const refetch = useCallback((): void => {
     if (pending.current !== null) {
@@ -64,9 +82,8 @@ export function useDashboard(): UseDashboard {
   }, [load]);
 
   useEffect(() => {
-    void load();
-    void loadHistory();
-  }, [load, loadHistory]);
+    void loadWithHistory();
+  }, [loadWithHistory]);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), TICK_MS);
@@ -77,25 +94,26 @@ export function useDashboard(): UseDashboard {
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
 
-    const attach = async (): Promise<void> => {
-      const names = ["usage:updated", "gate:changed", "poller:stalled"];
-      for (const name of names) {
-        const off = await listen(name, () => refetch());
+    const subscribe = async (name: string, onEvent: () => void): Promise<void> => {
+      try {
+        const off = await backend().listen(name, onEvent);
         if (cancelled) {
           off();
         } else {
           unlisteners.push(off);
         }
+      } catch (e) {
+        setError(errorMessage(e));
+        console.warn("dashboard: could not subscribe", name, e);
       }
-      const offCycle = await listen("cycle:finished", () => {
-        refetch();
-        void loadHistory();
-      });
-      if (cancelled) {
-        offCycle();
-      } else {
-        unlisteners.push(offCycle);
+    };
+
+    const attach = async (): Promise<void> => {
+      const names = ["usage:updated", "gate:changed", "poller:stalled"];
+      for (const name of names) {
+        await subscribe(name, () => refetch());
       }
+      await subscribe("cycle:finished", () => void loadWithHistory());
     };
 
     void attach();
@@ -109,7 +127,7 @@ export function useDashboard(): UseDashboard {
         pending.current = null;
       }
     };
-  }, [refetch, loadHistory]);
+  }, [refetch, loadWithHistory]);
 
   return { dashboard, history, now, error, refetch };
 }

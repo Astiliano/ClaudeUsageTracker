@@ -25,8 +25,12 @@ looks like a model turn, polling halts globally and the halt survives a
 restart until you clear it.
 
 Accounts can be reordered by dragging rows with the grip handle, or with the
-Move up/Move down buttons in the Actions column; the order is saved and
-survives a restart.
+Move up/Move down buttons inside a row's edit drawer. Column headers can also
+be dragged to reorder; column order, typeface and text size persist per
+machine in the webview's local storage. Click a row's sparkline to open the
+30-day history drawer. Removing an account (in a row's edit drawer) asks for
+a second click within 4 seconds before it deletes the account and its
+history.
 
 ## Requirements
 
@@ -49,6 +53,17 @@ unambiguous without an explicit `--bin`. `fake_claude` is never bundled: the
 Tauri bundle only packages `mainBinaryName` from `tauri.conf.json`
 (`claude-usage-tracker`), and there is no `externalBin` list pulling
 `fake_claude` in.
+
+### Browser preview
+
+```bash
+# renders the UI with an in-memory mock backend, no Rust build needed
+VITE_MOCK_BACKEND=1 npm run dev        # PowerShell: $env:VITE_MOCK_BACKEND='1'; npm run dev
+```
+
+The mock backend is never bundled into a production build: it's loaded via a
+dynamic `import()` gated behind the `VITE_MOCK_BACKEND` env flag, so Vite only
+pulls it into a dev build.
 
 ## Gates
 
