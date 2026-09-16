@@ -230,13 +230,38 @@ impl Machine {
         }
     }
 
+    /// Clears the cooldown for one account, which is what a backoff-bypassing
+    /// trigger (Manual, AccountChanged) means by "try again now".
+    ///
+    /// It deliberately does NOT clear `unexpected_envelope_streak`. Spec 6.3
+    /// step 5 counts guard evidence, not retry policy: if a Refresh click
+    /// reset the streak, five-strike protection would only ever fire on the
+    /// unattended Timer path, and a user retrying a CLI that has started
+    /// charging would keep it disarmed. The streak is cleared by exactly one
+    /// thing, a non-strike outcome in `record`. An entry that has no streak
+    /// left to carry is dropped, so the map does not accumulate.
     pub fn reset_backoff(&mut self, account: &str) {
-        self.backoff.remove(account);
+        let spent = match self.backoff.get_mut(account) {
+            Some(b) => {
+                b.consecutive_failures = 0;
+                b.next_allowed = 0;
+                b.unexpected_envelope_streak == 0
+            }
+            None => return,
+        };
+        if spent {
+            self.backoff.remove(account);
+        }
     }
 
-    /// Used by the settings watch (D16).
+    /// Used by the settings watch (D16). Same rule as `reset_backoff`: every
+    /// cooldown goes, every streak stays.
     pub fn reset_all_backoff(&mut self) {
-        self.backoff.clear();
+        self.backoff.retain(|_, b| {
+            b.consecutive_failures = 0;
+            b.next_allowed = 0;
+            b.unexpected_envelope_streak > 0
+        });
     }
 
     fn end_cycle(&mut self) {
@@ -899,13 +924,50 @@ mod tests {
         assert_eq!(m.backoff_until("b"), Some(NOW + 60_000));
     }
 
+    /// Spec 6.3 step 5: the streak is guard evidence, not a cooldown. A user
+    /// clicking Refresh against a CLI that has started charging must not be
+    /// able to erase it, or the five-strike protection would only ever work
+    /// on the unattended Timer path.
     #[test]
-    fn reset_backoff_also_clears_the_envelope_streak() {
+    fn reset_backoff_preserves_the_envelope_streak() {
         let mut m = Machine::new();
         for _ in 0..4 {
             assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
         }
         m.reset_backoff("a");
+        assert_eq!(
+            m.backoff_until("a"),
+            None,
+            "the cooldown itself is still cleared"
+        );
+        assert_eq!(
+            m.record("a", &shape_failure(), NOW),
+            Recorded::Escalate,
+            "the fifth strike still escalates across a manual retry"
+        );
+    }
+
+    #[test]
+    fn reset_all_backoff_preserves_the_envelope_streak() {
+        let mut m = Machine::new();
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        // The settings watch resets every cooldown (D16), which must not
+        // amount to a way of disarming the guard.
+        m.reset_all_backoff();
+        assert_eq!(m.backoff_until("a"), None);
+        assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Escalate);
+    }
+
+    #[test]
+    fn only_a_non_strike_outcome_clears_the_envelope_streak() {
+        let mut m = Machine::new();
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        m.reset_backoff("a");
+        assert_eq!(m.record("a", &ok_outcome(), NOW), Recorded::Continue);
         for _ in 0..4 {
             assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
         }

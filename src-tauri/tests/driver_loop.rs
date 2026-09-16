@@ -191,6 +191,13 @@ async fn wait_for_busy(h: &Harness) {
     }
 }
 
+fn snapshot_count(h: &Harness) -> i64 {
+    h.core
+        .store
+        .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM snapshots", [], |r| r.get(0))?))
+        .expect("count")
+}
+
 fn emit_ok_report(env: &mut EnvGuard) {
     let report = "Current session: 15% used \u{b7} resets Sep 16, 3:30am (America/Los_Angeles)\\n\
                   Current week (all models): 4% used \u{b7} resets Sep 21, 8am (America/Los_Angeles)";
@@ -310,31 +317,16 @@ async fn clear_halt_does_not_start_a_poll() {
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
 
-// Spec 6.3 step 5 (five consecutive unclassifiable envelopes on one account
-// escalate to a guard trip) deliberately has no end-to-end test here, and the
-// reason is worth recording so the next reader does not try to add one.
-//
-// `Machine::reset_backoff` clears the envelope streak along with the failure
-// count (Task 12, `reset_backoff_also_clears_the_envelope_streak`), and every
-// backoff-bypassing trigger — Manual and AccountChanged — calls it on each
-// candidate before the poll. So strikes can only accumulate on the Timer and
-// Startup paths, which ARE filtered by backoff: 60 s, then 120, 240 and 480.
-// Five consecutive strikes therefore take at least fifteen minutes of wall
-// clock, and no trigger can shorten that. Neither can the settings watch,
-// which resets every streak along with every cooldown.
-//
-// The path is covered in two deterministic pieces instead: `halt_decision`
-// turns `Recorded::Escalate` into a stored guard trip (unit-tested in
-// `driver.rs`), and the test below drives the resulting halt sequence — flag,
-// log, snapshot, disable, abandon — end to end through the store.
 #[tokio::test(flavor = "multi_thread")]
-async fn repeated_manual_polls_record_failures_without_ever_halting() {
-    // A result envelope with no `type` is a shape error every time, so each
-    // poll is a strike — but a Manual trigger resets the streak before it
-    // polls, so the fifth one never escalates.
+async fn five_unclassifiable_envelopes_escalate_into_a_guard_trip() {
+    // Stdout that is not JSON at all is a shape error every time, so every
+    // poll of this account is a strike. Manual triggers drive them: they
+    // bypass the cooldown, and since the streak is guard evidence rather than
+    // retry policy, `reset_backoff` no longer erases it (spec 6.3 step 5).
+    // The startup cycle lands the first strike, so the trip falls on or
+    // before the fifth manual poll.
     let mut env = EnvGuard::new().await;
-    env.set("FAKE_CLAUDE_MODE", "emit");
-    env.set("FAKE_CLAUDE_STDOUT", r#"{"local_command":"usage"}"#);
+    env.set("FAKE_CLAUDE_MODE", "non-json");
     let h = harness(false);
     let a = add_account(&h, ".claude");
 
@@ -346,31 +338,36 @@ async fn repeated_manual_polls_record_failures_without_ever_halting() {
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
 
+    assert!(
+        h.core
+            .store
+            .polling_halted()
+            .expect("read")
+            .unwrap_or_default()
+            .starts_with("guard_tripped:"),
+        "five consecutive unclassifiable envelopes must halt the poller"
+    );
+
+    let accounts = h.core.store.list_accounts().expect("list");
+    let account = accounts.iter().find(|x| x.id == a).expect("the account");
+    assert_eq!(
+        account.disabled_reason,
+        Some(cut_core::usage::DisabledReason::GuardTripped)
+    );
+    assert!(!account.enabled);
+
+    // Nothing polls again: the halt beats every trigger, including Manual.
+    let before = snapshot_count(&h);
+    assert_eq!(core_poll_now(&h.core).expect("poll"), "skipped:halted");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        snapshot_count(&h),
+        before,
+        "a halted poller must not spend another poll"
+    );
+
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
-
-    let rows: i64 = h
-        .core
-        .store
-        .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM snapshots", [], |r| r.get(0))?))
-        .expect("count");
-    assert!(
-        rows >= 3,
-        "the manual polls must actually have run and been recorded: {rows}"
-    );
-
-    assert_eq!(
-        h.core.store.polling_halted().expect("read"),
-        None,
-        "a manual trigger resets the streak, so strikes cannot accumulate"
-    );
-    let accounts = h.core.store.list_accounts().expect("list");
-    let account = accounts
-        .iter()
-        .find(|x| x.id == a)
-        .expect("the polled account");
-    assert_eq!(account.disabled_reason, None);
-    assert!(account.enabled);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -402,13 +399,9 @@ async fn a_guard_trip_halts_the_poller_and_abandons_the_rest_of_the_cycle() {
         "the halt flag must be persisted"
     );
 
-    let rows: i64 = h
-        .core
-        .store
-        .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM snapshots", [], |r| r.get(0))?))
-        .expect("count");
     assert_eq!(
-        rows, 1,
+        snapshot_count(&h),
+        1,
         "exactly one account is polled before the cycle is abandoned"
     );
 
