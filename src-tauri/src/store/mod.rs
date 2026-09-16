@@ -1,4 +1,7 @@
 pub mod schema;
+pub mod settings;
+
+pub use settings::{validate_settings, UserSettings};
 
 use rusqlite::Connection;
 use std::path::Path;
