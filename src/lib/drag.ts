@@ -40,11 +40,14 @@ export function colLineX(rects: readonly Rect[], target: number, index: number, 
 
 /**
  * Decides what to do, at drag end, with a rows update that arrived mid-drag
- * and was stashed rather than applied immediately: pass it through when
- * nothing was committed, or discard it once a reorder committed (the
- * commit's own refetch supersedes it, so re-applying the pre-commit
- * snapshot afterward would revert the just-committed change).
+ * and was stashed rather than applied immediately: pass it through unless a
+ * refetch is about to resync `order` on its own, in which case discard it
+ * (re-applying a pre-refetch snapshot afterward would revert the fresher
+ * state). `refetchWillResync` is not the same as "did this drag commit" —
+ * a committed row reorder triggers a refetch, but a committed column
+ * reorder never does (it only writes local prefs), so the caller passes
+ * `false` for every column drag regardless of whether it committed.
  */
-export function settlePendingRows<T>(pending: T[] | null, committed: boolean): T[] | null {
-  return committed ? null : pending;
+export function settlePendingRows<T>(pending: T[] | null, refetchWillResync: boolean): T[] | null {
+  return refetchWillResync ? null : pending;
 }

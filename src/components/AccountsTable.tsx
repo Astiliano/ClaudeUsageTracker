@@ -78,12 +78,15 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
 
   /**
    * Called once, at the end of either drag: always clears the stash (so a
-   * later drag that ends without committing can never apply a stale
-   * snapshot left behind by an earlier commit), and applies it only when
-   * this drag didn't commit a reorder.
+   * later drag can never apply a snapshot left behind by an earlier one),
+   * and applies it unless a refetch is already going to resync `order` on
+   * its own. Only a committed ROW reorder triggers such a refetch (via
+   * `commitOrder` -> `onChanged`); a committed COLUMN reorder never does
+   * (it only writes local prefs), so `colUp` always passes `false` here
+   * even when it committed.
    */
-  function settleDrag(committed: boolean): void {
-    const next = settlePendingRows(pendingRowsRef.current, committed);
+  function settleDrag(refetchWillResync: boolean): void {
+    const next = settlePendingRows(pendingRowsRef.current, refetchWillResync);
     pendingRowsRef.current = null;
     if (next !== null) setOrder(next);
   }
@@ -143,12 +146,12 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
       detachCol();
       colDragRef.current = null;
       setColDrag(null);
-      let committed = false;
       if (c !== null && c.target !== c.index) {
-        committed = true;
         onColumnOrderRef.current(moveItem(columnOrderRef.current, c.index, c.target));
       }
-      settleDrag(committed);
+      // A column reorder only writes local prefs; it never triggers a
+      // rows refetch, so any stashed rows update must always be applied.
+      settleDrag(false);
     },
   });
 
