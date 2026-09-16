@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatAgo, formatCountdown } from "./format";
+import { formatAgo, formatCountdown, formatLeft } from "./format";
 
 const NOW = 1_700_000_000_000;
 const SECOND = 1000;
@@ -48,6 +48,40 @@ describe("formatCountdown", () => {
     expect(formatCountdown(NOW + 6 * DAY + 23 * HOUR, NOW)).toBe(
       "resets in 6d 23h",
     );
+  });
+});
+
+describe("formatLeft", () => {
+  it("renders an em dash when there is no reset instant", () => {
+    expect(formatLeft(null, NOW)).toBe("—");
+  });
+
+  it("clamps a past reset to 'now'", () => {
+    expect(formatLeft(NOW - 1, NOW)).toBe("now");
+    expect(formatLeft(NOW, NOW)).toBe("now");
+    expect(formatLeft(NOW - DAY, NOW)).toBe("now");
+  });
+
+  it("renders sub-minute gaps as less than a minute", () => {
+    expect(formatLeft(NOW + 1 * SECOND, NOW)).toBe("<1m left");
+    expect(formatLeft(NOW + 59 * SECOND, NOW)).toBe("<1m left");
+  });
+
+  it("renders minutes under an hour", () => {
+    expect(formatLeft(NOW + 1 * MINUTE, NOW)).toBe("1m left");
+    expect(formatLeft(NOW + 42 * MINUTE, NOW)).toBe("42m left");
+    expect(formatLeft(NOW + 59 * MINUTE + 59 * SECOND, NOW)).toBe("59m left");
+  });
+
+  it("renders hours and minutes under a day", () => {
+    expect(formatLeft(NOW + 3 * HOUR + 12 * MINUTE, NOW)).toBe("3h 12m left");
+    expect(formatLeft(NOW + 1 * HOUR, NOW)).toBe("1h 0m left");
+    expect(formatLeft(NOW + 23 * HOUR + 59 * MINUTE, NOW)).toBe("23h 59m left");
+  });
+
+  it("renders days and hours beyond a day", () => {
+    expect(formatLeft(NOW + 2 * DAY + 4 * HOUR, NOW)).toBe("2d 4h left");
+    expect(formatLeft(NOW + 6 * DAY + 23 * HOUR, NOW)).toBe("6d 23h left");
   });
 });
 

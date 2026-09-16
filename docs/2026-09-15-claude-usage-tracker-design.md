@@ -607,6 +607,7 @@ ERROR. No credentials are ever read or logged.
 ## 7. UI
 
 Single window, dark/light follows OS.
+(Revised 2026-09-16 with the UI overhaul: dark theme only; see docs/design/ and docs/superpowers/plans/2026-09-16-ui-overhaul.md.)
 
 - **Header**: state banner, first match wins — "Polling halted: …" (red,
   §6.3, with Clear halt button), "Poller stalled at HH:MM — recovered",
@@ -641,7 +642,7 @@ Single window, dark/light follows OS.
 | Command | Args → Result |
 |---|---|
 | `get_dashboard` | → `{ accounts: [{ account: Account, latest: SnapshotDto?, backoff_until: i64? }], gate, busy, halted: string?, stalled_at: i64?, binary: { path?, source? }, interval_secs }` — cheap; called on every `usage:updated` (debounced). `stalled_at` and `backoff_until` live in the shared `AppState` (`Arc<Mutex<DriverStatus>>`, written by the driver, read by commands), reset on restart; `stalled_at` is set by the watchdog arm and cleared on the next `cycle:finished`; `halted` comes from the store |
-| `get_history` | `{account_id}` → `[{t, pct}]` hourly, last 7 days — called once per account on `cycle:finished` and on mount, not per `usage:updated` |
+| `get_history` | `{account_id, days?}` → `[{t, pct}]` hourly points for the last `days` days (1–30, default 7) — the UI asks for 30 once per cycle and derives the 7-day sparkline from the same points, called on `cycle:finished` and on mount, not per `usage:updated` |
 | `poll_now` | → `"started" \| "skipped:<reason>"` |
 | `add_account` | `{config_dir}` → Account. Canonicalises; rejects missing dir (`not_found`) or duplicate (`duplicate`) |
 | `update_account` | `{id, label?, enabled?}` → Account. `enabled: false` sets `disabled_reason = user`; `enabled: true` clears it and triggers `AccountChanged` |

@@ -143,9 +143,14 @@ pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
     })
 }
 
-pub fn core_get_history(core: &Core, account_id: &str, now: i64) -> AppResult<Vec<HistoryPoint>> {
-    let since = now - 7 * 24 * 60 * 60 * 1000;
-    core.store.history(account_id, since)
+/// Longest history the UI can ask for; matches store retention (D10, 30 days).
+pub const MAX_HISTORY_DAYS: u32 = 30;
+const DEFAULT_HISTORY_DAYS: u32 = 7;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+pub fn core_get_history(core: &Core, account_id: &str, now: i64, days: u32) -> AppResult<Vec<HistoryPoint>> {
+    let days = i64::from(days.clamp(1, MAX_HISTORY_DAYS));
+    core.store.history(account_id, now - days * DAY_MS)
 }
 
 /// Fills the binary slot from the same resolver the driver uses.
@@ -341,9 +346,11 @@ pub async fn get_dashboard(core: State<'_, SharedCore>) -> AppResult<Dashboard> 
 pub async fn get_history(
     core: State<'_, SharedCore>,
     account_id: String,
+    days: Option<u32>,
 ) -> AppResult<Vec<HistoryPoint>> {
     let core = Arc::clone(&core);
-    blocking(move || core_get_history(&core, &account_id, now_ms())).await
+    let days = days.unwrap_or(DEFAULT_HISTORY_DAYS);
+    blocking(move || core_get_history(&core, &account_id, now_ms(), days)).await
 }
 
 #[tauri::command]
@@ -1002,9 +1009,37 @@ exit 0
                 .expect("snapshot");
         }
 
-        let points = core_get_history(&core, &a.id, base + hour * 8).expect("history");
+        let points = core_get_history(&core, &a.id, base + hour * 8, 7).expect("history");
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].pct, 9);
         assert_eq!(points[1].pct, 6);
+    }
+
+    #[test]
+    fn history_days_is_clamped_to_one_through_thirty() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let hour = 3_600_000i64;
+        let day = 24 * hour;
+        let base = 1_000 * day;
+        // One ok snapshot per listed day, each in its own hourly bucket.
+        for (days_ago_from_base, pct) in [(0i64, 1u8), (10, 2), (29, 3), (31, 4)] {
+            let outcome = PollOutcome::Ok(crate::usage::Parsed {
+                session: crate::usage::Window { pct: 1, resets_at: None },
+                week_all: crate::usage::Window { pct, resets_at: None },
+                week_models: vec![],
+            });
+            core.store
+                .insert_snapshot(&a.id, base + days_ago_from_base * day, &outcome, None, 1)
+                .expect("snapshot");
+        }
+        // `now` is one hour past the newest snapshot (day 31), so "N days" reaches
+        // back to day 31 - N + 1/24: 1 day → {31}; 7 → {29, 31}; 30 → {10, 29, 31}.
+        let now = base + 31 * day + hour;
+        assert_eq!(core_get_history(&core, &a.id, now, 0).expect("h").len(), 1, "0 clamps to 1 day");
+        assert_eq!(core_get_history(&core, &a.id, now, 7).expect("h").len(), 2, "7 days: 29, 31");
+        assert_eq!(core_get_history(&core, &a.id, now, 30).expect("h").len(), 3, "30 days: 10, 29, 31");
+        assert_eq!(core_get_history(&core, &a.id, now, 999).expect("h").len(), 3, "999 clamps to 30");
     }
 }
