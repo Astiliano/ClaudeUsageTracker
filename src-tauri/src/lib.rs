@@ -1,0 +1,9 @@
+pub mod error;
+
+/// Entry point called by `main.rs`. Fully wired in Task 20.
+pub fn run() {
+    if let Err(e) = tauri::Builder::default().run(tauri::generate_context!()) {
+        eprintln!("fatal: failed to run tauri application: {e}");
+        std::process::exit(1);
+    }
+}
