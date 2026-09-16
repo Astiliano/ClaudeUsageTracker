@@ -125,9 +125,14 @@ export function AccountsTable({
               key={row.account.id}
               className={rowClasses}
               draggable
-              onDragStart={() => setDragIndex(idx)}
+              onDragStart={(e) => {
+                e.dataTransfer.setData("text/plain", row.account.id);
+                e.dataTransfer.effectAllowed = "move";
+                setDragIndex(idx);
+              }}
               onDragOver={(e) => {
                 e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
                 setOverIndex(idx);
               }}
               onDrop={(e) => {
