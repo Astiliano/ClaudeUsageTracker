@@ -2,6 +2,7 @@ pub mod discovery;
 pub mod error;
 pub mod paths;
 pub mod process;
+pub mod store;
 pub mod usage;
 
 /// Entry point called by `main.rs`. Fully wired in Task 20.
