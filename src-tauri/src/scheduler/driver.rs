@@ -1,0 +1,985 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
+
+use crate::commands::{blocking, lock_binary, lock_status, Core};
+use crate::error::AppResult;
+use crate::scheduler::machine::{
+    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Machine, Recorded,
+    SharedMachine, Trigger,
+};
+use crate::store::settings::UserSettings;
+use crate::usage::runner::run_usage;
+use crate::usage::PollOutcome;
+
+/// D10: prune at startup and every 24 h.
+pub const PRUNE_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The watchdog arm ticks this often while a cycle is in flight.
+const WATCHDOG_TICK: Duration = Duration::from_secs(5);
+
+/// The driver's outbound events. Abstracted so the loop is testable without a
+/// Tauri runtime. Events are refetch triggers only: the frontend ignores the
+/// payloads and re-reads state through commands.
+pub trait EventSink: Send + Sync {
+    fn usage_updated(&self, account_id: &str);
+    fn cycle_finished(&self);
+    fn gate_changed(&self, gate: &str);
+    fn poller_stalled(&self, at: i64, cycle_age_ms: u64);
+    fn refresh_tray(&self);
+}
+
+/// The process gate, abstracted for the same reason.
+pub trait ProcessProbe: Send + Sync {
+    fn claude_running(&self, exclude_pid: Option<u32>) -> bool;
+}
+
+/// Binary presence is re-checked before every decision, so a first-run
+/// "binary not found" state clears as soon as the user fixes Settings.
+pub trait BinaryProbe: Send + Sync {
+    fn find(&self, override_path: &str) -> Option<(PathBuf, &'static str)>;
+}
+
+pub struct RealBinaryProbe;
+
+impl BinaryProbe for RealBinaryProbe {
+    fn find(&self, override_path: &str) -> Option<(PathBuf, &'static str)> {
+        crate::discovery::find_claude_binary(Some(override_path))
+            .map(|f| (f.path, f.source.as_str()))
+    }
+}
+
+pub struct SysinfoProbe {
+    system: Mutex<sysinfo::System>,
+}
+
+impl SysinfoProbe {
+    pub fn new() -> AppResult<SysinfoProbe> {
+        Ok(SysinfoProbe {
+            system: Mutex::new(crate::process::new_system()?),
+        })
+    }
+}
+
+impl ProcessProbe for SysinfoProbe {
+    fn claude_running(&self, exclude_pid: Option<u32>) -> bool {
+        let mut sys = self.system.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::process::is_claude_running(&mut sys, exclude_pid.map(sysinfo::Pid::from_u32))
+    }
+}
+
+/// D5: the interval is the gap between the end of one cycle and the start of
+/// the next, so the deadline is always measured from the last cycle's end. A
+/// settings change recomputes it from the same anchor instead of restarting
+/// the clock.
+pub fn deadline_for(last_cycle_end_ms: i64, interval_secs: u32) -> i64 {
+    last_cycle_end_ms + i64::from(interval_secs) * 1000
+}
+
+/// Spec 6.5: `enabled x timeout_secs + 10 s`.
+pub fn watchdog_limit_ms(enabled_accounts: usize, timeout_secs: u32) -> u64 {
+    let per_account = enabled_accounts as u64 * u64::from(timeout_secs) * 1000;
+    per_account + 10_000
+}
+
+pub fn halt_value(now_ms: i64) -> String {
+    format!("guard_tripped:{now_ms}")
+}
+
+/// Spec 5.1: the driver is the only writer of `DriverStatus`, and it writes
+/// one after every `decide()` and every `record()`. `stalled_at` belongs to
+/// the watchdog rather than to `Machine`, so it is carried across from the
+/// snapshot already in the slot.
+pub fn publish_status(machine: &SharedMachine, slot: &Mutex<DriverStatus>, now: i64) {
+    let mut fresh = lock_machine(machine).status(now);
+    let mut current = lock_status(slot);
+    fresh.stalled_at = current.stalled_at;
+    *current = fresh;
+}
+
+/// The four steps of a guard trip, in the order spec 6.3 mandates.
+pub trait HaltSink {
+    fn persist_halt(&self, value: &str) -> AppResult<()>;
+    fn log_envelope(&self, raw: &str, reason: &str);
+    fn persist_outcome(&self) -> AppResult<()>;
+    fn disable_account(&self) -> AppResult<()>;
+}
+
+/// The halt flag is the safety property, so it reaches disk first. If that
+/// write fails nothing else runs and the caller still aborts the cycle.
+pub fn perform_halt<S: HaltSink>(sink: &S, now_ms: i64, raw: &str, reason: &str) -> AppResult<()> {
+    sink.persist_halt(&halt_value(now_ms))?;
+    sink.log_envelope(raw, reason);
+    sink.persist_outcome()?;
+    sink.disable_account()?;
+    Ok(())
+}
+
+/// Bundle passed into a cycle task, so the task owns everything it needs.
+struct CycleInputs {
+    core: Arc<Core>,
+    events: Arc<dyn EventSink>,
+    machine: SharedMachine,
+    accounts: Vec<String>,
+    trigger: Trigger,
+    binary: PathBuf,
+    cwd: PathBuf,
+    timeout: Duration,
+    pid_slot: Arc<AtomicU32>,
+    cancel: CancellationToken,
+}
+
+/// Adapter that performs the four halt steps against the real store. Owns
+/// its data rather than borrowing, because the whole sequence runs inside one
+/// `blocking` hop and must be `Send + 'static`.
+struct StoreHalt {
+    core: Arc<Core>,
+    account_id: String,
+    outcome: PollOutcome,
+    raw: Option<String>,
+    taken_at: i64,
+    duration_ms: u32,
+}
+
+impl HaltSink for StoreHalt {
+    fn persist_halt(&self, value: &str) -> AppResult<()> {
+        self.core.store.set_polling_halted(value)
+    }
+    /// The only place a guard trip is logged. `run_usage` stays silent so
+    /// this ERROR line can never appear before the halt flag reaches disk.
+    fn log_envelope(&self, raw: &str, reason: &str) {
+        error!(
+            account_id = %self.account_id,
+            envelope = raw,
+            reason = reason,
+            "guard tripped: polling halted"
+        );
+    }
+    fn persist_outcome(&self) -> AppResult<()> {
+        self.core
+            .store
+            .insert_snapshot(
+                &self.account_id,
+                self.taken_at,
+                &self.outcome,
+                self.raw.as_deref(),
+                self.duration_ms,
+            )
+            .map(|_| ())
+    }
+    fn disable_account(&self) -> AppResult<()> {
+        self.core.store.mark_guard_tripped(&self.account_id)
+    }
+}
+
+/// Spec 6.3: what a finished poll means for the guard, given the outcome and
+/// what `Machine::record` made of it. Two different faults reach the same
+/// halt sequence: an envelope that trips the guard outright, and a fifth
+/// consecutive unclassifiable envelope on one account, which `record`
+/// reports as `Escalate` and which is stored as a guard trip in its own
+/// right. Pure, so the mapping is testable without a cycle.
+fn halt_decision(outcome: &PollOutcome, recorded: Recorded) -> (PollOutcome, Option<String>) {
+    match (outcome, recorded) {
+        (PollOutcome::GuardTripped(reason), _) => (outcome.clone(), Some(reason.clone())),
+        (_, Recorded::Escalate) => {
+            let reason = "unclassifiable envelope x5".to_string();
+            (PollOutcome::GuardTripped(reason.clone()), Some(reason))
+        }
+        _ => (outcome.clone(), None),
+    }
+}
+
+/// Polls the accounts serially in D17 order. Returns when the cycle is done,
+/// or early when a guard trip abandons the rest (same binary, same argv, same
+/// fault). The `CycleToken` is dropped with this future, which clears busy.
+async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
+    let CycleInputs {
+        core,
+        events,
+        machine,
+        accounts,
+        trigger,
+        binary,
+        cwd,
+        timeout,
+        pid_slot,
+        cancel,
+    } = inputs;
+
+    info!(
+        trigger = trigger.as_str(),
+        accounts = accounts.len(),
+        "cycle started"
+    );
+
+    let mut first_poll_logged_env = false;
+    for account_id in accounts {
+        if cancel.is_cancelled() {
+            debug!("cycle cancelled before finishing");
+            return;
+        }
+
+        let account = {
+            let store_core = Arc::clone(&core);
+            let id = account_id.clone();
+            match blocking(move || store_core.store.account_by_id(&id)).await {
+                Ok(Some(a)) => a,
+                Ok(None) => continue,
+                Err(e) => {
+                    error!(account_id = %account_id, error = %e, "could not load account");
+                    continue;
+                }
+            }
+        };
+
+        let taken_at = chrono::Utc::now().timestamp_millis();
+        let result = run_usage(
+            &binary,
+            &account.config_dir,
+            &cwd,
+            timeout,
+            chrono::Utc::now(),
+            &pid_slot,
+            &cancel,
+            !first_poll_logged_env,
+        )
+        .await;
+        first_poll_logged_env = true;
+
+        if cancel.is_cancelled() {
+            debug!(account_id = %account_id, "cycle cancelled mid-poll; result discarded");
+            return;
+        }
+
+        // Backoff and the spec 6.3 step 5 streak are both updated by
+        // `record`, which returns `Escalate` on the fifth consecutive
+        // unclassifiable envelope. Publish the snapshot immediately: it is
+        // the only scheduler state anything else can see.
+        let recorded = lock_machine(&machine).record(&account_id, &result.outcome, taken_at);
+        publish_status(&machine, &core.status, taken_at);
+
+        let (outcome, halt_reason) = halt_decision(&result.outcome, recorded);
+
+        if let Some(reason) = halt_reason {
+            let sink = StoreHalt {
+                core: Arc::clone(&core),
+                account_id: account_id.clone(),
+                outcome: outcome.clone(),
+                raw: result.raw.clone(),
+                taken_at,
+                duration_ms: result.duration_ms,
+            };
+            let envelope = result
+                .raw
+                .clone()
+                .unwrap_or_else(|| "<no stdout captured>".to_string());
+            let reason_for_log = reason.clone();
+            if let Err(e) =
+                blocking(move || perform_halt(&sink, taken_at, &envelope, &reason_for_log)).await
+            {
+                error!(error = %e, "could not fully record the guard trip");
+            }
+            events.usage_updated(&account_id);
+            events.refresh_tray();
+            events.cycle_finished();
+            warn!("cycle abandoned after a guard trip");
+            return;
+        }
+
+        {
+            let store_core = Arc::clone(&core);
+            let id = account_id.clone();
+            let to_store = outcome.clone();
+            let raw = result.raw.clone();
+            let duration_ms = result.duration_ms;
+            if let Err(e) = blocking(move || {
+                store_core
+                    .store
+                    .insert_snapshot(&id, taken_at, &to_store, raw.as_deref(), duration_ms)
+                    .map(|_| ())
+            })
+            .await
+            {
+                error!(account_id = %account_id, error = %e, "could not persist the snapshot");
+            }
+        }
+
+        let kind = outcome.kind();
+
+        if kind.is_failure() {
+            warn!(
+                account_id = %account_id,
+                label = %account.label,
+                outcome = kind.as_str(),
+                duration_ms = result.duration_ms,
+                trigger = trigger.as_str(),
+                error = ?outcome.error_text(),
+                "poll finished"
+            );
+        } else {
+            info!(
+                account_id = %account_id,
+                label = %account.label,
+                outcome = kind.as_str(),
+                duration_ms = result.duration_ms,
+                trigger = trigger.as_str(),
+                "poll finished"
+            );
+        }
+
+        events.usage_updated(&account_id);
+        events.refresh_tray();
+    }
+
+    events.cycle_finished();
+    info!(trigger = trigger.as_str(), "cycle finished");
+}
+
+pub struct Driver {
+    core: Arc<Core>,
+    events: Arc<dyn EventSink>,
+    process: Arc<dyn ProcessProbe>,
+    binary: Arc<dyn BinaryProbe>,
+    shutdown: CancellationToken,
+    pid_slot: Arc<AtomicU32>,
+    /// Labels each cycle so a late "cycle finished" message can be matched
+    /// against the cycle actually in flight.
+    cycle_generation: AtomicU64,
+    /// Owned here and nowhere else. Everything outside this file reads the
+    /// `DriverStatus` snapshot instead (spec 5.1).
+    machine: SharedMachine,
+}
+
+/// Tells the loop that a cycle task is over, so the driver republishes
+/// `DriverStatus` immediately instead of at its next wake-up. Without it the
+/// snapshot stays `busy` until the deadline or the next trigger, and
+/// `preview_manual` refuses a Refresh click that should have run.
+///
+/// It signals from `Drop`, so a cycle that panics or is aborted reports too,
+/// and it carries the cycle's generation so a message that arrives after the
+/// watchdog has already reaped that cycle cannot reap its successor.
+struct CycleDone {
+    tx: UnboundedSender<u64>,
+    generation: u64,
+}
+
+impl Drop for CycleDone {
+    fn drop(&mut self) {
+        let _ = self.tx.send(self.generation);
+    }
+}
+
+struct LiveCycle {
+    handle: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
+    generation: u64,
+}
+
+impl Driver {
+    pub fn new(
+        core: Arc<Core>,
+        events: Arc<dyn EventSink>,
+        process: Arc<dyn ProcessProbe>,
+        binary: Arc<dyn BinaryProbe>,
+        shutdown: CancellationToken,
+    ) -> Driver {
+        Driver {
+            core,
+            events,
+            process,
+            binary,
+            shutdown,
+            pid_slot: Arc::new(AtomicU32::new(0)),
+            cycle_generation: AtomicU64::new(0),
+            machine: Arc::new(Mutex::new(Machine::new())),
+        }
+    }
+
+    fn current_pid(&self) -> Option<u32> {
+        match self.pid_slot.load(Ordering::SeqCst) {
+            0 => None,
+            p => Some(p),
+        }
+    }
+
+    /// Re-stat the binary and publish the result for `get_dashboard`.
+    fn refresh_binary(&self, settings: &UserSettings) -> Option<PathBuf> {
+        let found = self.binary.find(&settings.claude_binary);
+        *lock_binary(&self.core.binary) = found
+            .as_ref()
+            .map(|(p, s)| (p.to_string_lossy().to_string(), *s));
+        found.map(|(p, _)| p)
+    }
+
+    fn publish(&self) {
+        publish_status(
+            &self.machine,
+            &self.core.status,
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
+
+    /// Spawns the cycle task described by a `Run` decision.
+    fn start_cycle(
+        &self,
+        accounts: Vec<String>,
+        trigger: Trigger,
+        binary: PathBuf,
+        settings: &UserSettings,
+        done_tx: &UnboundedSender<u64>,
+    ) -> LiveCycle {
+        let generation = self.cycle_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = begin_cycle(&self.machine, chrono::Utc::now().timestamp_millis());
+        // Busy has just become true; publish before the task starts so a
+        // command arriving immediately sees it.
+        self.publish();
+        let cancel = self.shutdown.child_token();
+        let inputs = CycleInputs {
+            core: Arc::clone(&self.core),
+            events: Arc::clone(&self.events),
+            machine: Arc::clone(&self.machine),
+            accounts,
+            trigger,
+            binary,
+            cwd: crate::paths::poll_cwd(&self.core.app_data_dir),
+            timeout: Duration::from_secs(u64::from(settings.timeout_secs)),
+            pid_slot: Arc::clone(&self.pid_slot),
+            cancel: cancel.clone(),
+        };
+        let signal = CycleDone {
+            tx: done_tx.clone(),
+            generation,
+        };
+        let handle = tokio::spawn(async move {
+            // `signal` is declared first so it is dropped last: the cycle's
+            // future — and with it the `CycleToken` that holds busy — is gone
+            // before the loop is told, so the snapshot it republishes is
+            // already correct.
+            let _signal = signal;
+            run_cycle(inputs, token).await;
+        });
+        LiveCycle {
+            handle,
+            cancel,
+            generation,
+        }
+    }
+
+    async fn settings(&self) -> UserSettings {
+        let core = Arc::clone(&self.core);
+        match blocking(move || core.store.stored_settings()).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!(error = %e, "could not read settings; using defaults");
+                UserSettings {
+                    interval_secs: crate::store::settings::DEFAULT_INTERVAL_SECS,
+                    timeout_secs: crate::store::settings::DEFAULT_TIMEOUT_SECS,
+                    claude_binary: String::new(),
+                    close_to_tray: true,
+                    launch_at_login: false,
+                    log_level: "info".to_string(),
+                }
+            }
+        }
+    }
+
+    /// An unreadable halt flag is treated as halted: the flag is the safety
+    /// property, so the fail-closed answer is the only safe one.
+    async fn halted(&self) -> bool {
+        let core = Arc::clone(&self.core);
+        match blocking(move || core.store.polling_halted()).await {
+            Ok(v) => v.is_some(),
+            Err(e) => {
+                error!(error = %e, "could not read the halt flag; assuming halted");
+                true
+            }
+        }
+    }
+
+    async fn enabled(&self) -> Vec<String> {
+        let core = Arc::clone(&self.core);
+        match blocking(move || core.store.enabled_account_ids()).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(error = %e, "could not list enabled accounts");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Runs one decision and, on `Run`, starts the cycle. Async because the
+    /// enabled list and the halt flag both come from the store.
+    async fn decide_and_maybe_run(
+        &self,
+        trigger: Trigger,
+        claude_running: Option<bool>,
+        settings: &UserSettings,
+        done_tx: &UnboundedSender<u64>,
+    ) -> Option<LiveCycle> {
+        // A stat, not a database call, so it stays on this thread.
+        let binary_path = self.refresh_binary(settings);
+        let enabled = self.enabled().await;
+        let halted = self.halted().await;
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let decision = lock_machine(&self.machine).decide(
+            trigger,
+            claude_running,
+            binary_path.is_some(),
+            halted,
+            &enabled,
+            now,
+        );
+        // Spec 5.1: publish after every decide, so a skipped Manual trigger
+        // and a gate transition are both visible to commands at once.
+        self.publish();
+
+        match decision {
+            Decision::Skip(reason) => {
+                match reason {
+                    crate::scheduler::machine::SkipReason::GateIdle
+                    | crate::scheduler::machine::SkipReason::Busy => {
+                        debug!(reason = reason.as_str(), "decision skipped")
+                    }
+                    _ => warn!(reason = reason.as_str(), "decision skipped"),
+                }
+                None
+            }
+            Decision::Run {
+                accounts,
+                reason,
+                gate_transition,
+            } => {
+                if let Some(gate) = gate_transition {
+                    info!(gate = gate.as_str(), "gate changed");
+                    self.events.gate_changed(gate.as_str());
+                }
+                let binary = binary_path?;
+                Some(self.start_cycle(accounts, reason, binary, settings, done_tx))
+            }
+        }
+    }
+
+    pub async fn run(self) {
+        let mut settings_rx = self.core.settings_tx.subscribe();
+        let mut settings = self.settings().await;
+
+        if let Err(e) = crate::paths::ensure_dir(&crate::paths::poll_cwd(&self.core.app_data_dir)) {
+            error!(error = %e, "could not create the poll working directory");
+        }
+
+        let mut last_prune = 0i64;
+        let mut live: Option<LiveCycle> = None;
+        // Cycle tasks report their own completion here, so the loop can
+        // republish the snapshot the moment busy clears rather than at its
+        // next wake-up. The driver keeps `done_tx` for its whole life, so
+        // `recv` never returns `None` and can never spin the select.
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        // An account change that arrives mid-cycle is deferred, never
+        // dropped: its ids stay accumulated in `Triggers` and are re-notified
+        // when the cycle ends. Manual clicks are deliberately coalesced away
+        // instead, but a newly enabled account must still get polled.
+        let mut changed_deferred = false;
+
+        // Startup: decide, run, then enter the loop.
+        if let Some(cycle) = self
+            .decide_and_maybe_run(Trigger::Startup, None, &settings, &done_tx)
+            .await
+        {
+            live = Some(cycle);
+        }
+
+        let mut last_cycle_end = chrono::Utc::now().timestamp_millis();
+        let mut watchdog = tokio::time::interval(WATCHDOG_TICK);
+        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // LOAD-BEARING INVARIANT (Task 12 review): `Machine::decide` and
+        // `begin_cycle` are two separate lock acquisitions, and
+        // `CycleToken::drop` clears busy without checking ownership. What
+        // makes that safe is that THIS task is the only caller of `decide`
+        // and `begin_cycle`, and it never calls them concurrently: commands
+        // hold no `Machine` handle (they read the published `DriverStatus`
+        // instead), and a cycle task only ever calls `record`. Do not call
+        // either from a spawned task, and never drop a `CycleToken` while
+        // holding the machine guard — that would deadlock in `Drop`.
+        loop {
+            // D10: prune at startup and every 24 h.
+            let now = chrono::Utc::now().timestamp_millis();
+            if now - last_prune >= PRUNE_INTERVAL_MS {
+                last_prune = now;
+                let core = Arc::clone(&self.core);
+                if let Err(e) = blocking(move || core.store.prune(now)).await {
+                    error!(error = %e, "prune failed");
+                }
+            }
+
+            // Backstop reap. A cycle normally reports itself through
+            // `done_rx`, which is prompter and also covers a panicking or
+            // aborted task; this catches the one case that cannot report,
+            // a task the runtime dropped before it ever ran.
+            if live.as_ref().is_some_and(|c| c.handle.is_finished()) {
+                live = None;
+                last_cycle_end = chrono::Utc::now().timestamp_millis();
+                lock_status(&self.core.status).stalled_at = None;
+                // The token has dropped, so busy is false again.
+                self.publish();
+                if changed_deferred {
+                    changed_deferred = false;
+                    // The ids are still accumulated in `Triggers`; this only
+                    // re-arms the notification that carries them.
+                    self.core.triggers.account_changed(Vec::new());
+                }
+            }
+
+            let deadline_ms = deadline_for(last_cycle_end, settings.interval_secs);
+            let wait = Duration::from_millis(
+                (deadline_ms - chrono::Utc::now().timestamp_millis()).max(0) as u64,
+            );
+            // Spec 6.5: the watchdog arm is disabled while no cycle is in
+            // flight. `live.is_some()` is the same predicate as
+            // `cycle_age(now).is_some()` without taking the machine lock
+            // inside a select! precondition.
+            let cycle_running = live.is_some();
+
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {
+                    // Busy is checked before spending a process check, so the
+                    // app's own child can never latch the gate.
+                    if lock_machine(&self.machine).is_busy() {
+                        debug!("timer skipped: a cycle is already running");
+                        last_cycle_end = chrono::Utc::now().timestamp_millis();
+                        continue;
+                    }
+                    let running = self.process.claude_running(self.current_pid());
+                    if let Some(cycle) = self
+                        .decide_and_maybe_run(Trigger::Timer, Some(running), &settings, &done_tx)
+                        .await
+                    {
+                        live = Some(cycle);
+                    } else {
+                        last_cycle_end = chrono::Utc::now().timestamp_millis();
+                    }
+                }
+                changed = settings_rx.changed() => {
+                    if changed.is_ok() {
+                        settings = settings_rx.borrow_and_update().clone();
+                        // Only a polling-relevant change reaches this arm at
+                        // all (spec section 8), and D16 makes it a deliberate
+                        // "try again" for every account.
+                        lock_machine(&self.machine).reset_all_backoff();
+                        self.publish();
+                        info!(
+                            interval_secs = settings.interval_secs,
+                            timeout_secs = settings.timeout_secs,
+                            "settings applied to the driver; backoff reset"
+                        );
+                        // The deadline moves, the clock is not restarted.
+                    }
+                }
+                _ = self.core.triggers.notified_manual() => {
+                    if let Some(cycle) = self
+                        .decide_and_maybe_run(Trigger::Manual, None, &settings, &done_tx)
+                        .await
+                    {
+                        live = Some(cycle);
+                    }
+                }
+                _ = self.core.triggers.notified_startup() => {
+                    if let Some(cycle) = self
+                        .decide_and_maybe_run(Trigger::Startup, None, &settings, &done_tx)
+                        .await
+                    {
+                        live = Some(cycle);
+                    }
+                }
+                _ = self.core.triggers.notified_changed() => {
+                    // Draining is what consumes the ids, so it must not happen
+                    // when the decision is already known to be `Skip(Busy)`:
+                    // the ids would be thrown away and a just-enabled account
+                    // would wait for the gate to open. Leave them accumulated
+                    // and re-notify when the cycle ends.
+                    if lock_machine(&self.machine).is_busy() {
+                        changed_deferred = true;
+                        debug!("account change deferred until the running cycle ends");
+                    } else {
+                        // The permit and the id set are independent, so the
+                        // set is drained only after the permit has been
+                        // consumed, and an empty drain is a no-op rather than
+                        // a decision.
+                        let ids = self.core.triggers.take_changed();
+                        if !ids.is_empty() {
+                            if let Some(cycle) = self
+                                .decide_and_maybe_run(
+                                    Trigger::AccountChanged(ids),
+                                    None,
+                                    &settings,
+                                    &done_tx,
+                                )
+                                .await
+                            {
+                                live = Some(cycle);
+                            }
+                        }
+                    }
+                }
+                finished = done_rx.recv() => {
+                    // Only the cycle currently in flight may be reaped: a
+                    // message for an older generation is the tail of a cycle
+                    // the watchdog has already dealt with.
+                    if live.as_ref().is_some_and(|c| Some(c.generation) == finished) {
+                        live = None;
+                        last_cycle_end = chrono::Utc::now().timestamp_millis();
+                        lock_status(&self.core.status).stalled_at = None;
+                        self.publish();
+                        if changed_deferred {
+                            changed_deferred = false;
+                            self.core.triggers.account_changed(Vec::new());
+                        }
+                    }
+                }
+                _ = watchdog.tick(), if cycle_running => {
+                    let age = lock_machine(&self.machine)
+                        .cycle_age(chrono::Utc::now().timestamp_millis());
+                    if let (Some(age), Some(cycle)) = (age, live.as_ref()) {
+                        let limit = watchdog_limit_ms(
+                            self.enabled().await.len(),
+                            settings.timeout_secs,
+                        );
+                        if age.as_millis() as u64 > limit {
+                            let at = chrono::Utc::now().timestamp_millis();
+                            error!(
+                                cycle_age_ms = age.as_millis() as u64,
+                                limit_ms = limit,
+                                "watchdog: aborting a stalled cycle task"
+                            );
+                            cycle.cancel.cancel();
+                            cycle.handle.abort();
+                            lock_status(&self.core.status).stalled_at = Some(at);
+                            self.events.poller_stalled(at, age.as_millis() as u64);
+                            live = None;
+                            last_cycle_end = at;
+                            // Aborting dropped the token, so busy is clear.
+                            self.publish();
+                            if changed_deferred {
+                                changed_deferred = false;
+                                self.core.triggers.account_changed(Vec::new());
+                            }
+                        }
+                    }
+                }
+                _ = self.shutdown.cancelled() => {
+                    info!("driver shutting down");
+                    break;
+                }
+            }
+        }
+
+        // Shutdown: cancel the live cycle (which kills its child through the
+        // child's own handle) and give it a bounded moment to finish.
+        if let Some(cycle) = live {
+            cycle.cancel.cancel();
+            if tokio::time::timeout(Duration::from_secs(2), cycle.handle)
+                .await
+                .is_err()
+            {
+                warn!("cycle task did not finish within 2 s of cancellation");
+            }
+        }
+        // One last snapshot so nothing is left reading a stale busy flag.
+        self.publish();
+        info!("driver stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `AppError` is only constructed by the recording halt sink below, so it
+    // is imported here rather than at module scope, where it would be an
+    // unused import in a non-test build and `-D warnings` would reject it.
+    use crate::error::AppError;
+    use crate::usage::UNEXPECTED_ENVELOPE_PREFIX;
+    use std::cell::RefCell;
+
+    #[test]
+    fn the_deadline_is_always_the_last_cycle_end_plus_the_gap() {
+        assert_eq!(deadline_for(1_000_000, 60), 1_000_000 + 60_000);
+        assert_eq!(deadline_for(1_000_000, 10), 1_000_000 + 10_000);
+        assert_eq!(deadline_for(1_000_000, 3600), 1_000_000 + 3_600_000);
+    }
+
+    #[test]
+    fn changing_the_gap_moves_the_deadline_without_restarting_the_clock() {
+        let last_cycle_end = 1_000_000i64;
+        let before = deadline_for(last_cycle_end, 60);
+        // 30 s later the user lowers the gap to 10 s.
+        let after = deadline_for(last_cycle_end, 10);
+        assert_eq!(before, 1_060_000);
+        assert_eq!(
+            after, 1_010_000,
+            "the new deadline is measured from the same cycle end, not from now"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_limit_scales_with_the_account_count() {
+        // enabled x timeout_secs + 10 s
+        assert_eq!(watchdog_limit_ms(1, 30), 40_000);
+        assert_eq!(watchdog_limit_ms(3, 30), 100_000);
+        assert_eq!(watchdog_limit_ms(0, 30), 10_000);
+        assert_eq!(watchdog_limit_ms(3, 120), 370_000);
+    }
+
+    #[derive(Default)]
+    struct RecordingHalt {
+        steps: RefCell<Vec<&'static str>>,
+        fail_on_persist_halt: bool,
+    }
+
+    impl HaltSink for RecordingHalt {
+        fn persist_halt(&self, _value: &str) -> AppResult<()> {
+            self.steps.borrow_mut().push("persist_halt");
+            if self.fail_on_persist_halt {
+                return Err(AppError::Db("disk on fire".into()));
+            }
+            Ok(())
+        }
+        fn log_envelope(&self, _raw: &str, _reason: &str) {
+            self.steps.borrow_mut().push("log_envelope");
+        }
+        fn persist_outcome(&self) -> AppResult<()> {
+            self.steps.borrow_mut().push("persist_outcome");
+            Ok(())
+        }
+        fn disable_account(&self) -> AppResult<()> {
+            self.steps.borrow_mut().push("disable_account");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_halt_persists_the_flag_first_then_logs_then_persists_the_outcome() {
+        let sink = RecordingHalt::default();
+        perform_halt(&sink, 1_700_000_000_000, "{\"type\":\"result\"}", "no local_command")
+            .expect("halt");
+        assert_eq!(
+            sink.steps.into_inner(),
+            vec![
+                "persist_halt",
+                "log_envelope",
+                "persist_outcome",
+                "disable_account"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_halt_flag_write_aborts_before_the_outcome_is_persisted() {
+        let sink = RecordingHalt {
+            fail_on_persist_halt: true,
+            ..Default::default()
+        };
+        let err = perform_halt(&sink, 1, "{}", "no local_command").expect_err("must fail");
+        assert_eq!(err.code(), "db");
+        assert_eq!(
+            sink.steps.into_inner(),
+            vec!["persist_halt"],
+            "the flag is the safety property; nothing else runs if it cannot be written"
+        );
+    }
+
+    #[test]
+    fn the_halt_value_is_the_documented_format() {
+        assert_eq!(halt_value(1_700_000_000_000), "guard_tripped:1700000000000");
+    }
+
+    #[test]
+    fn prune_runs_daily() {
+        assert_eq!(PRUNE_INTERVAL_MS, 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn an_envelope_that_trips_the_guard_halts_with_its_own_reason() {
+        let outcome = PollOutcome::GuardTripped("no local_command".to_string());
+        let (stored, reason) = halt_decision(&outcome, Recorded::Continue);
+        assert_eq!(reason.as_deref(), Some("no local_command"));
+        assert!(matches!(stored, PollOutcome::GuardTripped(_)));
+    }
+
+    #[test]
+    fn a_fifth_unclassifiable_envelope_is_stored_and_halted_as_a_guard_trip() {
+        // `record` has already counted the strikes; the driver's job is to
+        // turn `Escalate` into the same halt sequence a real trip takes.
+        let outcome = PollOutcome::SpawnError(format!("{UNEXPECTED_ENVELOPE_PREFIX}no `type`"));
+        let (stored, reason) = halt_decision(&outcome, Recorded::Escalate);
+        assert_eq!(reason.as_deref(), Some("unclassifiable envelope x5"));
+        match stored {
+            PollOutcome::GuardTripped(r) => assert_eq!(r, "unclassifiable envelope x5"),
+            other => panic!("expected the strike to be stored as a guard trip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_stored_unchanged_and_never_halts() {
+        let outcome = PollOutcome::Timeout(30);
+        let (stored, reason) = halt_decision(&outcome, Recorded::Continue);
+        assert_eq!(reason, None);
+        assert_eq!(stored.kind().as_str(), PollOutcome::Timeout(30).kind().as_str());
+    }
+
+    #[test]
+    fn publishing_copies_gate_busy_and_backoff_out_of_the_machine() {
+        let machine: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        let slot = Mutex::new(DriverStatus::default());
+        let now = 1_700_000_000_000i64;
+
+        lock_machine(&machine).record("a", &PollOutcome::Timeout(30), now);
+        lock_machine(&machine).decide(
+            Trigger::Timer,
+            Some(true),
+            true,
+            false,
+            &["b".to_string()],
+            now,
+        );
+
+        publish_status(&machine, &slot, now);
+
+        let published = lock_status(&slot).clone();
+        assert_eq!(published.gate.as_str(), "active");
+        assert!(!published.busy);
+        assert_eq!(published.backoff_until.get("a"), Some(&(now + 60_000)));
+    }
+
+    #[test]
+    fn publishing_preserves_the_watchdog_owned_stalled_at() {
+        let machine: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        let slot = Mutex::new(DriverStatus::default());
+        lock_status(&slot).stalled_at = Some(4242);
+
+        publish_status(&machine, &slot, 1);
+
+        assert_eq!(
+            lock_status(&slot).stalled_at,
+            Some(4242),
+            "Machine::status cannot know stalled_at, so it must be carried across"
+        );
+    }
+
+    #[test]
+    fn publishing_reports_a_running_cycle_as_busy() {
+        let machine: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        let slot = Mutex::new(DriverStatus::default());
+        let token = begin_cycle(&machine, 1);
+        publish_status(&machine, &slot, 1);
+        assert!(lock_status(&slot).busy);
+
+        drop(token);
+        publish_status(&machine, &slot, 2);
+        assert!(!lock_status(&slot).busy);
+    }
+}
