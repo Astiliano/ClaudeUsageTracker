@@ -162,6 +162,8 @@ fn harness(running: bool) -> Harness {
         triggers: Arc::new(Triggers::new()),
         status: Arc::new(Mutex::new(DriverStatus::default())),
         binary: Arc::new(Mutex::new(None)),
+        halt_latched: AtomicBool::new(false),
+        close_to_tray: AtomicBool::new(true),
         settings_tx,
         log: None,
         app_data_dir: tmp.path().to_path_buf(),

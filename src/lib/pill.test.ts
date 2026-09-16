@@ -104,6 +104,29 @@ describe("statusPill", () => {
     }
   });
 
+  it("tones ok success, a guard trip error, other failures warn", () => {
+    expect(statusPill(row({ latest: snapshot("ok") }), NOW).tone).toBe("success");
+    expect(statusPill(row({ latest: snapshot("guard_tripped") }), NOW).tone).toBe(
+      "error",
+    );
+    for (const outcome of [
+      "no_usage_data",
+      "parse_error",
+      "spawn_error",
+      "timeout",
+    ] as const) {
+      expect(statusPill(row({ latest: snapshot(outcome) }), NOW).tone).toBe("warn");
+    }
+  });
+
+  it("tones backoff warn and the two resting states neutral", () => {
+    expect(statusPill(row({ backoff_until: NOW + 200_000 }), NOW).tone).toBe("warn");
+    expect(statusPill(row({ latest: null }), NOW).tone).toBe("neutral");
+    expect(
+      statusPill(row({ account: account({ enabled: false }) }), NOW).tone,
+    ).toBe("neutral");
+  });
+
   it("shows no data yet when the account has never been polled", () => {
     const pill = statusPill(row({ latest: null }), NOW);
     expect(pill.kind).toBe("pending");

@@ -124,7 +124,7 @@ export function AccountsTable({
               <td>
                 <button
                   type="button"
-                  className={`pill pill-${pill.kind}`}
+                  className={`pill pill-${pill.kind} pill-tone-${pill.tone}`}
                   title={pill.tooltip}
                   disabled={pill.snapshotId === undefined || pill.outcome === "ok"}
                   onClick={() => {

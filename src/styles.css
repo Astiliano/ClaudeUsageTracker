@@ -17,6 +17,11 @@
     --fg: #e9ecf1;
     --muted: #9aa2b1;
     --line: #262b33;
+    /* The three status colours are re-stated for dark mode: the light-mode
+       values do not clear 4.5:1 against #14161a. */
+    --green: #3fb950;
+    --amber: #e3b341;
+    --red: #f85149;
   }
 }
 
@@ -134,8 +139,35 @@ body {
   color: inherit;
   font-size: 12px;
 }
-.pill-outcome {
+/* Tone, not kind, carries the colour: `ok` is an outcome too, and it must
+   not read as a warning. Every tone keeps its own border and text colour so
+   the pill is legible in both schemes. */
+.pill-tone-success {
+  border-color: var(--green);
+  color: var(--green);
+}
+.pill-tone-warn {
   border-color: var(--amber);
+  color: var(--amber);
+}
+.pill-tone-error {
+  border-color: var(--red);
+  color: var(--red);
+  background: rgba(215, 51, 51, 0.12);
+  font-weight: 600;
+}
+.pill-tone-neutral {
+  border-color: var(--line);
+  color: var(--muted);
+}
+/* A cooldown is a waiting state rather than a fault, so it is drawn quieter
+   than a failed poll of the same tone. */
+.pill-backoff {
+  border-style: dashed;
+  opacity: 0.85;
+}
+.pill-pending {
+  font-style: italic;
 }
 .pill-disabled {
   opacity: 0.7;
