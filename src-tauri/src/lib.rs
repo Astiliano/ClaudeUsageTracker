@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod discovery;
 pub mod error;
 pub mod login;
