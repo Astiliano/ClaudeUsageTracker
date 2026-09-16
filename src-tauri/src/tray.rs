@@ -331,6 +331,7 @@ mod tests {
             disabled_reason: None,
             is_default: false,
             created_at: 0,
+            sort_order: 0,
         }
     }
 

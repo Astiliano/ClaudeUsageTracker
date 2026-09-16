@@ -225,6 +225,14 @@ pub fn core_remove_account(core: &Core, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Manual account ordering (D17, revised 2026-09-16). Returns the new full
+/// list so the caller can replace its local state with the persisted order.
+pub fn core_reorder_accounts(core: &Core, ids: Vec<String>) -> AppResult<Vec<Account>> {
+    let accounts = core.store.reorder_accounts(&ids)?;
+    info!(count = accounts.len(), "accounts reordered");
+    Ok(accounts)
+}
+
 /// Newly added accounts come back disabled (spec 6.1).
 pub fn core_rescan_profiles(core: &Core, home: &Path, now: i64) -> AppResult<Vec<Account>> {
     let candidates = enumerate_profiles(home);
@@ -385,6 +393,19 @@ pub async fn remove_account(
     blocking(move || core_remove_account(&core, &id)).await?;
     crate::tray::apply_tray(&app, &tray_core).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn reorder_accounts(
+    app: tauri::AppHandle,
+    core: State<'_, SharedCore>,
+    ids: Vec<String>,
+) -> AppResult<Vec<Account>> {
+    let core = Arc::clone(&core);
+    let tray_core = Arc::clone(&core);
+    let accounts = blocking(move || core_reorder_accounts(&core, ids)).await?;
+    crate::tray::apply_tray(&app, &tray_core).await;
+    Ok(accounts)
 }
 
 #[tauri::command]
@@ -892,6 +913,38 @@ exit 0
         core_add_account(&core, &dir, 1).expect("add");
         let dash = core_get_dashboard(&core).expect("dashboard");
         assert_eq!(dash.accounts[0].backoff_until, None);
+    }
+
+    #[test]
+    fn core_reorder_accounts_persists_the_new_order() {
+        let (tmp, core) = core();
+        let a = core_add_account(&core, &make_dir(tmp.path(), ".claudeA"), 1).expect("a");
+        let b = core_add_account(&core, &make_dir(tmp.path(), ".claudeB"), 2).expect("b");
+        let c = core_add_account(&core, &make_dir(tmp.path(), ".claudeC"), 3).expect("c");
+
+        let result = core_reorder_accounts(&core, vec![c.id.clone(), a.id.clone(), b.id.clone()])
+            .expect("reorder");
+        let ids: Vec<String> = result.into_iter().map(|acc| acc.id).collect();
+        assert_eq!(ids, vec![c.id.clone(), a.id.clone(), b.id.clone()]);
+
+        let relisted: Vec<String> = core
+            .store
+            .list_accounts()
+            .expect("list")
+            .into_iter()
+            .map(|acc| acc.id)
+            .collect();
+        assert_eq!(relisted, vec![c.id, a.id, b.id]);
+    }
+
+    #[test]
+    fn core_reorder_accounts_rejects_an_unknown_id() {
+        let (tmp, core) = core();
+        let a = core_add_account(&core, &make_dir(tmp.path(), ".claudeA"), 1).expect("a");
+
+        let err = core_reorder_accounts(&core, vec![a.id, "nope".to_string()])
+            .expect_err("must reject");
+        assert_eq!(err.code(), "not_found");
     }
 
     #[test]
