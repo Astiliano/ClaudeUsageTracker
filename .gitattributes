@@ -1,0 +1,2 @@
+src-tauri/tests/fixtures/*.txt text eol=lf
+src-tauri/tests/fixtures/crlf.txt -text

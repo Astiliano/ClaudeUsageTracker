@@ -1,0 +1,4 @@
+You are currently using your subscription to power your Claude Code usage
+
+Current session: 15% used · resets Sep 16, 3:30am (Mars/Olympus_Mons)
+Current week (all models): 4% used · resets Sep 21, 8am (Mars/Olympus_Mons)
