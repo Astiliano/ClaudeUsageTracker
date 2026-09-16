@@ -21,6 +21,8 @@
 - Every enum crossing a DB, log, event or command boundary serialises `snake_case`: `DisabledReason` → `user` | `guard_tripped`; `SkipReason` → `halted` | `busy` | `no_binary` | `no_enabled_accounts` | `gate_idle` | `all_backed_off`; `Trigger` → `timer` | `manual` | `startup` | `account_changed`; `Gate` → `idle` | `active`.
 - Outcome strings (DB column, DTO, logs, UI, all identical): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`, `guard_tripped`. Everything except `ok` is a failure for backoff (D16) and the status pill.
 - All timestamps crossing a boundary are epoch milliseconds UTC (`i64`).
+- Scheduler state leaves `driver.rs` only as a `DriverStatus { gate, busy, stalled_at, backoff_until }` snapshot in `Arc<Mutex<DriverStatus>>`, published after every `decide()` and every `record()`. Nothing outside the driver holds a `Machine` handle.
+- Only `interval_secs`, `timeout_secs` and `claude_binary` publish on the settings watch (moving the deadline and resetting backoff). `close_to_tray`, `launch_at_login` and `log_level` are applied directly and never touch the scheduler.
 - No `unwrap()` / `expect()` in non-test code. Fallible paths return `Result<_, AppError>`; `AppError` serialises to `{code, message}`. No `any` in TypeScript.
 - Gates, all four green before a task is done: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `npm test`, `npm run build`.
 - npm installs use `socket npm install <pkg>` for new packages; `npm ci` for lockfile installs. Never re-enable npm scripts — the global `ignore-scripts=true` is deliberate.
@@ -523,7 +525,7 @@ MSG
 ## Task 3: Core usage types
 
 **Files:** Create `src-tauri/src/usage/mod.rs`; Modify `src-tauri/src/lib.rs`
-**Interfaces:** Consumes: `AppError` from Task 2. Produces: `Window { pct: u8, resets_at: Option<i64> }`, `ModelWindow { label: String, pct: u8, resets_at: Option<i64> }`, `Parsed { session: Window, week_all: Window, week_models: Vec<(String, Window)> }`, `PollOutcome` (6 variants), `OutcomeKind` with `as_str() -> &'static str` / `from_wire(&str) -> Option<OutcomeKind>` / `is_failure() -> bool`, `PollOutcome::kind() -> OutcomeKind`, `PollOutcome::error_text() -> Option<String>` (a timeout formats `timed out after {n}s`), `Snapshot`, `SnapshotDto`, `DisabledReason`, `Account`.
+**Interfaces:** Consumes: `AppError` from Task 2. Produces: `UNEXPECTED_ENVELOPE_PREFIX`, `is_unexpected_envelope(&str) -> bool`, `Window { pct: u8, resets_at: Option<i64> }`, `ModelWindow { label: String, pct: u8, resets_at: Option<i64> }`, `Parsed { session: Window, week_all: Window, week_models: Vec<(String, Window)> }`, `PollOutcome` (6 variants), `OutcomeKind` with `as_str() -> &'static str` / `from_wire(&str) -> Option<OutcomeKind>` / `is_failure() -> bool`, `PollOutcome::kind() -> OutcomeKind`, `PollOutcome::error_text() -> Option<String>` (a timeout formats `timed out after {n}s`), `Snapshot`, `SnapshotDto`, `DisabledReason`, `Account`.
 
 - [ ] **Step 1: Write the failing test** — create `src-tauri/src/usage/mod.rs` containing only this test module for now:
 
@@ -629,6 +631,33 @@ mod tests {
     }
 
     #[test]
+    fn the_unexpected_envelope_prefix_is_shared_by_the_guard_and_the_machine() {
+        assert_eq!(UNEXPECTED_ENVELOPE_PREFIX, "unexpected envelope: ");
+        assert!(is_unexpected_envelope(
+            "unexpected envelope: stdout is not JSON (expected value)"
+        ));
+        assert!(!is_unexpected_envelope("exit 7: auth failed"));
+        assert!(!is_unexpected_envelope(""));
+    }
+
+    #[test]
+    fn only_a_shape_class_spawn_error_counts_as_an_unexpected_envelope() {
+        let shape = PollOutcome::SpawnError(format!(
+            "{UNEXPECTED_ENVELOPE_PREFIX}no `type` field"
+        ));
+        assert!(shape
+            .error_text()
+            .map(|m| is_unexpected_envelope(&m))
+            .unwrap_or(false));
+
+        let other = PollOutcome::SpawnError("could not spawn /bin/nope".into());
+        assert!(!other
+            .error_text()
+            .map(|m| is_unexpected_envelope(&m))
+            .unwrap_or(false));
+    }
+
+    #[test]
     fn disabled_reason_uses_snake_case_wire_forms() {
         assert_eq!(DisabledReason::User.as_str(), "user");
         assert_eq!(DisabledReason::GuardTripped.as_str(), "guard_tripped");
@@ -679,6 +708,16 @@ Expect compile errors: `cannot find type 'OutcomeKind' in this scope`, `cannot f
 ```rust
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Every shape-class guard message starts with this. It lives here rather
+/// than in `runner.rs` because both the guard that produces it and the
+/// scheduler machine that counts the streak (spec 6.3 step 5) need it, and
+/// the machine must not depend on the runner.
+pub const UNEXPECTED_ENVELOPE_PREFIX: &str = "unexpected envelope: ";
+
+pub fn is_unexpected_envelope(message: &str) -> bool {
+    message.starts_with(UNEXPECTED_ENVELOPE_PREFIX)
+}
 
 /// One quota window: a whole-percent usage figure and an optional reset instant
 /// in epoch milliseconds UTC. `resets_at` is `None` when the CLI omitted the
@@ -865,7 +904,7 @@ cargo test --lib usage::
 cargo clippy --all-targets -- -D warnings
 ```
 
-Expect 6 passing tests, no warnings.
+Expect 8 passing tests, no warnings.
 
 - [ ] **Step 5: Commit** — run:
 
@@ -2774,7 +2813,7 @@ MSG
 ## Task 9: Store — settings
 
 **Files:** Create `src-tauri/src/store/settings.rs`; Modify `src-tauri/src/store/mod.rs`
-**Interfaces:** Consumes: `Store` from Task 8. Produces: `pub struct UserSettings { interval_secs: u32, timeout_secs: u32, claude_binary: String, close_to_tray: bool, launch_at_login: bool, log_level: String }`, constants `MIN_INTERVAL_SECS`/`MAX_INTERVAL_SECS`/`DEFAULT_INTERVAL_SECS`/`MIN_TIMEOUT_SECS`/`MAX_TIMEOUT_SECS`/`DEFAULT_TIMEOUT_SECS`, `pub fn validate_settings(&UserSettings) -> AppResult<()>`, `Store::get_raw`, `Store::set_raw`, `Store::stored_settings() -> AppResult<UserSettings>`, `Store::save_settings(&UserSettings) -> AppResult<()>`, `Store::polling_halted() -> AppResult<Option<String>>`, `Store::set_polling_halted(&str)`, `Store::clear_polling_halted() -> AppResult<Option<String>>`.
+**Interfaces:** Consumes: `Store` from Task 8. Produces: `pub struct UserSettings { interval_secs: u32, timeout_secs: u32, claude_binary: String, close_to_tray: bool, launch_at_login: bool, log_level: String }`, constants `MIN_INTERVAL_SECS`/`MAX_INTERVAL_SECS`/`DEFAULT_INTERVAL_SECS`/`MIN_TIMEOUT_SECS`/`MAX_TIMEOUT_SECS`/`DEFAULT_TIMEOUT_SECS`, `pub fn validate_settings(&UserSettings) -> AppResult<()>`, `pub fn polling_relevant_changed(&UserSettings, &UserSettings) -> bool`, `Store::get_raw`, `Store::set_raw`, `Store::stored_settings() -> AppResult<UserSettings>`, `Store::save_settings(&UserSettings) -> AppResult<()>`, `Store::polling_halted() -> AppResult<Option<String>>`, `Store::set_polling_halted(&str)`, `Store::clear_polling_halted() -> AppResult<Option<String>>`.
 
 `launch_at_login` is carried on `UserSettings` for the wire but is never persisted: `stored_settings` always returns `false` for it and `save_settings` ignores it. The command layer in Task 18 reads and writes the autostart plugin's live state instead (spec 6.6).
 
@@ -2944,6 +2983,45 @@ mod tests {
             Some("guard_tripped:1700000000000".to_string())
         );
     }
+
+    #[test]
+    fn only_the_three_polling_keys_are_scheduler_relevant() {
+        let base = defaults();
+
+        let mut interval = base.clone();
+        interval.interval_secs = 120;
+        assert!(polling_relevant_changed(&base, &interval));
+
+        let mut timeout = base.clone();
+        timeout.timeout_secs = 45;
+        assert!(polling_relevant_changed(&base, &timeout));
+
+        let mut binary = base.clone();
+        binary.claude_binary = "C:/bin/claude.exe".into();
+        assert!(polling_relevant_changed(&base, &binary));
+    }
+
+    #[test]
+    fn the_other_three_keys_never_touch_the_scheduler() {
+        let base = defaults();
+
+        let mut tray = base.clone();
+        tray.close_to_tray = false;
+        assert!(!polling_relevant_changed(&base, &tray));
+
+        let mut autostart = base.clone();
+        autostart.launch_at_login = true;
+        assert!(!polling_relevant_changed(&base, &autostart));
+
+        let mut level = base.clone();
+        level.log_level = "debug".into();
+        assert!(!polling_relevant_changed(&base, &level));
+    }
+
+    #[test]
+    fn an_identical_save_is_not_a_change() {
+        assert!(!polling_relevant_changed(&defaults(), &defaults()));
+    }
 }
 ```
 
@@ -3007,6 +3085,17 @@ pub fn validate_settings(s: &UserSettings) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+/// D16 / spec 8: only `interval_secs`, `timeout_secs` and `claude_binary`
+/// are polling-relevant. A change to one of them publishes on the settings
+/// watch, which moves the deadline and resets backoff. `close_to_tray`,
+/// `launch_at_login` and `log_level` are applied directly and must never
+/// touch the scheduler.
+pub fn polling_relevant_changed(previous: &UserSettings, next: &UserSettings) -> bool {
+    previous.interval_secs != next.interval_secs
+        || previous.timeout_secs != next.timeout_secs
+        || previous.claude_binary != next.claude_binary
 }
 
 impl Store {
@@ -3103,7 +3192,7 @@ cargo test --lib store::settings::
 cargo clippy --all-targets -- -D warnings
 ```
 
-Expect 11 passing tests, no warnings.
+Expect 14 passing tests, no warnings.
 
 - [ ] **Step 5: Commit** — run:
 
@@ -4199,11 +4288,14 @@ MSG
 ## Task 12: Scheduler state machine
 
 **Files:** Create `src-tauri/src/scheduler/mod.rs`, `src-tauri/src/scheduler/machine.rs`; Modify `src-tauri/src/lib.rs`
-**Interfaces:** Consumes: `OutcomeKind` (Task 3). Produces: `pub enum Gate`, `pub enum Trigger`, `pub enum SkipReason`, `pub enum Decision`, `pub struct Machine`, `pub struct CycleToken`, `pub type SharedMachine = std::sync::Arc<std::sync::Mutex<Machine>>`, `pub fn lock_machine(&Mutex<Machine>) -> MutexGuard<'_, Machine>`, `pub fn begin_cycle(&SharedMachine, i64) -> CycleToken`, `Machine::decide(&mut self, Trigger, Option<bool>, bool, bool, &[String], i64) -> Decision`, `Machine::is_busy()`, `Machine::gate()`, `Machine::record(&str, OutcomeKind, i64)`, `Machine::reset_backoff(&str)`, `Machine::reset_all_backoff()`, `Machine::backoff_until(&str) -> Option<i64>`, `Machine::cycle_age(i64) -> Option<std::time::Duration>`.
+**Interfaces:** Consumes: `OutcomeKind`, `PollOutcome`, `is_unexpected_envelope`, `UNEXPECTED_ENVELOPE_PREFIX` (Task 3). Produces: `pub enum Gate`, `pub enum Trigger`, `pub enum SkipReason`, `pub enum Decision`, `pub enum Recorded { Continue, Escalate }`, `pub struct Backoff { consecutive_failures: u32, next_allowed: i64, unexpected_envelope_streak: u8 }`, `pub struct DriverStatus { gate: Gate, busy: bool, stalled_at: Option<i64>, backoff_until: HashMap<String, i64> }`, `pub const MAX_ENVELOPE_STRIKES: u8 = 5`, `pub struct Machine`, `pub struct CycleToken`, `pub type SharedMachine = std::sync::Arc<std::sync::Mutex<Machine>>`, `pub fn lock_machine(&Mutex<Machine>) -> MutexGuard<'_, Machine>`, `pub fn begin_cycle(&SharedMachine, i64) -> CycleToken`, `pub fn preview_manual(&DriverStatus, bool, bool, &[String]) -> Option<SkipReason>`, `Machine::decide(&mut self, Trigger, Option<bool>, bool, bool, &[String], i64) -> Decision`, `Machine::is_busy()`, `Machine::gate()`, `Machine::status(&self, i64) -> DriverStatus`, `Machine::record(&str, &PollOutcome, i64) -> Recorded`, `Machine::reset_backoff(&str)`, `Machine::reset_all_backoff()`, `Machine::backoff_until(&str) -> Option<i64>`, `Machine::cycle_age(i64) -> Option<std::time::Duration>`.
 
-Two spec points are resolved here and the resolution is written into the code as a comment:
+`Machine` is owned by the driver alone. Nothing outside `driver.rs` ever reads its fields: the driver publishes a `DriverStatus` snapshot into shared state after every `decide()` and every `record()`, and that snapshot is the only scheduler state commands and the UI ever see (spec §5.1). `DriverStatus` is defined here because it is built from `Gate` and the backoff map.
+
+Three spec points are resolved here and each resolution is written into the code as a comment:
 1. `AccountChanged(ids)` whose intersection with the enabled set is empty skips with `NoEnabledAccounts`, not `AllBackedOff` — nothing was in cooldown, the changed accounts simply are not enabled. `AllBackedOff` keeps its spec meaning of "enabled accounts exist and every one is in cooldown".
 2. The RAII `CycleToken` needs shared ownership to clear busy on drop, so the driver holds the machine as `Arc<Mutex<Machine>>`. `decide` itself stays a pure function of its arguments and the machine's fields.
+3. `Machine::status` cannot know `stalled_at` — the watchdog owns that — so it returns `None` there and the driver carries the previous value across when it publishes. `backoff_until` lists every account with a live failure streak rather than filtering on `now`, because the snapshot is written when the driver acts and read later by the UI, which already ignores an elapsed deadline.
 
 - [ ] **Step 1: Write the failing test for the decision table** — create `src-tauri/src/scheduler/machine.rs` containing only this test module for now:
 
@@ -4211,12 +4303,31 @@ Two spec points are resolved here and the resolution is written into the code as
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::{Parsed, Window, UNEXPECTED_ENVELOPE_PREFIX};
     use std::sync::{Arc, Mutex};
 
     const NOW: i64 = 1_700_000_000_000;
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn ok_outcome() -> PollOutcome {
+        PollOutcome::Ok(Parsed {
+            session: Window { pct: 1, resets_at: None },
+            week_all: Window { pct: 1, resets_at: None },
+            week_models: vec![],
+        })
+    }
+
+    /// A failure that is not a shape-class envelope error.
+    fn plain_failure() -> PollOutcome {
+        PollOutcome::Timeout(30)
+    }
+
+    /// A spawn error the guard could not classify (spec 6.3 step 5).
+    fn shape_failure() -> PollOutcome {
+        PollOutcome::SpawnError(format!("{UNEXPECTED_ENVELOPE_PREFIX}no `type` field"))
     }
 
     fn accounts() -> Vec<String> {
@@ -4405,7 +4516,7 @@ mod tests {
         let mut m = Machine::new();
         let expected_secs = [60i64, 120, 240, 480, 900, 900, 900];
         for (i, want) in expected_secs.iter().enumerate() {
-            m.record("a", OutcomeKind::SpawnError, NOW);
+            assert_eq!(m.record("a", &plain_failure(), NOW), Recorded::Continue);
             assert_eq!(
                 m.backoff_until("a"),
                 Some(NOW + want * 1000),
@@ -4417,15 +4528,16 @@ mod tests {
 
     #[test]
     fn every_non_ok_outcome_counts_as_a_failure_for_backoff() {
-        for kind in [
-            OutcomeKind::NoUsageData,
-            OutcomeKind::ParseError,
-            OutcomeKind::SpawnError,
-            OutcomeKind::Timeout,
-            OutcomeKind::GuardTripped,
+        for outcome in [
+            PollOutcome::NoUsageData,
+            PollOutcome::ParseError("x".into()),
+            PollOutcome::SpawnError("could not spawn".into()),
+            PollOutcome::Timeout(30),
+            PollOutcome::GuardTripped("x".into()),
         ] {
             let mut m = Machine::new();
-            m.record("a", kind, NOW);
+            assert!(outcome.kind().is_failure());
+            m.record("a", &outcome, NOW);
             assert_eq!(m.backoff_until("a"), Some(NOW + 60_000));
         }
     }
@@ -4433,11 +4545,11 @@ mod tests {
     #[test]
     fn an_ok_outcome_clears_the_backoff() {
         let mut m = Machine::new();
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("a", OutcomeKind::Ok, NOW);
+        m.record("a", &plain_failure(), NOW);
+        m.record("a", &plain_failure(), NOW);
+        assert_eq!(m.record("a", &ok_outcome(), NOW), Recorded::Continue);
         assert_eq!(m.backoff_until("a"), None);
-        m.record("a", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
         assert_eq!(
             m.backoff_until("a"),
             Some(NOW + 60_000),
@@ -4446,9 +4558,161 @@ mod tests {
     }
 
     #[test]
+    fn five_consecutive_unclassifiable_envelopes_escalate() {
+        let mut m = Machine::new();
+        for i in 1..MAX_ENVELOPE_STRIKES {
+            assert_eq!(
+                m.record("a", &shape_failure(), NOW),
+                Recorded::Continue,
+                "strike {i} must not escalate yet"
+            );
+        }
+        assert_eq!(
+            m.record("a", &shape_failure(), NOW),
+            Recorded::Escalate,
+            "the fifth consecutive strike escalates"
+        );
+    }
+
+    #[test]
+    fn the_envelope_streak_is_tracked_per_account() {
+        let mut m = Machine::new();
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+            assert_eq!(m.record("b", &shape_failure(), NOW), Recorded::Continue);
+        }
+        assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Escalate);
+        assert_eq!(m.record("b", &shape_failure(), NOW), Recorded::Escalate);
+    }
+
+    #[test]
+    fn any_other_outcome_resets_the_envelope_streak() {
+        let mut m = Machine::new();
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        // A different failure still backs off, but it breaks the run.
+        assert_eq!(m.record("a", &plain_failure(), NOW), Recorded::Continue);
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Escalate);
+    }
+
+    #[test]
+    fn a_success_also_resets_the_envelope_streak() {
+        let mut m = Machine::new();
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        assert_eq!(m.record("a", &ok_outcome(), NOW), Recorded::Continue);
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Escalate);
+    }
+
+    #[test]
+    fn a_spawn_error_that_is_not_an_envelope_problem_never_escalates() {
+        let mut m = Machine::new();
+        for _ in 0..20 {
+            assert_eq!(
+                m.record("a", &PollOutcome::SpawnError("exit 7: boom".into()), NOW),
+                Recorded::Continue
+            );
+        }
+    }
+
+    #[test]
+    fn status_snapshots_gate_busy_and_every_cooling_account() {
+        let shared: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        {
+            let mut m = lock_machine(&shared);
+            m.record("a", &plain_failure(), NOW);
+            let status = m.status(NOW);
+            assert_eq!(status.gate, Gate::Idle);
+            assert!(!status.busy);
+            assert_eq!(status.stalled_at, None);
+            assert_eq!(status.backoff_until.get("a"), Some(&(NOW + 60_000)));
+            assert_eq!(status.backoff_until.get("b"), None);
+        }
+
+        let _token = begin_cycle(&shared, NOW);
+        let status = lock_machine(&shared).status(NOW);
+        assert!(status.busy, "status must report a running cycle");
+    }
+
+    #[test]
+    fn status_reports_the_active_gate_after_a_timer_run() {
+        let mut m = Machine::new();
+        m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
+        assert_eq!(m.status(NOW).gate, Gate::Active);
+    }
+
+    #[test]
+    fn status_drops_an_account_once_its_backoff_is_cleared() {
+        let mut m = Machine::new();
+        m.record("a", &plain_failure(), NOW);
+        m.record("a", &ok_outcome(), NOW);
+        assert!(m.status(NOW).backoff_until.is_empty());
+    }
+
+    #[test]
+    fn preview_manual_reads_only_the_published_status() {
+        let mut m = Machine::new();
+        m.record("a", &plain_failure(), NOW);
+        let idle = m.status(NOW);
+
+        assert_eq!(
+            preview_manual(&idle, true, true, &accounts()),
+            Some(SkipReason::Halted)
+        );
+        assert_eq!(
+            preview_manual(&idle, false, false, &accounts()),
+            Some(SkipReason::NoBinary)
+        );
+        assert_eq!(
+            preview_manual(&idle, true, false, &[]),
+            Some(SkipReason::NoEnabledAccounts)
+        );
+        assert_eq!(
+            preview_manual(&idle, true, false, &accounts()),
+            None,
+            "a manual trigger bypasses backoff, so a cooling account cannot skip it"
+        );
+
+        let busy = DriverStatus {
+            busy: true,
+            ..idle.clone()
+        };
+        assert_eq!(
+            preview_manual(&busy, true, false, &accounts()),
+            Some(SkipReason::Busy)
+        );
+    }
+
+    #[test]
+    fn preview_manual_orders_halted_ahead_of_busy_and_no_binary() {
+        let status = DriverStatus {
+            gate: Gate::Active,
+            busy: true,
+            stalled_at: None,
+            backoff_until: HashMap::new(),
+        };
+        assert_eq!(
+            preview_manual(&status, false, true, &[]),
+            Some(SkipReason::Halted)
+        );
+        assert_eq!(
+            preview_manual(&status, false, false, &[]),
+            Some(SkipReason::Busy)
+        );
+    }
+
+    #[test]
     fn a_timer_drops_backed_off_accounts() {
         let mut m = Machine::new();
-        m.record("a", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
         let d = m.decide(
             Trigger::Timer,
             Some(true),
@@ -4463,8 +4727,8 @@ mod tests {
     #[test]
     fn all_backed_off_means_every_enabled_account_is_in_cooldown() {
         let mut m = Machine::new();
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("b", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
+        m.record("b", &plain_failure(), NOW);
         let d = m.decide(
             Trigger::Timer,
             Some(true),
@@ -4479,8 +4743,8 @@ mod tests {
     #[test]
     fn manual_ignores_and_resets_backoff() {
         let mut m = Machine::new();
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("b", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
+        m.record("b", &plain_failure(), NOW);
         let d = m.decide(
             Trigger::Manual,
             Some(false),
@@ -4497,8 +4761,8 @@ mod tests {
     #[test]
     fn account_changed_ignores_and_resets_backoff_for_its_accounts_only() {
         let mut m = Machine::new();
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("b", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
+        m.record("b", &plain_failure(), NOW);
         let d = m.decide(
             Trigger::AccountChanged(ids(&["a"])),
             Some(false),
@@ -4517,10 +4781,38 @@ mod tests {
     }
 
     #[test]
+    fn reset_backoff_clears_one_account_and_leaves_the_rest() {
+        let mut m = Machine::new();
+        m.record("a", &plain_failure(), NOW);
+        m.record("b", &plain_failure(), NOW);
+
+        m.reset_backoff("a");
+        assert_eq!(m.backoff_until("a"), None);
+        assert_eq!(m.backoff_until("b"), Some(NOW + 60_000));
+
+        // Resetting an account that was never recorded is a no-op.
+        m.reset_backoff("never-seen");
+        assert_eq!(m.backoff_until("b"), Some(NOW + 60_000));
+    }
+
+    #[test]
+    fn reset_backoff_also_clears_the_envelope_streak() {
+        let mut m = Machine::new();
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        m.reset_backoff("a");
+        for _ in 0..4 {
+            assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Continue);
+        }
+        assert_eq!(m.record("a", &shape_failure(), NOW), Recorded::Escalate);
+    }
+
+    #[test]
     fn reset_all_backoff_clears_everything() {
         let mut m = Machine::new();
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("b", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
+        m.record("b", &plain_failure(), NOW);
         m.reset_all_backoff();
         assert_eq!(m.backoff_until("a"), None);
         assert_eq!(m.backoff_until("b"), None);
@@ -4533,8 +4825,8 @@ mod tests {
         m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
         assert_eq!(m.gate(), Gate::Active);
         // Everything is in cooldown when the final poll would be due.
-        m.record("a", OutcomeKind::Timeout, NOW);
-        m.record("b", OutcomeKind::Timeout, NOW);
+        m.record("a", &plain_failure(), NOW);
+        m.record("b", &plain_failure(), NOW);
         let d = m.decide(
             Trigger::Timer,
             Some(false),
@@ -4624,12 +4916,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-use crate::usage::OutcomeKind;
+use crate::usage::{is_unexpected_envelope, PollOutcome};
 
 /// D16 backoff schedule: `min(900 s, 60 s * 2^(k-1))` on the k-th consecutive
 /// non-`ok` outcome.
 const BACKOFF_BASE_SECS: i64 = 60;
 const BACKOFF_MAX_SECS: i64 = 900;
+
+/// Spec 6.3 step 5: five consecutive unclassifiable envelopes on one account
+/// escalate to a guard trip.
+pub const MAX_ENVELOPE_STRIKES: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
@@ -4705,9 +5001,44 @@ pub enum Decision {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct Backoff {
-    consecutive_failures: u32,
-    next_allowed: i64,
+pub struct Backoff {
+    pub consecutive_failures: u32,
+    pub next_allowed: i64,
+    /// Spec 6.3 step 5: consecutive `unexpected envelope` spawn errors.
+    pub unexpected_envelope_streak: u8,
+}
+
+/// What `record` tells the cycle task to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    Continue,
+    /// Spec 6.3 step 5 tripped: run the guard-trip sequence for this account.
+    Escalate,
+}
+
+/// The snapshot the driver publishes into shared state after every `decide()`
+/// and every `record()`. Spec 5.1: this is the only way code outside
+/// `driver.rs` reads scheduler state, so `Machine`'s own fields are never
+/// read across tasks and nothing can drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverStatus {
+    pub gate: Gate,
+    pub busy: bool,
+    /// Owned by the watchdog, not by `Machine`; the driver carries the
+    /// previous value across when it publishes a fresh snapshot.
+    pub stalled_at: Option<i64>,
+    pub backoff_until: HashMap<String, i64>,
+}
+
+impl Default for DriverStatus {
+    fn default() -> Self {
+        DriverStatus {
+            gate: Gate::Idle,
+            busy: false,
+            stalled_at: None,
+            backoff_until: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4758,17 +5089,59 @@ impl Machine {
     }
 
     /// D16: every outcome except `ok` extends the cooldown; `ok` clears it.
-    pub fn record(&mut self, account: &str, outcome: OutcomeKind, now: i64) {
-        if !outcome.is_failure() {
+    /// Spec 6.3 step 5: a run of unclassifiable envelopes on one account is
+    /// counted here too, and the escalation decision is made here so the
+    /// cycle task only has to act on the returned `Recorded`.
+    pub fn record(&mut self, account: &str, outcome: &PollOutcome, now: i64) -> Recorded {
+        if !outcome.kind().is_failure() {
+            // Removing the entry also clears the envelope streak.
             self.backoff.remove(account);
-            return;
+            return Recorded::Continue;
         }
+
+        let is_envelope_error = matches!(
+            outcome,
+            PollOutcome::SpawnError(message) if is_unexpected_envelope(message)
+        );
+
         let entry = self.backoff.entry(account.to_string()).or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         let exponent = entry.consecutive_failures.saturating_sub(1).min(16);
         let delay_secs =
             (BACKOFF_BASE_SECS.saturating_mul(1i64 << exponent)).min(BACKOFF_MAX_SECS);
         entry.next_allowed = now + delay_secs * 1000;
+
+        if is_envelope_error {
+            entry.unexpected_envelope_streak =
+                entry.unexpected_envelope_streak.saturating_add(1);
+        } else {
+            entry.unexpected_envelope_streak = 0;
+        }
+
+        if entry.unexpected_envelope_streak >= MAX_ENVELOPE_STRIKES {
+            Recorded::Escalate
+        } else {
+            Recorded::Continue
+        }
+    }
+
+    /// Snapshot for `AppState`. `stalled_at` is always `None` here: the
+    /// watchdog owns it and the driver merges it in. `backoff_until` lists
+    /// every account with a live failure streak rather than filtering on
+    /// `now`, because the snapshot is written when the driver acts and read
+    /// later by the UI, which already ignores an elapsed deadline.
+    pub fn status(&self, _now: i64) -> DriverStatus {
+        DriverStatus {
+            gate: self.gate,
+            busy: self.cycle.is_some(),
+            stalled_at: None,
+            backoff_until: self
+                .backoff
+                .iter()
+                .filter(|(_, b)| b.consecutive_failures > 0)
+                .map(|(id, b)| (id.clone(), b.next_allowed))
+                .collect(),
+        }
     }
 
     pub fn reset_backoff(&mut self, account: &str) {
@@ -4852,7 +5225,7 @@ impl Machine {
         // 5. Backoff filter (D16). Manual and AccountChanged reset instead.
         let runnable: Vec<String> = if trigger.bypasses_backoff() {
             for id in &candidates {
-                self.backoff.remove(id);
+                self.reset_backoff(id);
             }
             candidates
         } else {
@@ -4885,6 +5258,32 @@ impl Machine {
             gate_transition,
         }
     }
+}
+
+/// Read-only answer to "would a Manual trigger run right now?", computed
+/// from the published snapshot rather than from `Machine`. A Manual trigger
+/// bypasses the gate and backoff, so only rules 0 to 3 can ever skip it,
+/// which makes this preview exact. `poll_now` uses it to report
+/// `skipped:<reason>` without consuming a trigger.
+pub fn preview_manual(
+    status: &DriverStatus,
+    binary_present: bool,
+    halted: bool,
+    enabled: &[String],
+) -> Option<SkipReason> {
+    if halted {
+        return Some(SkipReason::Halted);
+    }
+    if status.busy {
+        return Some(SkipReason::Busy);
+    }
+    if !binary_present {
+        return Some(SkipReason::NoBinary);
+    }
+    if enabled.is_empty() {
+        return Some(SkipReason::NoEnabledAccounts);
+    }
+    None
 }
 
 pub type SharedMachine = Arc<Mutex<Machine>>;
@@ -4928,7 +5327,7 @@ cargo test --lib scheduler::machine::
 cargo clippy --all-targets -- -D warnings
 ```
 
-Expect 21 passing tests, no warnings. The panic test prints an unwind message; that is expected output, not a failure.
+Expect 35 passing tests, which is every `#[test]` in `scheduler::machine`, and no warnings. The panic test prints an unwind message; that is expected output, not a failure.
 
 - [ ] **Step 5: Commit** — run:
 
@@ -4942,8 +5341,11 @@ Implements decide in spec order (halt, busy, no binary, no enabled
 accounts, candidate list, backoff filter, gate transition) returning a
 description the driver executes, plus the D16 doubling backoff capped at
 15 minutes and an RAII cycle token that clears busy even when the cycle
-task panics. A skipped decision never moves the gate, so the promised
-final poll survives backoff.
+task panics. record now carries the unexpected-envelope streak and returns
+Escalate on the fifth consecutive unclassifiable envelope, and status
+produces the DriverStatus snapshot that is the only scheduler state
+anything outside the driver ever reads. A skipped decision never moves the
+gate, so the promised final poll survives backoff.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014sqgoktsDjFqBApr4zsfg2
@@ -5199,7 +5601,9 @@ MSG
 ## Task 14: Envelope guard (pure)
 
 **Files:** Create `src-tauri/src/usage/runner.rs`; Modify `src-tauri/src/usage/mod.rs`
-**Interfaces:** Consumes: nothing beyond `serde_json`. Produces: `pub const USAGE_ARGV: [&str; 11]`, `pub enum GuardVerdict { Usage(String), Shape(String), Tripped(String) }`, `pub fn check_envelope(stdout: &str) -> GuardVerdict`, `pub struct EnvelopeStrikes` with `new()`, `record_shape_error(&mut self, &str) -> bool`, `clear(&mut self, &str)`, `pub const MAX_ENVELOPE_STRIKES: u32 = 5`, `pub fn env_names_to_strip(names: impl Iterator<Item = String>) -> Vec<String>`.
+**Interfaces:** Consumes: `UNEXPECTED_ENVELOPE_PREFIX` (Task 3) and `serde_json`. Produces: `pub const USAGE_ARGV: [&str; 11]`, `pub enum GuardVerdict { Usage(String), Shape(String), Tripped(String) }`, `pub fn check_envelope(stdout: &str) -> GuardVerdict`, `pub fn env_names_to_strip(names: impl Iterator<Item = String>) -> Vec<String>`.
+
+Spec 6.3 step 5 (the five-strike escalation) is **not** here. v5 puts the counter in `Backoff.unexpected_envelope_streak` and the decision in `Machine::record`, both written in Task 12, so the guard stays a pure classifier of one envelope.
 
 - [ ] **Step 1: Write the failing test** — create `src-tauri/src/usage/runner.rs` containing only this test module for now:
 
@@ -5367,45 +5771,37 @@ mod tests {
         assert!(shape(&v).contains("result"));
     }
 
-    // --- Rule 5: escalation ---
+    // --- Rule 5: escalation lives in Machine::record (Task 12) ---
 
     #[test]
-    fn five_consecutive_shape_errors_escalate_to_a_trip() {
-        let mut strikes = EnvelopeStrikes::new();
-        for i in 1..MAX_ENVELOPE_STRIKES {
-            assert!(
-                !strikes.record_shape_error("acct"),
-                "strike {i} must not escalate yet"
-            );
+    fn every_shape_verdict_is_recognisable_as_a_strike_by_the_machine() {
+        // The machine counts a strike by matching this prefix, so every
+        // shape-class message must carry it.
+        for stdout in [
+            "not json",
+            r#"{"local_command":"usage"}"#,
+            r#"{"type":"system"}"#,
+            r#"{"type":"result","local_command":"usage","result":"x"}"#,
+            r#"{"type":"result","local_command":"usage","num_turns":0}"#,
+        ] {
+            match check_envelope(stdout) {
+                GuardVerdict::Shape(m) => assert!(
+                    crate::usage::is_unexpected_envelope(&m),
+                    "not recognisable as a strike: {m}"
+                ),
+                other => panic!("expected Shape for {stdout}, got {other:?}"),
+            }
         }
-        assert!(
-            strikes.record_shape_error("acct"),
-            "the fifth consecutive strike must escalate"
-        );
     }
 
     #[test]
-    fn strikes_are_tracked_per_account() {
-        let mut strikes = EnvelopeStrikes::new();
-        for _ in 0..4 {
-            assert!(!strikes.record_shape_error("a"));
-            assert!(!strikes.record_shape_error("b"));
+    fn a_tripped_verdict_is_never_mistaken_for_a_strike() {
+        match check_envelope(r#"{"type":"result","num_turns":1,"result":"hi"}"#) {
+            GuardVerdict::Tripped(m) => {
+                assert!(!crate::usage::is_unexpected_envelope(&m))
+            }
+            other => panic!("expected Tripped, got {other:?}"),
         }
-        assert!(strikes.record_shape_error("a"));
-        assert!(strikes.record_shape_error("b"));
-    }
-
-    #[test]
-    fn a_clear_resets_the_strike_count() {
-        let mut strikes = EnvelopeStrikes::new();
-        for _ in 0..4 {
-            assert!(!strikes.record_shape_error("a"));
-        }
-        strikes.clear("a");
-        for _ in 0..4 {
-            assert!(!strikes.record_shape_error("a"));
-        }
-        assert!(strikes.record_shape_error("a"));
     }
 
     // --- D15 env sanitisation ---
@@ -5450,7 +5846,8 @@ Expect `cannot find value 'USAGE_ARGV' in this scope` and `cannot find function 
 
 ```rust
 use serde_json::Value;
-use std::collections::HashMap;
+
+use super::UNEXPECTED_ENVELOPE_PREFIX;
 
 /// Spec 2.2 / 6.3. The flag set lives in exactly one place. `--bare` must
 /// never appear here: it does not read OAuth credentials.
@@ -5468,9 +5865,6 @@ pub const USAGE_ARGV: [&str; 11] = [
     "--safe-mode",
 ];
 
-/// Spec 6.3 rule 5.
-pub const MAX_ENVELOPE_STRIKES: u32 = 5;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardVerdict {
     /// A confirmed local `/usage` envelope; the payload is the `result` text.
@@ -5481,8 +5875,10 @@ pub enum GuardVerdict {
     Tripped(String),
 }
 
+/// Every shape-class message carries the shared prefix, which is how
+/// `Machine::record` recognises a strike for the spec 6.3 step 5 escalation.
 fn shape(reason: &str) -> GuardVerdict {
-    GuardVerdict::Shape(format!("unexpected envelope: {reason}"))
+    GuardVerdict::Shape(format!("{UNEXPECTED_ENVELOPE_PREFIX}{reason}"))
 }
 
 /// The envelope guard, evaluated strictly in spec 6.3 order.
@@ -5551,34 +5947,6 @@ pub fn check_envelope(stdout: &str) -> GuardVerdict {
     GuardVerdict::Usage(result.to_string())
 }
 
-/// Spec 6.3 rule 5: five consecutive unclassifiable envelopes on one account
-/// escalate to a guard trip, because an envelope the app cannot classify is
-/// exactly the case where it cannot prove no turn was spent.
-#[derive(Debug, Default)]
-pub struct EnvelopeStrikes {
-    counts: HashMap<String, u32>,
-}
-
-impl EnvelopeStrikes {
-    pub fn new() -> EnvelopeStrikes {
-        EnvelopeStrikes {
-            counts: HashMap::new(),
-        }
-    }
-
-    /// Returns `true` when this strike escalates to a guard trip.
-    pub fn record_shape_error(&mut self, account_id: &str) -> bool {
-        let entry = self.counts.entry(account_id.to_string()).or_insert(0);
-        *entry = entry.saturating_add(1);
-        *entry >= MAX_ENVELOPE_STRIKES
-    }
-
-    /// Any other outcome resets the run of strikes.
-    pub fn clear(&mut self, account_id: &str) {
-        self.counts.remove(account_id);
-    }
-}
-
 /// D15: the names removed from the child environment, sorted for stable logs.
 pub fn env_names_to_strip(names: impl Iterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = names
@@ -5598,7 +5966,7 @@ cargo test --lib usage::runner::
 cargo clippy --all-targets -- -D warnings
 ```
 
-Expect 21 passing tests, no warnings.
+Expect 19 passing tests, no warnings.
 
 - [ ] **Step 5: Commit** — run:
 
@@ -5606,14 +5974,15 @@ Expect 21 passing tests, no warnings.
 cd /c/Users/josh/ClaudeUsageTracker
 git add -A
 git commit -m "$(cat <<'MSG'
-Task 14: add the envelope guard, strike escalation and env strip list
+Task 14: add the envelope guard and the env strip list
 
 Implements the spec 6.3 guard in order: shape, then local_command as the
 primary turn evidence checked before any further shape test, then the
 advisory num_turns / total_cost_usd / modelUsage rules, then the remaining
-shape checks. Adds the per-account five-strike escalation for
-unclassifiable envelopes, the single argv constant, and the D15 list of
-environment names to remove.
+shape checks. Every shape verdict carries the shared prefix so the state
+machine can count it towards the five-strike escalation, which lives in
+Machine::record rather than here. Also adds the single argv constant and
+the D15 list of environment names to remove.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014sqgoktsDjFqBApr4zsfg2
@@ -5626,7 +5995,7 @@ MSG
 ## Task 15: `run_usage` — spawn, sanitise, time out
 
 **Files:** Modify `src-tauri/src/usage/runner.rs`; Create `src-tauri/tests/runner_guard.rs`
-**Interfaces:** Consumes: `USAGE_ARGV`, `check_envelope`, `env_names_to_strip` (Task 14), `parse_usage` (Task 4), `PollOutcome` (Task 3). Produces: `pub struct RunResult { outcome: PollOutcome, raw: Option<String>, duration_ms: u32 }`, `pub const UNEXPECTED_ENVELOPE_PREFIX: &str`, `pub fn is_unexpected_envelope(&str) -> bool`, `pub async fn run_usage(binary: &Path, config_dir: &Path, cwd: &Path, timeout: std::time::Duration, now: chrono::DateTime<chrono::Utc>, pid_slot: &std::sync::atomic::AtomicU32, cancel: &tokio_util::sync::CancellationToken, log_env_at_info: bool) -> RunResult`.
+**Interfaces:** Consumes: `USAGE_ARGV`, `check_envelope`, `env_names_to_strip` (Task 14), `parse_usage` (Task 4), `PollOutcome` and `is_unexpected_envelope` (Task 3). Produces: `pub struct RunResult { outcome: PollOutcome, raw: Option<String>, duration_ms: u32 }`, `pub async fn run_usage(binary: &Path, config_dir: &Path, cwd: &Path, timeout: std::time::Duration, now: chrono::DateTime<chrono::Utc>, pid_slot: &std::sync::atomic::AtomicU32, cancel: &tokio_util::sync::CancellationToken, log_env_at_info: bool) -> RunResult`.
 
 Spec resolution recorded in the code: spec 6.5 describes the live `Child` as sitting behind a `Mutex<Option<Child>>` shared with the driver. Holding a child handle in a shared async mutex while awaiting its exit would deadlock the shutdown path that wants to lock the same mutex to kill it, so the cycle task owns the `Child` outright and shutdown reaches it through the `CancellationToken` instead. The child is still killed only through its handle, never by raw PID; the PID is published solely as `exclude_pid` for the process check.
 
@@ -5638,10 +6007,8 @@ use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
-use cut_core::usage::runner::{
-    check_envelope, is_unexpected_envelope, run_usage, GuardVerdict, RunResult,
-};
-use cut_core::usage::PollOutcome;
+use cut_core::usage::runner::{check_envelope, run_usage, GuardVerdict, RunResult};
+use cut_core::usage::{is_unexpected_envelope, PollOutcome};
 use tokio_util::sync::CancellationToken;
 
 fn fake() -> PathBuf {
@@ -5868,6 +6235,30 @@ async fn a_good_usage_envelope_is_parsed_into_an_ok_outcome() {
 }
 
 #[tokio::test]
+async fn the_runner_never_logs_a_trip_itself() {
+    // Spec 6.3 order: the halt flag reaches disk before anything is logged,
+    // so the raw envelope must survive on the result for the driver's halt
+    // sequence to log it there. This test pins the carrier, which is what
+    // makes the "no logging in run_usage" rule safe.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let envelope = r#"{"type":"result","local_command":"cost","num_turns":0,"result":"x"}"#;
+    let r = run_with(
+        "emit",
+        &[("FAKE_CLAUDE_STDOUT", envelope)],
+        Duration::from_secs(20),
+        tmp.path(),
+        tmp.path(),
+    )
+    .await;
+    assert!(matches!(r.outcome, PollOutcome::GuardTripped(_)));
+    assert_eq!(
+        r.raw.as_deref(),
+        Some(envelope),
+        "the driver's halt sequence is the only trip log site, so it needs these bytes"
+    );
+}
+
+#[tokio::test]
 async fn a_turn_envelope_trips_the_guard_and_keeps_the_raw_bytes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let envelope = r#"{"type":"result","num_turns":1,"total_cost_usd":0.75,"result":"hello"}"#;
@@ -5992,17 +6383,9 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use super::{parser::parse_usage, PollOutcome};
-
-/// Every shape-class guard message starts with this, which is how the driver
-/// recognises a strike for the five-strike escalation.
-pub const UNEXPECTED_ENVELOPE_PREFIX: &str = "unexpected envelope: ";
-
-pub fn is_unexpected_envelope(message: &str) -> bool {
-    message.starts_with(UNEXPECTED_ENVELOPE_PREFIX)
-}
 
 /// Longest stderr / stdout tail kept in a spawn error message.
 const TAIL_BYTES: usize = 2048;
@@ -6089,7 +6472,10 @@ pub async fn run_usage(
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // `creation_flags` is inherent on tokio's Command, so the std
+        // `CommandExt` trait must NOT be imported here: it would be an unused
+        // import and `-D warnings` would reject it. (login.rs does need it,
+        // because that one drives a std::process::Command.)
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
@@ -6183,8 +6569,13 @@ pub async fn run_usage(
 
     let raw = Some(stdout.clone());
     match check_envelope(&stdout) {
+        // Deliberately silent. Spec 6.3 fixes the trip order as: persist the
+        // halt flag, THEN log the raw envelope, then persist the outcome. If
+        // this arm logged, the ERROR line would appear before the flag
+        // reached disk and the log would misreport the ordering. The single
+        // trip log site is `StoreHalt::log_envelope` in the driver, which
+        // receives this exact stdout through `RunResult::raw`.
         GuardVerdict::Tripped(reason) => {
-            error!(envelope = %stdout, reason = %reason, "guard tripped: a /usage call may have reached the model");
             finish(PollOutcome::GuardTripped(reason), raw, started)
         }
         GuardVerdict::Shape(reason) => {
@@ -6205,7 +6596,7 @@ cd /c/Users/josh/ClaudeUsageTracker/src-tauri
 cargo test --test runner_guard -- --test-threads=1
 ```
 
-The single test thread matters: these tests set process-wide environment variables to configure the fake binary. Expect 12 passing tests.
+The single test thread matters: these tests set process-wide environment variables to configure the fake binary. Expect 13 passing tests.
 
 - [ ] **Step 5: Run the full suite and the linter** — run:
 
@@ -7126,94 +7517,12 @@ MSG
 
 ## Task 19: App state, triggers and the command surface
 
-**Files:** Create `src-tauri/src/scheduler/triggers.rs`, `src-tauri/src/commands.rs`; Modify `src-tauri/src/scheduler/machine.rs`, `src-tauri/src/scheduler/mod.rs`, `src-tauri/src/lib.rs`
-**Interfaces:** Consumes: `Store` (Tasks 8–11), `Machine` / `SharedMachine` / `Trigger` / `SkipReason` / `Gate` (Task 12), `discovery::find_claude_binary` (Task 7), `login::open_terminal_for_login` (Task 18), `logging::LogHandle` (Task 17), `tray::tray_state` (Task 16). Produces: `Machine::preview_manual(&self, bool, bool, &[String]) -> Option<SkipReason>`; `pub struct Triggers` with `manual()`, `startup()`, `account_changed(Vec<String>)`, `notified_manual()`, `notified_startup()`, `notified_changed()`, `take_changed() -> Vec<String>`; `pub struct DriverStatus { stalled_at: Option<i64>, binary: Option<(String, &'static str)> }`; `pub struct Core` and every `core_*` function; the thirteen `#[tauri::command]` wrappers named in spec §8.
+**Files:** Create `src-tauri/src/scheduler/triggers.rs`, `src-tauri/src/commands.rs`; Modify `src-tauri/src/scheduler/mod.rs`, `src-tauri/src/lib.rs`
+**Interfaces:** Consumes: `Store` (Tasks 8–11), `DriverStatus` / `SkipReason` / `preview_manual` (Task 12), `UserSettings` / `validate_settings` / `polling_relevant_changed` (Task 9), `discovery::find_claude_binary` (Task 7), `login::open_terminal_for_login` (Task 18), `logging::LogHandle` (Task 17). Produces: `pub struct Triggers` with `manual()`, `startup()`, `account_changed(Vec<String>)`, `notified_manual()`, `notified_startup()`, `notified_changed()`, `take_changed() -> Vec<String>`; `pub type BinarySlot`; `pub fn lock_status` / `lock_binary`; `pub async fn blocking<T, F>(F) -> AppResult<T>` (the shared `spawn_blocking` hop, also used by the driver in Task 20); `pub struct Core` and every `core_*` function; the thirteen `#[tauri::command]` wrappers named in spec §8.
 
-- [ ] **Step 1: Write the failing test for `preview_manual`** — append this test module to `src-tauri/src/scheduler/machine.rs` inside the existing `mod tests` block:
+**v5 rule enforced throughout this task:** commands never touch `Machine`. Every piece of scheduler state they need — `gate`, `busy`, `stalled_at`, `backoff_until` — is read from the `Arc<Mutex<DriverStatus>>` snapshot the driver publishes (spec §5.1). `Core` therefore holds no machine handle at all, and backoff resets happen where the spec puts them: inside `decide` for `Manual` / `AccountChanged`, and inside the driver's settings-watch arm for a polling-relevant settings change.
 
-```rust
-    #[test]
-    fn preview_manual_reports_the_skip_reason_without_mutating() {
-        let mut m = Machine::new();
-        assert_eq!(
-            m.preview_manual(true, true, &accounts()),
-            Some(SkipReason::Halted)
-        );
-        assert_eq!(
-            m.preview_manual(false, false, &accounts()),
-            Some(SkipReason::NoBinary)
-        );
-        assert_eq!(
-            m.preview_manual(true, false, &[]),
-            Some(SkipReason::NoEnabledAccounts)
-        );
-        assert_eq!(m.preview_manual(true, false, &accounts()), None);
-
-        // A preview must not reset backoff the way a real Manual decision does.
-        m.record("a", OutcomeKind::Timeout, NOW);
-        assert_eq!(m.preview_manual(true, false, &accounts()), None);
-        assert_eq!(m.backoff_until("a"), Some(NOW + 60_000));
-    }
-
-    #[test]
-    fn preview_manual_reports_busy() {
-        let shared: SharedMachine = Arc::new(Mutex::new(Machine::new()));
-        let _token = begin_cycle(&shared, NOW);
-        assert_eq!(
-            lock_machine(&shared).preview_manual(true, false, &accounts()),
-            Some(SkipReason::Busy)
-        );
-    }
-```
-
-- [ ] **Step 2: Run test to verify it fails** — run:
-
-```bash
-cd /c/Users/josh/ClaudeUsageTracker/src-tauri
-cargo test --lib scheduler::machine::preview
-```
-
-Expect `no method named 'preview_manual' found for struct 'Machine'`.
-
-- [ ] **Step 3: Write `preview_manual`** — add this method to the `impl Machine` block in `src-tauri/src/scheduler/machine.rs`:
-
-```rust
-    /// Read-only answer to "would a Manual trigger run right now?".
-    /// `Manual` bypasses the gate and backoff, so only rules 0 to 3 can ever
-    /// skip it, which makes a non-mutating preview exact. `poll_now` uses
-    /// this to report `skipped:<reason>` without consuming the trigger.
-    pub fn preview_manual(
-        &self,
-        binary_present: bool,
-        halted: bool,
-        enabled: &[String],
-    ) -> Option<SkipReason> {
-        if halted {
-            return Some(SkipReason::Halted);
-        }
-        if self.cycle.is_some() {
-            return Some(SkipReason::Busy);
-        }
-        if !binary_present {
-            return Some(SkipReason::NoBinary);
-        }
-        if enabled.is_empty() {
-            return Some(SkipReason::NoEnabledAccounts);
-        }
-        None
-    }
-```
-
-- [ ] **Step 4: Run the machine tests to verify they pass** — run:
-
-```bash
-cd /c/Users/josh/ClaudeUsageTracker/src-tauri
-cargo test --lib scheduler::machine::
-```
-
-Expect 23 passing tests.
-
-- [ ] **Step 5: Write the failing test for triggers** — create `src-tauri/src/scheduler/triggers.rs` containing only this test module for now:
+- [ ] **Step 1: Write the failing test for triggers** — create `src-tauri/src/scheduler/triggers.rs` containing only this test module for now:
 
 ```rust
 #[cfg(test)]
@@ -7266,7 +7575,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 6: Run test to verify it fails** — first add `pub mod triggers;` to `src-tauri/src/scheduler/mod.rs`, then run:
+- [ ] **Step 2: Run test to verify it fails** — first add `pub mod triggers;` to `src-tauri/src/scheduler/mod.rs`, then run:
 
 ```bash
 cd /c/Users/josh/ClaudeUsageTracker/src-tauri
@@ -7275,7 +7584,7 @@ cargo test --lib scheduler::triggers::
 
 Expect `cannot find type 'Triggers' in this scope`.
 
-- [ ] **Step 7: Write the triggers implementation** — prepend to `src-tauri/src/scheduler/triggers.rs`, above the test module:
+- [ ] **Step 3: Write the triggers implementation** — prepend to `src-tauri/src/scheduler/triggers.rs`, above the test module:
 
 ```rust
 use std::collections::HashSet;
@@ -7341,13 +7650,15 @@ impl Triggers {
 }
 ```
 
-- [ ] **Step 8: Write the failing test for the command core** — create `src-tauri/src/commands.rs` containing only this test module for now:
+- [ ] **Step 4: Write the failing test for the command core** — create `src-tauri/src/commands.rs` containing only this test module for now:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::machine::Gate;
     use crate::store::settings::UserSettings;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn defaults() -> UserSettings {
@@ -7364,18 +7675,24 @@ mod tests {
     fn core() -> (tempfile::TempDir, Arc<Core>) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(Store::open_in_memory().expect("open"));
+        store.save_settings(&defaults()).expect("seed settings");
         let (settings_tx, _rx) = tokio::sync::watch::channel(defaults());
         let core = Arc::new(Core {
             store,
-            machine: Arc::new(std::sync::Mutex::new(Machine::new())),
             triggers: Arc::new(Triggers::new()),
             status: Arc::new(std::sync::Mutex::new(DriverStatus::default())),
+            binary: Arc::new(std::sync::Mutex::new(None)),
             settings_tx,
             log: None,
             app_data_dir: tmp.path().to_path_buf(),
             log_dir: tmp.path().join("logs"),
         });
         (tmp, core)
+    }
+
+    /// Pretend the driver found a binary at its last check.
+    fn with_binary(core: &Core) {
+        *lock_binary(&core.binary) = Some(("/bin/claude".to_string(), "path"));
     }
 
     fn make_dir(root: &std::path::Path, name: &str) -> std::path::PathBuf {
@@ -7455,22 +7772,64 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_settings_change_publishes_on_the_watch_and_resets_backoff() {
-        let (_tmp, core) = core();
-        let mut rx = core.settings_tx.subscribe();
-        {
-            let mut m = lock_machine(&core.machine);
-            m.record("a", OutcomeKind::Timeout, 1);
-            assert!(m.backoff_until("a").is_some());
+    fn a_polling_relevant_change_publishes_on_the_watch() {
+        for mutate in [
+            (|s: &mut UserSettings| s.interval_secs = 120) as fn(&mut UserSettings),
+            |s: &mut UserSettings| s.timeout_secs = 45,
+            |s: &mut UserSettings| s.claude_binary = "C:/bin/claude.exe".into(),
+        ] {
+            let (_tmp, core) = core();
+            let mut rx = core.settings_tx.subscribe();
+            let mut next = defaults();
+            mutate(&mut next);
+
+            core_set_settings(&core, &next).expect("set");
+
+            assert!(
+                rx.has_changed().unwrap_or(false),
+                "a polling-relevant change must fire the watch"
+            );
+            assert_eq!(&*rx.borrow_and_update(), &next);
+        }
+    }
+
+    #[test]
+    fn the_other_three_keys_are_saved_without_touching_the_watch() {
+        for mutate in [
+            (|s: &mut UserSettings| s.close_to_tray = false) as fn(&mut UserSettings),
+            |s: &mut UserSettings| s.launch_at_login = true,
+            |s: &mut UserSettings| s.log_level = "debug".into(),
+        ] {
+            let (_tmp, core) = core();
+            let mut rx = core.settings_tx.subscribe();
+            let mut next = defaults();
+            mutate(&mut next);
+
+            core_set_settings(&core, &next).expect("set");
+
+            assert!(
+                !rx.has_changed().unwrap_or(false),
+                "this key must not reach the scheduler"
+            );
         }
 
-        let mut s = defaults();
-        s.interval_secs = 120;
-        core_set_settings(&core, &s).expect("set");
+        // ...and the value really was persisted.
+        let (_tmp, core) = core();
+        let mut next = defaults();
+        next.log_level = "debug".into();
+        next.close_to_tray = false;
+        core_set_settings(&core, &next).expect("set");
+        let stored = core.store.stored_settings().expect("read");
+        assert_eq!(stored.log_level, "debug");
+        assert!(!stored.close_to_tray);
+    }
 
-        assert!(rx.has_changed().unwrap_or(false), "the watch must fire");
-        assert_eq!(rx.borrow_and_update().interval_secs, 120);
-        assert_eq!(lock_machine(&core.machine).backoff_until("a"), None);
+    #[test]
+    fn saving_identical_settings_does_not_disturb_the_scheduler() {
+        let (_tmp, core) = core();
+        let mut rx = core.settings_tx.subscribe();
+        core_set_settings(&core, &defaults()).expect("set");
+        assert!(!rx.has_changed().unwrap_or(false));
     }
 
     #[test]
@@ -7525,10 +7884,7 @@ mod tests {
         let d = make_dir(tmp.path(), ".claude3");
         core_add_account(&core, &d, 1).expect("add");
         core.store.set_polling_halted("guard_tripped:1").expect("halt");
-        {
-            let mut st = lock_status(&core.status);
-            st.binary = Some(("/bin/claude".to_string(), "path"));
-        }
+        with_binary(&core);
         assert_eq!(core_poll_now(&core).expect("poll"), "skipped:halted");
     }
 
@@ -7537,10 +7893,7 @@ mod tests {
         let (tmp, core) = core();
         assert_eq!(core_poll_now(&core).expect("poll"), "skipped:no_binary");
 
-        {
-            let mut st = lock_status(&core.status);
-            st.binary = Some(("/bin/claude".to_string(), "path"));
-        }
+        with_binary(&core);
         assert_eq!(
             core_poll_now(&core).expect("poll"),
             "skipped:no_enabled_accounts"
@@ -7552,40 +7905,67 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_carries_gate_busy_halt_and_binary() {
+    fn poll_now_reports_busy_from_the_published_snapshot() {
         let (tmp, core) = core();
         let d = make_dir(tmp.path(), ".claude3");
-        let a = core_add_account(&core, &d, 1).expect("add");
-        core.store
-            .insert_snapshot(&a.id, 1000, &PollOutcome::Timeout(30), Some("raw"), 5)
-            .expect("snapshot");
-        {
-            let mut st = lock_status(&core.status);
-            st.binary = Some(("/bin/claude".to_string(), "local_bin"));
-            st.stalled_at = Some(4242);
-        }
-
-        let d = core_get_dashboard(&core).expect("dashboard");
-        assert_eq!(d.gate, "idle");
-        assert!(!d.busy);
-        assert_eq!(d.halted, None);
-        assert_eq!(d.stalled_at, Some(4242));
-        assert_eq!(d.binary.path.as_deref(), Some("/bin/claude"));
-        assert_eq!(d.binary.source, Some("local_bin"));
-        assert_eq!(d.interval_secs, 60);
-        assert_eq!(d.accounts.len(), 1);
-        assert_eq!(d.accounts[0].latest.as_ref().map(|s| s.outcome), Some("timeout"));
+        core_add_account(&core, &d, 1).expect("add");
+        with_binary(&core);
+        lock_status(&core.status).busy = true;
+        assert_eq!(core_poll_now(&core).expect("poll"), "skipped:busy");
     }
 
     #[test]
-    fn the_dashboard_reports_a_backoff_deadline_per_account() {
+    fn the_dashboard_copies_the_published_snapshot() {
         let (tmp, core) = core();
-        let d = make_dir(tmp.path(), ".claude3");
-        let a = core_add_account(&core, &d, 1).expect("add");
-        lock_machine(&core.machine).record(&a.id, OutcomeKind::Timeout, 1000);
+        let dir = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &dir, 1).expect("add");
+        core.store
+            .insert_snapshot(&a.id, 1000, &PollOutcome::Timeout(30), Some("raw"), 5)
+            .expect("snapshot");
+        *lock_binary(&core.binary) = Some(("/bin/claude".to_string(), "local_bin"));
+        {
+            let mut st = lock_status(&core.status);
+            st.gate = Gate::Active;
+            st.busy = true;
+            st.stalled_at = Some(4242);
+        }
+
+        let dash = core_get_dashboard(&core).expect("dashboard");
+        assert_eq!(dash.gate, "active");
+        assert!(dash.busy);
+        assert_eq!(dash.halted, None);
+        assert_eq!(dash.stalled_at, Some(4242));
+        assert_eq!(dash.binary.path.as_deref(), Some("/bin/claude"));
+        assert_eq!(dash.binary.source, Some("local_bin"));
+        assert_eq!(dash.interval_secs, 60);
+        assert_eq!(dash.accounts.len(), 1);
+        assert_eq!(
+            dash.accounts[0].latest.as_ref().map(|s| s.outcome),
+            Some("timeout")
+        );
+    }
+
+    #[test]
+    fn the_dashboard_reports_the_backoff_deadline_from_the_snapshot() {
+        let (tmp, core) = core();
+        let dir = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &dir, 1).expect("add");
+
+        let mut backoff = HashMap::new();
+        backoff.insert(a.id.clone(), 1000 + 60_000);
+        lock_status(&core.status).backoff_until = backoff;
 
         let dash = core_get_dashboard(&core).expect("dashboard");
         assert_eq!(dash.accounts[0].backoff_until, Some(1000 + 60_000));
+    }
+
+    #[test]
+    fn an_account_with_no_entry_in_the_snapshot_has_no_backoff() {
+        let (tmp, core) = core();
+        let dir = make_dir(tmp.path(), ".claude3");
+        core_add_account(&core, &dir, 1).expect("add");
+        let dash = core_get_dashboard(&core).expect("dashboard");
+        assert_eq!(dash.accounts[0].backoff_until, None);
     }
 
     #[test]
@@ -7651,7 +8031,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 9: Run test to verify it fails** — first add `pub mod commands;` to `src-tauri/src/lib.rs`, then run:
+- [ ] **Step 5: Run test to verify it fails** — first add `pub mod commands;` to `src-tauri/src/lib.rs`, then run:
 
 ```bash
 cd /c/Users/josh/ClaudeUsageTracker/src-tauri
@@ -7660,7 +8040,7 @@ cargo test --lib commands::
 
 Expect `cannot find type 'Core' in this scope` and `cannot find function 'core_get_dashboard' in this scope`.
 
-- [ ] **Step 10: Write the state and DTO types** — prepend to `src-tauri/src/commands.rs`, above the test module:
+- [ ] **Step 6: Write the state and DTO types** — prepend to `src-tauri/src/commands.rs`, above the test module:
 
 ```rust
 use serde::Serialize;
@@ -7672,32 +8052,36 @@ use tracing::{info, warn};
 use crate::discovery::{enumerate_profiles, find_claude_binary};
 use crate::error::{AppError, AppResult};
 use crate::logging::LogHandle;
-use crate::scheduler::machine::{lock_machine, Machine, SharedMachine, SkipReason};
+use crate::scheduler::machine::{preview_manual, DriverStatus};
 use crate::scheduler::triggers::Triggers;
-use crate::store::settings::{validate_settings, UserSettings};
+use crate::store::settings::{polling_relevant_changed, validate_settings, UserSettings};
 use crate::store::{HistoryPoint, Store};
-use crate::usage::{Account, DisabledReason, OutcomeKind, PollOutcome, SnapshotDto};
+use crate::usage::{Account, DisabledReason, PollOutcome, SnapshotDto};
 
-/// Written by the driver, read by commands. Reset on every restart.
-#[derive(Debug, Clone, Default)]
-pub struct DriverStatus {
-    /// Set by the watchdog arm, cleared on the next `cycle:finished`.
-    pub stalled_at: Option<i64>,
-    /// `(path, source)` of the binary found at the last check.
-    pub binary: Option<(String, &'static str)>,
-}
+/// `(path, source)` of the binary found at the driver's last check. Kept
+/// beside `DriverStatus` rather than inside it because spec 5.1 defines
+/// `DriverStatus` as scheduler state only.
+pub type BinarySlot = Arc<Mutex<Option<(String, &'static str)>>>;
 
 pub fn lock_status(s: &Mutex<DriverStatus>) -> MutexGuard<'_, DriverStatus> {
     s.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+pub fn lock_binary(
+    b: &Mutex<Option<(String, &'static str)>>,
+) -> MutexGuard<'_, Option<(String, &'static str)>> {
+    b.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Everything a command needs, with no Tauri types, so the whole surface is
-/// unit-testable. The `#[tauri::command]` wrappers are thin.
+/// unit-testable. The `#[tauri::command]` wrappers are thin. There is
+/// deliberately no `Machine` handle here: scheduler state is read only from
+/// the published `DriverStatus` snapshot.
 pub struct Core {
     pub store: Arc<Store>,
-    pub machine: SharedMachine,
     pub triggers: Arc<Triggers>,
     pub status: Arc<Mutex<DriverStatus>>,
+    pub binary: BinarySlot,
     pub settings_tx: watch::Sender<UserSettings>,
     pub log: Option<Arc<LogHandle>>,
     pub app_data_dir: PathBuf,
@@ -7733,52 +8117,60 @@ pub struct RawSnapshot {
     pub raw: Option<String>,
     pub error: Option<String>,
 }
+
+/// Spec 6.6: every `Store` method is synchronous and the connection mutex is
+/// never held across an `await`, so every async caller hops to the blocking
+/// pool first. `busy_timeout=5000` means a contended statement can park a
+/// thread for five seconds, which must never be a runtime worker.
+///
+/// Public because the scheduler driver uses the same helper for its own store
+/// access; it is the single place that hop is expressed.
+pub async fn blocking<T, F>(f: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::Internal(format!("blocking task failed: {e}")))?
+}
 ```
 
-- [ ] **Step 11: Write the command core functions** — append to the same section of `src-tauri/src/commands.rs`, still above the test module:
+- [ ] **Step 7: Write the command core functions** — append to the same section of `src-tauri/src/commands.rs`, still above the test module:
 
 ```rust
 /// Cheap; called on every `usage:updated` (debounced in the frontend).
+/// Copies the published `DriverStatus` and never reads `Machine` (spec 5.1).
 pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
     let accounts = core.store.list_accounts()?;
     let latest = core.store.latest_per_account()?;
     let settings = core.store.stored_settings()?;
     let halted = core.store.polling_halted()?;
 
-    let (gate, busy, backoffs) = {
-        let m = lock_machine(&core.machine);
-        let backoffs: Vec<Option<i64>> =
-            accounts.iter().map(|a| m.backoff_until(&a.id)).collect();
-        (m.gate().as_str(), m.is_busy(), backoffs)
-    };
-
-    let (stalled_at, binary) = {
-        let st = lock_status(&core.status);
-        (
-            st.stalled_at,
-            BinaryInfo {
-                path: st.binary.as_ref().map(|(p, _)| p.clone()),
-                source: st.binary.as_ref().map(|(_, s)| *s),
-            },
-        )
+    let status = lock_status(&core.status).clone();
+    let binary = {
+        let found = lock_binary(&core.binary);
+        BinaryInfo {
+            path: found.as_ref().map(|(p, _)| p.clone()),
+            source: found.as_ref().map(|(_, s)| *s),
+        }
     };
 
     let rows = accounts
         .into_iter()
-        .zip(backoffs)
-        .map(|(account, backoff_until)| AccountRow {
+        .map(|account| AccountRow {
             latest: latest.get(&account.id).cloned(),
-            backoff_until,
+            backoff_until: status.backoff_until.get(&account.id).copied(),
             account,
         })
         .collect();
 
     Ok(Dashboard {
         accounts: rows,
-        gate,
-        busy,
+        gate: status.gate.as_str(),
+        busy: status.busy,
         halted,
-        stalled_at,
+        stalled_at: status.stalled_at,
         binary,
         interval_secs: settings.interval_secs,
     })
@@ -7789,15 +8181,16 @@ pub fn core_get_history(core: &Core, account_id: &str, now: i64) -> AppResult<Ve
     core.store.history(account_id, since)
 }
 
-/// `"started"` or `"skipped:<reason>"`. The preview is exact because a
-/// Manual trigger bypasses both the gate and backoff.
+/// `"started"` or `"skipped:<reason>"`. The preview reads the published
+/// snapshot, and it is exact because a Manual trigger bypasses both the gate
+/// and backoff.
 pub fn core_poll_now(core: &Core) -> AppResult<String> {
     let halted = core.store.polling_halted()?.is_some();
-    let binary_present = lock_status(&core.status).binary.is_some();
+    let binary_present = lock_binary(&core.binary).is_some();
     let enabled = core.store.enabled_account_ids()?;
+    let status = lock_status(&core.status).clone();
 
-    let skip = lock_machine(&core.machine).preview_manual(binary_present, halted, &enabled);
-    match skip {
+    match preview_manual(&status, binary_present, halted, &enabled) {
         Some(reason) => {
             info!(reason = reason.as_str(), "manual poll skipped");
             Ok(format!("skipped:{}", reason.as_str()))
@@ -7825,7 +8218,8 @@ pub fn core_update_account(
     enabled: Option<bool>,
 ) -> AppResult<Account> {
     let account = core.store.update_account(id, label, enabled)?;
-    lock_machine(&core.machine).reset_backoff(id);
+    // The backoff reset for this account happens inside `decide` when the
+    // AccountChanged trigger is consumed; commands never touch the machine.
     if enabled == Some(true) {
         core.triggers.account_changed(vec![account.id.clone()]);
     }
@@ -7835,7 +8229,6 @@ pub fn core_update_account(
 
 pub fn core_remove_account(core: &Core, id: &str) -> AppResult<()> {
     core.store.remove_account(id)?;
-    lock_machine(&core.machine).reset_backoff(id);
     info!(account_id = id, "account removed");
     Ok(())
 }
@@ -7859,23 +8252,41 @@ pub fn core_get_settings(core: &Core, launch_at_login: bool) -> AppResult<UserSe
     Ok(s)
 }
 
-/// Validates, saves, applies the log level immediately, publishes on the
-/// settings watch (which moves the deadline and resets backoff per D16).
+/// Validates, saves, and then applies the change in two distinct ways
+/// (spec §8, D16):
+///
+/// * `interval_secs`, `timeout_secs` and `claude_binary` are polling-relevant,
+///   so a change to any of them publishes on the settings watch. The driver's
+///   watch arm is what moves the deadline and resets backoff — this function
+///   does neither itself, because it has no machine handle.
+/// * `close_to_tray`, `launch_at_login` and `log_level` are applied directly
+///   and must never touch the scheduler. `log_level` goes through the reload
+///   handle here; `launch_at_login` is written to the autostart plugin by the
+///   Tauri wrapper; `close_to_tray` is simply read from the store when a
+///   window close arrives.
+///
 /// Never touches `polling_halted`.
 pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
     validate_settings(next)?;
+    let previous = core.store.stored_settings()?;
     core.store.save_settings(next)?;
-    if let Some(log) = core.log.as_ref() {
-        log.set_level(&next.log_level)?;
+
+    if previous.log_level != next.log_level {
+        if let Some(log) = core.log.as_ref() {
+            log.set_level(&next.log_level)?;
+        }
     }
-    lock_machine(&core.machine).reset_all_backoff();
-    if core.settings_tx.send(next.clone()).is_err() {
+
+    let scheduler_affected = polling_relevant_changed(&previous, next);
+    if scheduler_affected && core.settings_tx.send(next.clone()).is_err() {
         warn!("settings watch has no receiver; the driver may not be running");
     }
+
     info!(
         interval_secs = next.interval_secs,
         timeout_secs = next.timeout_secs,
         log_level = %next.log_level,
+        scheduler_affected,
         "settings updated"
     );
     Ok(())
@@ -7907,16 +8318,16 @@ pub fn core_get_snapshot_raw(core: &Core, snapshot_id: i64) -> AppResult<RawSnap
 }
 ```
 
-- [ ] **Step 12: Run the core tests to verify they pass** — run:
+- [ ] **Step 8: Run the core tests to verify they pass** — run:
 
 ```bash
 cd /c/Users/josh/ClaudeUsageTracker/src-tauri
 cargo test --lib commands::
 ```
 
-Expect 14 passing tests.
+Expect 20 passing tests.
 
-- [ ] **Step 13: Write the Tauri command wrappers** — append to `src-tauri/src/commands.rs`, still above the test module. Each wrapper does its blocking work on the blocking pool so the connection mutex is never held across an `await`:
+- [ ] **Step 9: Write the Tauri command wrappers** — append to `src-tauri/src/commands.rs`, still above the test module. Each wrapper does its blocking work on the blocking pool so the connection mutex is never held across an `await`:
 
 ```rust
 use tauri::{Manager, State};
@@ -7926,16 +8337,6 @@ pub type SharedCore = Arc<Core>;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
-}
-
-async fn blocking<T, F>(f: F) -> AppResult<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> AppResult<T> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(f)
-        .await
-        .map_err(|e| AppError::Internal(format!("blocking task failed: {e}")))?
 }
 
 #[tauri::command]
@@ -8063,7 +8464,7 @@ pub async fn get_snapshot_raw(
 }
 ```
 
-- [ ] **Step 14: Run the full suite and the linter** — run:
+- [ ] **Step 10: Run the full suite and the linter** — run:
 
 ```bash
 cd /c/Users/josh/ClaudeUsageTracker/src-tauri
@@ -8073,7 +8474,7 @@ cargo clippy --all-targets -- -D warnings
 
 Expect everything green. If clippy flags the unused `Manager` import, remove it; it is re-added in Task 21 where state is registered.
 
-- [ ] **Step 15: Commit** — run:
+- [ ] **Step 11: Commit** — run:
 
 ```bash
 cd /c/Users/josh/ClaudeUsageTracker
@@ -8082,12 +8483,13 @@ git commit -m "$(cat <<'MSG'
 Task 19: add app state, coalescing triggers and the command surface
 
 Adds the Notify-per-kind trigger set that coalesces refresh clicks and
-accumulates account-changed ids, a read-only manual preview so poll_now can
-report skipped:<reason> without consuming a trigger, and the thirteen
-commands split into a Tauri-free core that is fully unit-tested plus thin
-wrappers that run their blocking work on the blocking pool. set_settings
-publishes on the watch and resets backoff but never touches the halt flag;
-clear_halt clears the flag and starts no poll.
+accumulates account-changed ids, and the thirteen commands split into a
+Tauri-free core that is fully unit-tested plus thin wrappers that run their
+blocking work on the blocking pool. Commands hold no machine handle: gate,
+busy, stalled_at and backoff_until all come from the DriverStatus snapshot
+the driver publishes. set_settings publishes on the settings watch only for
+interval, timeout and binary path, applies the log level directly, and
+never touches the halt flag; clear_halt clears the flag and starts no poll.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014sqgoktsDjFqBApr4zsfg2
@@ -8100,9 +8502,13 @@ MSG
 ## Task 20: Scheduler driver
 
 **Files:** Create `src-tauri/src/scheduler/driver.rs`, `src-tauri/tests/driver_loop.rs`; Modify `src-tauri/src/scheduler/mod.rs`
-**Interfaces:** Consumes: `Core` / `DriverStatus` / `lock_status` (Task 19), `Machine` / `begin_cycle` / `CycleToken` / `Decision` / `Trigger` (Task 12), `run_usage` / `EnvelopeStrikes` / `is_unexpected_envelope` (Tasks 14–15), `Triggers` (Task 19). Produces: `pub trait EventSink`, `pub trait ProcessProbe`, `pub trait BinaryProbe`, `pub struct RealBinaryProbe`, `pub struct SysinfoProbe`, `pub fn deadline_for(last_cycle_end_ms: i64, interval_secs: u32) -> i64`, `pub fn watchdog_limit_ms(enabled_accounts: usize, timeout_secs: u32) -> u64`, `pub trait HaltSink` + `pub fn perform_halt<S: HaltSink>(&S, i64, &str, &str) -> AppResult<()>`, `pub struct Driver` with `new(...)` and `async fn run(self)`, `pub const PRUNE_INTERVAL_MS: i64`.
+**Interfaces:** Consumes: `Core` / `lock_status` / `lock_binary` (Task 19), `Machine` / `SharedMachine` / `DriverStatus` / `Recorded` / `begin_cycle` / `CycleToken` / `Decision` / `Trigger` (Task 12), `run_usage` (Task 15), `Triggers` (Task 19). Produces: `pub trait EventSink`, `pub trait ProcessProbe`, `pub trait BinaryProbe`, `pub struct RealBinaryProbe`, `pub struct SysinfoProbe`, `pub fn deadline_for(last_cycle_end_ms: i64, interval_secs: u32) -> i64`, `pub fn watchdog_limit_ms(enabled_accounts: usize, timeout_secs: u32) -> u64`, `pub fn publish_status(&SharedMachine, &Mutex<DriverStatus>, i64)`, `pub trait HaltSink` + `pub fn perform_halt<S: HaltSink>(&S, i64, &str, &str) -> AppResult<()>`, `pub struct Driver` with `new(...)` and `async fn run(self)`, `pub const PRUNE_INTERVAL_MS: i64`.
+
+The driver is the sole owner of `Machine` and the sole writer of `DriverStatus`. It calls `publish_status` after every `decide()` and every `record()` (spec §5.1), so nothing else ever needs a machine handle.
 
 The three traits exist so the loop can be driven in tests without a Tauri runtime, a real `claude` binary, or a real process table. The production implementations live in Task 21.
+
+**Store access rule:** every `Store` call reached from this file goes through `commands::blocking`, the shared `spawn_blocking` hop. `busy_timeout=5000` means a contended statement can park its thread for five seconds, which must never be a runtime worker (spec §6.6). That makes `settings`, `halted`, `enabled` and `decide_and_maybe_run` async, and it is why the halt sink owns its data instead of borrowing.
 
 - [ ] **Step 1: Write the failing test for the pure helpers and the halt ordering** — create `src-tauri/src/scheduler/driver.rs` containing only this test module for now:
 
@@ -8208,6 +8614,58 @@ mod tests {
     fn prune_runs_daily() {
         assert_eq!(PRUNE_INTERVAL_MS, 24 * 60 * 60 * 1000);
     }
+
+    #[test]
+    fn publishing_copies_gate_busy_and_backoff_out_of_the_machine() {
+        let machine: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        let slot = Mutex::new(DriverStatus::default());
+        let now = 1_700_000_000_000i64;
+
+        lock_machine(&machine).record("a", &PollOutcome::Timeout(30), now);
+        lock_machine(&machine).decide(
+            Trigger::Timer,
+            Some(true),
+            true,
+            false,
+            &["b".to_string()],
+            now,
+        );
+
+        publish_status(&machine, &slot, now);
+
+        let published = lock_status(&slot).clone();
+        assert_eq!(published.gate.as_str(), "active");
+        assert!(!published.busy);
+        assert_eq!(published.backoff_until.get("a"), Some(&(now + 60_000)));
+    }
+
+    #[test]
+    fn publishing_preserves_the_watchdog_owned_stalled_at() {
+        let machine: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        let slot = Mutex::new(DriverStatus::default());
+        lock_status(&slot).stalled_at = Some(4242);
+
+        publish_status(&machine, &slot, 1);
+
+        assert_eq!(
+            lock_status(&slot).stalled_at,
+            Some(4242),
+            "Machine::status cannot know stalled_at, so it must be carried across"
+        );
+    }
+
+    #[test]
+    fn publishing_reports_a_running_cycle_as_busy() {
+        let machine: SharedMachine = Arc::new(Mutex::new(Machine::new()));
+        let slot = Mutex::new(DriverStatus::default());
+        let token = begin_cycle(&machine, 1);
+        publish_status(&machine, &slot, 1);
+        assert!(lock_status(&slot).busy);
+
+        drop(token);
+        publish_status(&machine, &slot, 2);
+        assert!(!lock_status(&slot).busy);
+    }
 }
 ```
 
@@ -8231,12 +8689,15 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::commands::{lock_status, Core};
+use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::{AppError, AppResult};
-use crate::scheduler::machine::{begin_cycle, lock_machine, CycleToken, Decision, Trigger};
+use crate::scheduler::machine::{
+    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Machine, Recorded,
+    SharedMachine, Trigger,
+};
 use crate::store::settings::UserSettings;
-use crate::usage::runner::{is_unexpected_envelope, run_usage, EnvelopeStrikes};
-use crate::usage::{OutcomeKind, PollOutcome};
+use crate::usage::runner::run_usage;
+use crate::usage::PollOutcome;
 
 /// D10: prune at startup and every 24 h.
 pub const PRUNE_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
@@ -8315,6 +8776,17 @@ pub fn halt_value(now_ms: i64) -> String {
     format!("guard_tripped:{now_ms}")
 }
 
+/// Spec 5.1: the driver is the only writer of `DriverStatus`, and it writes
+/// one after every `decide()` and every `record()`. `stalled_at` belongs to
+/// the watchdog rather than to `Machine`, so it is carried across from the
+/// snapshot already in the slot.
+pub fn publish_status(machine: &SharedMachine, slot: &Mutex<DriverStatus>, now: i64) {
+    let mut fresh = lock_machine(machine).status(now);
+    let mut current = lock_status(slot);
+    fresh.stalled_at = current.stalled_at;
+    *current = fresh;
+}
+
 /// The four steps of a guard trip, in the order spec 6.3 mandates.
 pub trait HaltSink {
     fn persist_halt(&self, value: &str) -> AppResult<()>;
@@ -8346,7 +8818,7 @@ cd /c/Users/josh/ClaudeUsageTracker/src-tauri
 cargo test --lib scheduler::driver::
 ```
 
-Expect 7 passing tests.
+Expect 10 passing tests.
 
 - [ ] **Step 5: Write the failing test for the loop** — create `src-tauri/tests/driver_loop.rs`:
 
@@ -8357,10 +8829,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cut_core::commands::{
-    core_clear_halt, core_poll_now, core_set_settings, core_update_account, Core, DriverStatus,
+    core_clear_halt, core_poll_now, core_set_settings, core_update_account, lock_binary,
+    lock_status, Core,
 };
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
-use cut_core::scheduler::machine::{lock_machine, Machine};
+use cut_core::scheduler::machine::DriverStatus;
 use cut_core::scheduler::triggers::Triggers;
 use cut_core::store::settings::UserSettings;
 use cut_core::store::Store;
@@ -8445,9 +8918,9 @@ fn harness(running: bool) -> Harness {
     store.save_settings(&defaults()).expect("save settings");
     let core = Arc::new(Core {
         store,
-        machine: Arc::new(Mutex::new(Machine::new())),
         triggers: Arc::new(Triggers::new()),
         status: Arc::new(Mutex::new(DriverStatus::default())),
+        binary: Arc::new(Mutex::new(None)),
         settings_tx,
         log: None,
         app_data_dir: tmp.path().to_path_buf(),
@@ -8517,10 +8990,8 @@ async fn triggers_arriving_during_a_cycle_coalesce_and_never_queue() {
     std::env::set_var("FAKE_CLAUDE_SLEEP_SECS", "30");
     let h = harness(false);
     add_account(&h, ".claude");
-    {
-        let mut st = cut_core::commands::lock_status(&h.core.status);
-        st.binary = Some((fake_claude().to_string_lossy().to_string(), "override"));
-    }
+    *lock_binary(&h.core.binary) =
+        Some((fake_claude().to_string_lossy().to_string(), "override"));
 
     let driver = Driver::new(
         Arc::clone(&h.core),
@@ -8543,8 +9014,8 @@ async fn triggers_arriving_during_a_cycle_coalesce_and_never_queue() {
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
     assert!(
-        !lock_machine(&h.core.machine).is_busy(),
-        "shutdown must leave the machine idle"
+        !lock_status(&h.core.status).busy,
+        "the final published snapshot must show the driver idle"
     );
 }
 
@@ -8612,6 +9083,54 @@ async fn clear_halt_does_not_start_a_poll() {
 
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn five_unclassifiable_envelopes_escalate_into_a_guard_trip() {
+    // A result envelope with no `type` is a shape error every time, so the
+    // same account strikes out on the fifth cycle.
+    std::env::set_var("FAKE_CLAUDE_MODE", "emit");
+    std::env::set_var("FAKE_CLAUDE_STDOUT", r#"{"local_command":"usage"}"#);
+    let h = harness(false);
+    add_account(&h, ".claude");
+    // A tiny gap so five cycles fit inside the test, and no backoff wait.
+    let mut s = defaults();
+    s.interval_secs = 10;
+    h.core.store.save_settings(&s).expect("save");
+
+    let driver = Driver::new(
+        Arc::clone(&h.core),
+        Arc::clone(&h.events) as Arc<dyn EventSink>,
+        Arc::clone(&h.process) as Arc<dyn ProcessProbe>,
+        Arc::new(FakeBinary(fake_claude())) as Arc<dyn BinaryProbe>,
+        h.shutdown.clone(),
+    );
+    let handle = tokio::spawn(driver.run());
+
+    // Backoff makes the timer path slow, so drive the strikes with manual
+    // polls, which bypass backoff.
+    for _ in 0..5 {
+        let _ = core_poll_now(&h.core);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    assert!(
+        h.core
+            .store
+            .polling_halted()
+            .expect("read")
+            .unwrap_or_default()
+            .starts_with("guard_tripped:"),
+        "five consecutive unclassifiable envelopes must halt the poller"
+    );
+    let accounts = h.core.store.list_accounts().expect("list");
+    assert_eq!(
+        accounts[0].disabled_reason,
+        Some(cut_core::usage::DisabledReason::GuardTripped)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -8700,8 +9219,8 @@ async fn the_watchdog_aborts_a_hung_cycle_and_busy_clears() {
     let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
 
     assert!(
-        !lock_machine(&h.core.machine).is_busy(),
-        "aborting the cycle task drops its token and clears busy"
+        !lock_status(&h.core.status).busy,
+        "aborting the cycle task drops its token, and the driver republishes"
     );
 }
 
@@ -8750,6 +9269,39 @@ async fn with_no_binary_the_driver_skips_and_recovers_when_one_appears() {
 
     assert!(h.events.usage_updated.lock().expect("lock").is_empty());
     assert_eq!(core_poll_now(&h.core).expect("poll"), "skipped:no_binary");
+    assert!(
+        lock_binary(&h.core.binary).is_none(),
+        "the published binary slot must reflect the failed lookup"
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_driver_publishes_gate_busy_and_backoff_into_shared_state() {
+    // A child that always fails fast, so an account enters backoff.
+    std::env::set_var("FAKE_CLAUDE_MODE", "exit-nonzero");
+    std::env::set_var("FAKE_CLAUDE_EXIT", "7");
+    std::env::set_var("FAKE_CLAUDE_STDERR", "auth failed");
+    let h = harness(true);
+    let a = add_account(&h, ".claude");
+
+    let driver = Driver::new(
+        Arc::clone(&h.core),
+        Arc::clone(&h.events) as Arc<dyn EventSink>,
+        Arc::clone(&h.process) as Arc<dyn ProcessProbe>,
+        Arc::new(FakeBinary(fake_claude())) as Arc<dyn BinaryProbe>,
+        h.shutdown.clone(),
+    );
+    let handle = tokio::spawn(driver.run());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let published = lock_status(&h.core.status).clone();
+    assert!(
+        published.backoff_until.contains_key(&a),
+        "record must be followed by a publish: {published:?}"
+    );
 
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -8772,33 +9324,37 @@ Expect `cannot find type 'Driver' in 'cut_core::scheduler::driver'`.
 struct CycleInputs {
     core: Arc<Core>,
     events: Arc<dyn EventSink>,
+    machine: SharedMachine,
     accounts: Vec<String>,
     trigger: Trigger,
     binary: PathBuf,
     cwd: PathBuf,
     timeout: Duration,
     pid_slot: Arc<AtomicU32>,
-    strikes: Arc<Mutex<EnvelopeStrikes>>,
     cancel: CancellationToken,
 }
 
-/// Adapter that performs the four halt steps against the real store.
-struct StoreHalt<'a> {
-    core: &'a Core,
-    account_id: &'a str,
-    outcome: &'a PollOutcome,
-    raw: Option<&'a str>,
+/// Adapter that performs the four halt steps against the real store. Owns
+/// its data rather than borrowing, because the whole sequence runs inside one
+/// `blocking` hop and must be `Send + 'static`.
+struct StoreHalt {
+    core: Arc<Core>,
+    account_id: String,
+    outcome: PollOutcome,
+    raw: Option<String>,
     taken_at: i64,
     duration_ms: u32,
 }
 
-impl HaltSink for StoreHalt<'_> {
+impl HaltSink for StoreHalt {
     fn persist_halt(&self, value: &str) -> AppResult<()> {
         self.core.store.set_polling_halted(value)
     }
+    /// The only place a guard trip is logged. `run_usage` stays silent so
+    /// this ERROR line can never appear before the halt flag reaches disk.
     fn log_envelope(&self, raw: &str, reason: &str) {
         error!(
-            account_id = self.account_id,
+            account_id = %self.account_id,
             envelope = raw,
             reason = reason,
             "guard tripped: polling halted"
@@ -8808,16 +9364,16 @@ impl HaltSink for StoreHalt<'_> {
         self.core
             .store
             .insert_snapshot(
-                self.account_id,
+                &self.account_id,
                 self.taken_at,
-                self.outcome,
-                self.raw,
+                &self.outcome,
+                self.raw.as_deref(),
                 self.duration_ms,
             )
             .map(|_| ())
     }
     fn disable_account(&self) -> AppResult<()> {
-        self.core.store.mark_guard_tripped(self.account_id)
+        self.core.store.mark_guard_tripped(&self.account_id)
     }
 }
 
@@ -8828,13 +9384,13 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
     let CycleInputs {
         core,
         events,
+        machine,
         accounts,
         trigger,
         binary,
         cwd,
         timeout,
         pid_slot,
-        strikes,
         cancel,
     } = inputs;
 
@@ -8851,12 +9407,16 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
             return;
         }
 
-        let account = match core.store.account_by_id(&account_id) {
-            Ok(Some(a)) => a,
-            Ok(None) => continue,
-            Err(e) => {
-                error!(account_id = %account_id, error = %e, "could not load account");
-                continue;
+        let account = {
+            let store_core = Arc::clone(&core);
+            let id = account_id.clone();
+            match blocking(move || store_core.store.account_by_id(&id)).await {
+                Ok(Some(a)) => a,
+                Ok(None) => continue,
+                Err(e) => {
+                    error!(account_id = %account_id, error = %e, "could not load account");
+                    continue;
+                }
             }
         };
 
@@ -8879,26 +9439,18 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
             return;
         }
 
-        // Spec 6.3 rule 5: an unclassifiable envelope is a strike; five in a
-        // row on one account escalate, because that is exactly the case where
-        // the app cannot prove no turn was spent.
-        let escalated = match &result.outcome {
-            PollOutcome::SpawnError(m) if is_unexpected_envelope(m) => {
-                let mut s = strikes.lock().unwrap_or_else(PoisonError::into_inner);
-                s.record_shape_error(&account_id)
-            }
-            _ => {
-                let mut s = strikes.lock().unwrap_or_else(PoisonError::into_inner);
-                s.clear(&account_id);
-                false
-            }
-        };
+        // Backoff and the spec 6.3 step 5 streak are both updated by
+        // `record`, which returns `Escalate` on the fifth consecutive
+        // unclassifiable envelope. Publish the snapshot immediately: it is
+        // the only scheduler state anything else can see.
+        let recorded = lock_machine(&machine).record(&account_id, &result.outcome, taken_at);
+        publish_status(&machine, &core.status, taken_at);
 
-        let (outcome, halt_reason) = match (&result.outcome, escalated) {
+        let (outcome, halt_reason) = match (&result.outcome, recorded) {
             (PollOutcome::GuardTripped(reason), _) => {
                 (result.outcome.clone(), Some(reason.clone()))
             }
-            (PollOutcome::SpawnError(_), true) => {
+            (_, Recorded::Escalate) => {
                 let reason = "unclassifiable envelope x5".to_string();
                 (PollOutcome::GuardTripped(reason.clone()), Some(reason))
             }
@@ -8907,22 +9459,23 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
 
         if let Some(reason) = halt_reason {
             let sink = StoreHalt {
-                core: &core,
-                account_id: &account_id,
-                outcome: &outcome,
-                raw: result.raw.as_deref(),
+                core: Arc::clone(&core),
+                account_id: account_id.clone(),
+                outcome: outcome.clone(),
+                raw: result.raw.clone(),
                 taken_at,
                 duration_ms: result.duration_ms,
             };
-            if let Err(e) = perform_halt(
-                &sink,
-                taken_at,
-                result.raw.as_deref().unwrap_or("<no stdout captured>"),
-                &reason,
-            ) {
+            let envelope = result
+                .raw
+                .clone()
+                .unwrap_or_else(|| "<no stdout captured>".to_string());
+            let reason_for_log = reason.clone();
+            if let Err(e) =
+                blocking(move || perform_halt(&sink, taken_at, &envelope, &reason_for_log)).await
+            {
                 error!(error = %e, "could not fully record the guard trip");
             }
-            lock_machine(&core.machine).record(&account_id, OutcomeKind::GuardTripped, taken_at);
             events.usage_updated(&account_id);
             events.refresh_tray();
             events.cycle_finished();
@@ -8930,18 +9483,25 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
             return;
         }
 
-        if let Err(e) = core.store.insert_snapshot(
-            &account_id,
-            taken_at,
-            &outcome,
-            result.raw.as_deref(),
-            result.duration_ms,
-        ) {
-            error!(account_id = %account_id, error = %e, "could not persist the snapshot");
+        {
+            let store_core = Arc::clone(&core);
+            let id = account_id.clone();
+            let to_store = outcome.clone();
+            let raw = result.raw.clone();
+            let duration_ms = result.duration_ms;
+            if let Err(e) = blocking(move || {
+                store_core
+                    .store
+                    .insert_snapshot(&id, taken_at, &to_store, raw.as_deref(), duration_ms)
+                    .map(|_| ())
+            })
+            .await
+            {
+                error!(account_id = %account_id, error = %e, "could not persist the snapshot");
+            }
         }
 
         let kind = outcome.kind();
-        lock_machine(&core.machine).record(&account_id, kind, taken_at);
 
         if kind.is_failure() {
             warn!(
@@ -8983,7 +9543,9 @@ pub struct Driver {
     binary: Arc<dyn BinaryProbe>,
     shutdown: CancellationToken,
     pid_slot: Arc<AtomicU32>,
-    strikes: Arc<Mutex<EnvelopeStrikes>>,
+    /// Owned here and nowhere else. Everything outside this file reads the
+    /// `DriverStatus` snapshot instead (spec 5.1).
+    machine: SharedMachine,
 }
 
 struct LiveCycle {
@@ -9006,7 +9568,7 @@ impl Driver {
             binary,
             shutdown,
             pid_slot: Arc::new(AtomicU32::new(0)),
-            strikes: Arc::new(Mutex::new(EnvelopeStrikes::new())),
+            machine: Arc::new(Mutex::new(Machine::new())),
         }
     }
 
@@ -9020,11 +9582,18 @@ impl Driver {
     /// Re-stat the binary and publish the result for `get_dashboard`.
     fn refresh_binary(&self, settings: &UserSettings) -> Option<PathBuf> {
         let found = self.binary.find(&settings.claude_binary);
-        let mut st = lock_status(&self.core.status);
-        st.binary = found
+        *lock_binary(&self.core.binary) = found
             .as_ref()
             .map(|(p, s)| (p.to_string_lossy().to_string(), *s));
         found.map(|(p, _)| p)
+    }
+
+    fn publish(&self) {
+        publish_status(
+            &self.machine,
+            &self.core.status,
+            chrono::Utc::now().timestamp_millis(),
+        );
     }
 
     /// Spawns the cycle task described by a `Run` decision.
@@ -9035,29 +9604,32 @@ impl Driver {
         binary: PathBuf,
         settings: &UserSettings,
     ) -> LiveCycle {
-        let token = begin_cycle(&self.core.machine, chrono::Utc::now().timestamp_millis());
+        let token = begin_cycle(&self.machine, chrono::Utc::now().timestamp_millis());
+        // Busy has just become true; publish before the task starts so a
+        // command arriving immediately sees it.
+        self.publish();
         let cancel = self.shutdown.child_token();
         let inputs = CycleInputs {
             core: Arc::clone(&self.core),
             events: Arc::clone(&self.events),
+            machine: Arc::clone(&self.machine),
             accounts,
             trigger,
             binary,
             cwd: crate::paths::poll_cwd(&self.core.app_data_dir),
             timeout: Duration::from_secs(u64::from(settings.timeout_secs)),
             pid_slot: Arc::clone(&self.pid_slot),
-            strikes: Arc::clone(&self.strikes),
             cancel: cancel.clone(),
         };
         let handle = tokio::spawn(run_cycle(inputs, token));
         LiveCycle { handle, cancel }
     }
 
-    fn settings(&self) -> UserSettings {
-        self.core
-            .store
-            .stored_settings()
-            .unwrap_or_else(|e| {
+    async fn settings(&self) -> UserSettings {
+        let core = Arc::clone(&self.core);
+        match blocking(move || core.store.stored_settings()).await {
+            Ok(s) => s,
+            Err(e) => {
                 error!(error = %e, "could not read settings; using defaults");
                 UserSettings {
                     interval_secs: crate::store::settings::DEFAULT_INTERVAL_SECS,
@@ -9067,40 +9639,49 @@ impl Driver {
                     launch_at_login: false,
                     log_level: "info".to_string(),
                 }
-            })
+            }
+        }
     }
 
-    fn halted(&self) -> bool {
-        self.core
-            .store
-            .polling_halted()
-            .unwrap_or_else(|e| {
+    /// An unreadable halt flag is treated as halted: the flag is the safety
+    /// property, so the fail-closed answer is the only safe one.
+    async fn halted(&self) -> bool {
+        let core = Arc::clone(&self.core);
+        match blocking(move || core.store.polling_halted()).await {
+            Ok(v) => v.is_some(),
+            Err(e) => {
                 error!(error = %e, "could not read the halt flag; assuming halted");
-                Some("unreadable".to_string())
-            })
-            .is_some()
+                true
+            }
+        }
     }
 
-    fn enabled(&self) -> Vec<String> {
-        self.core.store.enabled_account_ids().unwrap_or_else(|e| {
-            error!(error = %e, "could not list enabled accounts");
-            Vec::new()
-        })
+    async fn enabled(&self) -> Vec<String> {
+        let core = Arc::clone(&self.core);
+        match blocking(move || core.store.enabled_account_ids()).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(error = %e, "could not list enabled accounts");
+                Vec::new()
+            }
+        }
     }
 
-    /// Runs one decision and, on `Run`, starts the cycle.
-    fn decide_and_maybe_run(
+    /// Runs one decision and, on `Run`, starts the cycle. Async because the
+    /// enabled list and the halt flag both come from the store.
+    async fn decide_and_maybe_run(
         &self,
         trigger: Trigger,
         claude_running: Option<bool>,
         settings: &UserSettings,
     ) -> Option<LiveCycle> {
+        // A stat, not a database call, so it stays on this thread.
         let binary_path = self.refresh_binary(settings);
-        let enabled = self.enabled();
-        let halted = self.halted();
+        let enabled = self.enabled().await;
+        let halted = self.halted().await;
         let now = chrono::Utc::now().timestamp_millis();
 
-        let decision = lock_machine(&self.core.machine).decide(
+        let decision = lock_machine(&self.machine).decide(
             trigger,
             claude_running,
             binary_path.is_some(),
@@ -9108,6 +9689,9 @@ impl Driver {
             &enabled,
             now,
         );
+        // Spec 5.1: publish after every decide, so a skipped Manual trigger
+        // and a gate transition are both visible to commands at once.
+        self.publish();
 
         match decision {
             Decision::Skip(reason) => {
@@ -9137,7 +9721,7 @@ impl Driver {
 
     pub async fn run(self) {
         let mut settings_rx = self.core.settings_tx.subscribe();
-        let mut settings = self.settings();
+        let mut settings = self.settings().await;
 
         if let Err(e) = crate::paths::ensure_dir(&crate::paths::poll_cwd(&self.core.app_data_dir)) {
             error!(error = %e, "could not create the poll working directory");
@@ -9147,7 +9731,10 @@ impl Driver {
         let mut live: Option<LiveCycle> = None;
 
         // Startup: decide, run, then enter the loop.
-        if let Some(cycle) = self.decide_and_maybe_run(Trigger::Startup, None, &settings) {
+        if let Some(cycle) = self
+            .decide_and_maybe_run(Trigger::Startup, None, &settings)
+            .await
+        {
             live = Some(cycle);
         }
 
@@ -9160,7 +9747,8 @@ impl Driver {
             let now = chrono::Utc::now().timestamp_millis();
             if now - last_prune >= PRUNE_INTERVAL_MS {
                 last_prune = now;
-                if let Err(e) = self.core.store.prune(now) {
+                let core = Arc::clone(&self.core);
+                if let Err(e) = blocking(move || core.store.prune(now)).await {
                     error!(error = %e, "prune failed");
                 }
             }
@@ -9171,6 +9759,8 @@ impl Driver {
                     live = None;
                     last_cycle_end = chrono::Utc::now().timestamp_millis();
                     lock_status(&self.core.status).stalled_at = None;
+                    // The token has dropped, so busy is false again.
+                    self.publish();
                 }
             }
 
@@ -9178,19 +9768,25 @@ impl Driver {
             let wait = Duration::from_millis(
                 (deadline_ms - chrono::Utc::now().timestamp_millis()).max(0) as u64,
             );
+            // Spec 6.5: the watchdog arm is disabled while no cycle is in
+            // flight. `live.is_some()` is the same predicate as
+            // `cycle_age(now).is_some()` without taking the machine lock
+            // inside a select! precondition.
+            let cycle_running = live.is_some();
 
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {
                     // Busy is checked before spending a process check, so the
                     // app's own child can never latch the gate.
-                    if lock_machine(&self.core.machine).is_busy() {
+                    if lock_machine(&self.machine).is_busy() {
                         debug!("timer skipped: a cycle is already running");
                         last_cycle_end = chrono::Utc::now().timestamp_millis();
                         continue;
                     }
                     let running = self.process.claude_running(self.current_pid());
-                    if let Some(cycle) =
-                        self.decide_and_maybe_run(Trigger::Timer, Some(running), &settings)
+                    if let Some(cycle) = self
+                        .decide_and_maybe_run(Trigger::Timer, Some(running), &settings)
+                        .await
                     {
                         live = Some(cycle);
                     } else {
@@ -9200,24 +9796,31 @@ impl Driver {
                 changed = settings_rx.changed() => {
                     if changed.is_ok() {
                         settings = settings_rx.borrow_and_update().clone();
+                        // Only a polling-relevant change reaches this arm at
+                        // all (spec section 8), and D16 makes it a deliberate
+                        // "try again" for every account.
+                        lock_machine(&self.machine).reset_all_backoff();
+                        self.publish();
                         info!(
                             interval_secs = settings.interval_secs,
                             timeout_secs = settings.timeout_secs,
-                            "settings applied to the driver"
+                            "settings applied to the driver; backoff reset"
                         );
                         // The deadline moves, the clock is not restarted.
                     }
                 }
                 _ = self.core.triggers.notified_manual() => {
-                    if let Some(cycle) =
-                        self.decide_and_maybe_run(Trigger::Manual, None, &settings)
+                    if let Some(cycle) = self
+                        .decide_and_maybe_run(Trigger::Manual, None, &settings)
+                        .await
                     {
                         live = Some(cycle);
                     }
                 }
                 _ = self.core.triggers.notified_startup() => {
-                    if let Some(cycle) =
-                        self.decide_and_maybe_run(Trigger::Startup, None, &settings)
+                    if let Some(cycle) = self
+                        .decide_and_maybe_run(Trigger::Startup, None, &settings)
+                        .await
                     {
                         live = Some(cycle);
                     }
@@ -9225,21 +9828,22 @@ impl Driver {
                 _ = self.core.triggers.notified_changed() => {
                     let ids = self.core.triggers.take_changed();
                     if !ids.is_empty() {
-                        if let Some(cycle) = self.decide_and_maybe_run(
-                            Trigger::AccountChanged(ids),
-                            None,
-                            &settings,
-                        ) {
+                        if let Some(cycle) = self
+                            .decide_and_maybe_run(Trigger::AccountChanged(ids), None, &settings)
+                            .await
+                        {
                             live = Some(cycle);
                         }
                     }
                 }
-                _ = watchdog.tick() => {
-                    let age = lock_machine(&self.core.machine)
+                _ = watchdog.tick(), if cycle_running => {
+                    let age = lock_machine(&self.machine)
                         .cycle_age(chrono::Utc::now().timestamp_millis());
                     if let (Some(age), Some(cycle)) = (age, live.as_ref()) {
-                        let limit =
-                            watchdog_limit_ms(self.enabled().len(), settings.timeout_secs);
+                        let limit = watchdog_limit_ms(
+                            self.enabled().await.len(),
+                            settings.timeout_secs,
+                        );
                         if age.as_millis() as u64 > limit {
                             let at = chrono::Utc::now().timestamp_millis();
                             error!(
@@ -9253,6 +9857,8 @@ impl Driver {
                             self.events.poller_stalled(at, age.as_millis() as u64);
                             live = None;
                             last_cycle_end = at;
+                            // Aborting dropped the token, so busy is clear.
+                            self.publish();
                         }
                     }
                 }
@@ -9274,6 +9880,8 @@ impl Driver {
                 warn!("cycle task did not finish within 2 s of cancellation");
             }
         }
+        // One last snapshot so nothing is left reading a stale busy flag.
+        self.publish();
         info!("driver stopped");
     }
 }
@@ -9286,7 +9894,7 @@ cd /c/Users/josh/ClaudeUsageTracker/src-tauri
 cargo test --test driver_loop -- --test-threads=1
 ```
 
-The single test thread matters: these tests configure the fake binary through process-wide environment variables. Expect 8 passing tests. They take roughly a minute in total.
+The single test thread matters: these tests configure the fake binary through process-wide environment variables. Expect 10 passing tests. They take roughly two minutes in total.
 
 - [ ] **Step 10: Run the full suite and the linter** — run:
 
@@ -9306,13 +9914,16 @@ Task 20: add the scheduler driver loop
 
 The loop never polls inline: a Run decision spawns a cycle task owning the
 RAII token and a child cancellation token, so any trigger arriving during a
-cycle is decided immediately and gets skipped as busy. Adds the gap-based
-deadline anchored on the last cycle end, the settings watch that moves the
-deadline without restarting the clock, the watchdog that aborts a stalled
-cycle, daily pruning, and the guard-trip path that persists the halt flag
-before anything else and abandons the rest of the cycle. Event emission,
-the process gate and binary discovery sit behind traits so the loop is
-testable without a Tauri runtime.
+cycle is decided immediately and gets skipped as busy. The driver is the
+sole owner of the state machine and the sole writer of DriverStatus, which
+it publishes after every decide and every record so nothing else needs a
+machine handle. Adds the gap-based deadline anchored on the last cycle end,
+the settings watch that moves the deadline and resets backoff without
+restarting the clock, the watchdog that aborts a stalled cycle, daily
+pruning, and the guard-trip path that persists the halt flag before
+anything else and abandons the rest of the cycle. Event emission, the
+process gate and binary discovery sit behind traits so the loop is testable
+without a Tauri runtime.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014sqgoktsDjFqBApr4zsfg2
@@ -9325,7 +9936,7 @@ MSG
 ## Task 21: Tray icons and the Tauri application wiring
 
 **Files:** Modify `src-tauri/src/tray.rs`, `src-tauri/src/lib.rs`
-**Interfaces:** Consumes: `tray_state` / `Level` (Task 16), `Core` / `DriverStatus` / every command (Task 19), `Driver` / `EventSink` / `SysinfoProbe` / `RealBinaryProbe` (Task 20), `init_logging` (Task 17), `Store` (Tasks 8–11), `enumerate_profiles` (Task 7), `paths` (Task 6). Produces: `pub const MENU_OPEN/MENU_REFRESH/MENU_LOGS/MENU_QUIT: &str`, `pub fn level_rgb(Level) -> [u8; 3]`, `pub fn icon_rgba(Level, u32) -> Vec<u8>`, `pub fn should_hide_on_close(bool) -> bool`, `pub fn apply_tray(&tauri::AppHandle, &Core)`, `pub struct TauriEvents`, `pub fn run()`.
+**Interfaces:** Consumes: `tray_state` / `Level` (Task 16), `Core` / every command (Task 19), `DriverStatus` (Task 12), `Driver` / `EventSink` / `SysinfoProbe` / `RealBinaryProbe` (Task 20), `init_logging` (Task 17), `Store` (Tasks 8–11), `enumerate_profiles` (Task 7), `paths` (Task 6). Produces: `pub const MENU_OPEN/MENU_REFRESH/MENU_LOGS/MENU_QUIT: &str`, `pub fn level_rgb(Level) -> [u8; 3]`, `pub fn icon_rgba(Level, u32) -> Vec<u8>`, `pub fn should_hide_on_close(bool) -> bool`, `pub fn apply_tray(&tauri::AppHandle, &Core)`, `pub struct TauriEvents`, `pub fn run()`.
 
 - [ ] **Step 1: Write the failing test for the icon and close behaviour** — append these tests inside the existing `mod tests` block in `src-tauri/src/tray.rs`:
 
@@ -9622,11 +10233,11 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::commands::{Core, DriverStatus, SharedCore};
+use crate::commands::{Core, SharedCore};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
-use crate::scheduler::machine::Machine;
+use crate::scheduler::machine::DriverStatus;
 use crate::scheduler::triggers::Triggers;
 use crate::store::Store;
 use crate::tray::{
@@ -9728,9 +10339,11 @@ pub fn run() {
             let (settings_tx, _settings_rx) = tokio::sync::watch::channel(stored.clone());
             let core: SharedCore = Arc::new(Core {
                 store,
-                machine: Arc::new(Mutex::new(Machine::new())),
                 triggers: Arc::new(Triggers::new()),
+                // The driver owns the state machine and is the only writer of
+                // this snapshot (spec 5.1); everything else only reads it.
                 status: Arc::new(Mutex::new(DriverStatus::default())),
+                binary: Arc::new(Mutex::new(None)),
                 settings_tx,
                 log,
                 app_data_dir,
@@ -11922,6 +12535,8 @@ MSG
 
 ## Self-Review
 
+Written against **spec v5 (final)**. The v5 deltas are folded in as follows: the `DriverStatus` snapshot (§5.1) is defined in Task 12, published in Task 20 and read in Task 19; `Backoff.unexpected_envelope_streak` plus `record() -> Recorded` and `status()` are in Task 12, which moves the §6.3 step 5 escalation out of the runner; the §8 settings split is in Task 9 (`polling_relevant_changed`), Task 19 (applying it) and Task 20 (the watch arm that resets backoff). The §6.3 step 2 rewording is wording only and the guard order in Task 14 already matched it.
+
 ### 1. Spec coverage
 
 **§5 Architecture and §5.1 Core types**
@@ -11946,6 +12561,7 @@ MSG
 | React `App`, `Header`, `AccountsTable`, `Sparkline`, `Settings`, `FailureDetail`, `hooks/useDashboard` | 23 | |
 | Data flow, events as refetch triggers only, 250 ms debounce, 1 s tick | 20 (emit) + 23 (hook) | |
 | `Account`, `DisabledReason`, `Window`, `Parsed`, `PollOutcome`, `Snapshot`, `SnapshotDto` | 3 | |
+| `DriverStatus { gate, busy, stalled_at, backoff_until }` in `Arc<Mutex<..>>` | defined 12, published 20, read 19 | Defined in `machine.rs` because `Machine::status` builds it from `Gate` and the backoff map |
 | The six `outcome` strings, everything but `ok` is a failure | 3 | |
 
 **§6 Component contracts**
@@ -11961,22 +12577,23 @@ MSG
 | 6.3 PID published as `exclude_pid` | 15 (publish) + 20 (consume) |
 | 6.3 timeout, kill, wait | 15 |
 | 6.3 envelope guard rules 1–4 | 14 |
-| 6.3 rule 5 five-strike escalation | 14 (counter) + 20 (applied per account) |
-| 6.3 halt order: flag, log, outcome, disable, abort cycle | 20 |
+| 6.3 step 5 five-strike escalation (`Backoff.unexpected_envelope_streak`, decided in `record`, returned as `Recorded::Escalate`) | 12 (counter + decision) + 20 (cycle task acts on it) |
+| 6.3 halt order: flag, log, outcome, disable, abort cycle | 20 (and Task 15 stays silent so the ERROR line cannot precede the flag) |
 | 6.3 `Skip(Halted)` for every trigger including Manual | 12 |
 | 6.3 red banner and Clear halt button | 22 (`bannerFor`) + 23 (Header) |
 | 6.3 non-zero exit and non-JSON stdout → `spawn_error` | 15 |
 | 6.4 parser: line iteration, detection predicate, R1/R2/R3 order, duplicates, pct range, reset grammar, zones, DST, year wrap | 4 |
-| 6.5 `Gate`, `Trigger`, `Decision`, `SkipReason`, `decide` rules 0–6, `begin_cycle`, RAII token, `record`, `cycle_age` | 12 |
+| 6.5 `Gate`, `Trigger`, `Decision`, `SkipReason`, `Backoff`, `Recorded`, `decide` rules 0–6, `begin_cycle`, RAII token, `record`, `reset_all_backoff`, `status`, `cycle_age` | 12 |
 | 6.5 snake_case wire forms for every enum | 12 (+ 3 for `DisabledReason` and outcomes) |
-| 6.5 driver: cycle task, coalescing `Notify`, accumulating `AccountChanged`, select loop, deadline, settings watch, watchdog, shutdown | 20 |
+| 6.5 driver: cycle task, coalescing `Notify`, accumulating `AccountChanged`, select loop, deadline, settings watch, watchdog arm disabled when idle, shutdown | 20 |
 | 6.5 binary re-stat before every decision | 20 |
 | 6.5 serial polls in D17 order, per-account persist + emit + tray, `cycle:finished` | 20 |
 | 6.5 `ExitRequested` with `prevent_exit`, explicit kill and wait, second exit allowed through | 20 (kill/wait) + 21 (exit hook) |
-| 6.6 pragmas, `Mutex<Connection>`, `spawn_blocking` callers, migrations | 8 (+ 19 for the blocking wrappers) |
+| 6.6 pragmas, `Mutex<Connection>`, `spawn_blocking` callers, migrations | 8 (+ 19 for the shared `blocking` helper and the command wrappers, + 20 for every driver-side store call) |
 | 6.6 schema and both indexes | 8 |
 | 6.6 `latest_per_account`, `history`, `prune` + `incremental_vacuum` | 11 |
 | 6.6 settings keys, `polling_halted`, `launch_at_login` not stored | 9 (+ 19 for the autostart write-through) |
+| D16 / §8 split: only the three polling keys reach the scheduler | 9 (`polling_relevant_changed`) + 19 (applies the split) + 20 (watch arm resets backoff) |
 | 6.7 tray menu, left-click, close→hide, `tray_state`, tooltip format | 16 (pure) + 21 (wiring) |
 | 6.8 login script per OS, quoting rules, directory emptied at startup | 18 (+ 21 for the startup empty) |
 | 6.9 JSON layer, daily rotation, 7 files, `reload::Layer`, per-account fields | 17 (+ 20 for the poll fields) |
@@ -12004,7 +12621,7 @@ MSG
 |---|---|---|
 | parser (18 listed cases) | 4 | None. All present including 150 %, CRLF, 12am/12pm, Dec→Jan, DST gap, ambiguous, unknown zone, R3-not-stealing-R2 |
 | runner — guard table in order, turn evidence, advisory in isolation, shape cases | 14 | None |
-| runner — five-strike escalation | 14 (counter) + 20 (wired) | Counter tested in isolation; the wiring is exercised by the driver's guard-trip test |
+| runner — five-strike escalation | 12 (counter, per-account tracking, reset rules) + 20 (end-to-end) | v5 moved the counter out of the runner into `Backoff.unexpected_envelope_streak`, so the unit tests live in the machine suite and the driver suite proves five unclassifiable envelopes really do halt the poller |
 | runner — halt flag persisted before the cycle abort, with a failing store after step 1 | 20 | **Deviation:** implemented against a `HaltSink` trait with a recording/failing fake rather than a fault-injected real `Store`. Same assertion, no need for a failure-injecting SQLite layer |
 | runner — parser fixture for 12am/12pm | 4 | **Placement gap:** lives in the parser suite, not the runner suite. The runner has no separate clock, so duplicating it there would test nothing new |
 | runner — non-zero exit, exit 0 + non-JSON, timeout via fake binary, exact argv, env sanitisation | 13 + 15 | None |
@@ -12014,9 +12631,9 @@ MSG
 | store | 8, 9, 10, 11 | None. Cascade, canonical uniqueness and halt-survives-reopen all present |
 | process | 5 | None |
 | tray | 16 | None |
-| commands | 19 | None |
+| commands | 19 | None. Adds the v5 settings split (three keys publish, three do not) and proves the dashboard and `poll_now` read only the published snapshot |
 | frontend | 22 | None. Banner precedence added beyond the listed four |
-| scheduler/driver | 20 | None |
+| scheduler/driver | 20 | None. Adds `publish_status` coverage: gate/busy/backoff copied out, `stalled_at` preserved, and a live test that a `record` is always followed by a publish |
 | integration (manual, README) | 24 | None. The Git Bash hazard is explicitly not reproduced |
 
 **Deliberate spec resolutions, each recorded as a code comment in the task that makes it:**
@@ -12024,9 +12641,17 @@ MSG
 1. **`PollOutcome::Timeout` carries the timeout in seconds** (Task 3). §5.1 declares the variant without a payload but requires the error text `"timed out after {n}s"`; the payload is the only way to produce that text from `error_text()`.
 2. **`AccountChanged(ids)` with an empty intersection skips as `no_enabled_accounts`** (Task 12). §6.5 rule 5 defines `AllBackedOff` as "enabled accounts exist and every one is in cooldown", which is false here, and `AccountChanged` bypasses the backoff filter entirely.
 3. **The live `Child` is owned by the cycle task, not a shared `Mutex<Option<Child>>`** (Task 15). Awaiting the child's exit while holding that mutex would deadlock the shutdown path that wants the same mutex to kill it. Shutdown reaches the child through the `CancellationToken`; the child is still only killed through its own handle and the PID is still only published as `exclude_pid`.
-4. **`Machine::preview_manual` added** (Task 19). `poll_now` must report `skipped:<reason>` without consuming a trigger or mutating backoff. A Manual trigger bypasses the gate and backoff, so only rules 0–3 apply and a read-only preview is exact.
+4. **`preview_manual` is a free function over `DriverStatus`** (Task 12). `poll_now` must report `skipped:<reason>` without consuming a trigger or mutating backoff, and v5 forbids commands from reading `Machine`, so the preview takes the published snapshot. A Manual trigger bypasses the gate and backoff, so only rules 0–3 apply and the preview is exact.
 5. **Tray icons are drawn at runtime from `Level`** (Task 21) rather than shipped as five image assets, so the icon set cannot drift from the enum and nothing extra enters the bundle.
 6. **Linux tray default item**: Tauri 2 has no "default menu item" API, so "Open" is simply the first menu item and left-click is handled where the platform delivers it (Task 21). This matches §6.7's intent; it is not a separate API call.
+7. **`UNEXPECTED_ENVELOPE_PREFIX` and `is_unexpected_envelope` live in `usage/mod.rs`** (Task 3), not in `runner.rs`. Both the guard that produces a shape-class message and `Machine::record`, which counts the streak, need them, and the machine must not depend on the runner.
+8. **`Machine::status` returns `stalled_at: None`** (Task 12). The watchdog owns that value, so the driver merges the previous one in when it publishes (Task 20).
+9. **`backoff_until` in the snapshot is not filtered by `now`** (Task 12). The snapshot is written when the driver acts and read later by the UI, which already ignores an elapsed deadline; filtering at write time would hide a cooldown that is still in force.
+10. **The binary path is not part of `DriverStatus`** (Task 19). §5.1 defines `DriverStatus` as scheduler state only, so `(path, source)` sits in its own `BinarySlot` beside it, written by the driver's pre-decision re-stat and read by `get_dashboard` and `poll_now`.
+11. **Signature evolution from v4 to v5, recorded so a later reader does not re-propose the v4 shape.** `Machine::record` was `(&str, OutcomeKind, i64) -> ()` and the five-strike counter was a separate `EnvelopeStrikes { HashMap<String, u32> }` in `runner.rs` held by the driver as a second `Arc<Mutex<..>>`. v5 makes it `(&str, &PollOutcome, i64) -> Recorded`, folds the counter into `Backoff.unexpected_envelope_streak: u8`, and deletes `EnvelopeStrikes` entirely. `record` needs the whole outcome, not just its kind, because only the message distinguishes a shape-class spawn error from any other spawn error. Alongside it, commands lost their `Machine` handle: `Core` used to hold `machine: SharedMachine` and `core_get_dashboard` / `core_poll_now` / `core_update_account` / `core_set_settings` all locked it. They now read the published `DriverStatus` instead, and the only backoff resets left are the ones the spec puts inside `decide` and inside the driver's settings-watch arm. There is exactly one `record` signature and one `MAX_ENVELOPE_STRIKES` (`u8`, in `machine.rs`) in the whole plan.
+12. **`run_usage` never logs a guard trip** (Task 15). §6.3 fixes the order as persist the halt flag, then log the raw envelope, then persist the outcome. An ERROR line inside the runner would land before the flag reached disk and misreport that order, so the runner returns silently and carries the bytes on `RunResult::raw`. The single trip log site is `StoreHalt::log_envelope` in Task 20, and a Task 15 test pins the raw carrier so the rule stays safe.
+13. **The driver reaches the store only through `commands::blocking`** (Task 20). §6.6 says every `Store` method is synchronous and the mutex is never held across an `await`; with `busy_timeout=5000` a contended statement can park its thread for five seconds, which must not be a runtime worker. That is why `settings`, `halted`, `enabled` and `decide_and_maybe_run` are async and why `StoreHalt` owns its data: the whole four-step halt sequence moves into one blocking hop.
+14. **The watchdog select arm carries the guard `if cycle_running`** (Task 20), which is `live.is_some()`. It is the same predicate as §6.5's `machine.cycle_age(now).is_some()` but does not take the machine lock inside a `select!` precondition.
 
 ### 2. Placeholder scan
 
@@ -12037,7 +12662,7 @@ grep -nE "TBD|FIXME|\bTODO\b|similar to Task|write tests for the above|add error
   docs/superpowers/plans/2026-09-15-claude-usage-tracker.md
 ```
 
-One hit, on line 11888, which is the literal `grep` pattern inside Task 24 Step 3 (the tree scan the implementer runs). No task defers work to another task by reference; every code step carries its own complete code, repeated rather than cross-referenced.
+One hit, and it is the literal `grep` pattern written inside Task 24 Step 3, which is the tree scan the implementer runs. No task defers work to another task by reference; every code step carries its own complete code, repeated rather than cross-referenced.
 
 ### 3. Shared type and name consistency
 
@@ -12051,22 +12676,25 @@ One hit, on line 11888, which is the literal `grep` pattern inside Task 24 Step 
 | `Account`, `DisabledReason` | Task 3 | 10, 16, 19; TS `Account`, `DisabledReason` in Task 22 |
 | `BinarySource`, `Found`, `Candidate` | Task 7 | 10, 19, 20; TS `BinarySource` in Task 22 |
 | `Gate` | Task 12 | 19 (`Dashboard.gate`), 20; TS `Gate` in Task 22 |
+| `DriverStatus`, `Backoff`, `Recorded`, `MAX_ENVELOPE_STRIKES`, `preview_manual` | Task 12 | 19 (`Core.status`, `core_poll_now`, `core_get_dashboard`), 20 (`publish_status`, `run_cycle`), 21 (initial value) |
 | `Trigger` | Task 12 | 19, 20 |
 | `SkipReason` | Task 12 | 19 (`poll_now`), 20 |
 | `Decision` | Task 12 | 20 |
-| `Machine`, `SharedMachine`, `CycleToken`, `begin_cycle`, `lock_machine` | Task 12 | 19, 20, 21 |
-| `Machine::preview_manual` | Task 19 | 19 (`core_poll_now`) |
-| `USAGE_ARGV`, `GuardVerdict`, `check_envelope`, `EnvelopeStrikes`, `MAX_ENVELOPE_STRIKES`, `env_names_to_strip` | Task 14 | 15, 20 |
-| `RunResult`, `run_usage`, `UNEXPECTED_ENVELOPE_PREFIX`, `is_unexpected_envelope` | Task 15 | 20 |
+| `Machine`, `SharedMachine`, `CycleToken`, `begin_cycle`, `lock_machine` | Task 12 | 20 only (the driver is the sole owner) |
+| `UNEXPECTED_ENVELOPE_PREFIX`, `is_unexpected_envelope` | Task 3 | 12 (`record`), 14 (`shape`), 15 (tests) |
+| `USAGE_ARGV`, `GuardVerdict`, `check_envelope`, `env_names_to_strip` | Task 14 | 15, 20 |
+| `RunResult`, `run_usage` | Task 15 | 20 |
+| `polling_relevant_changed` | Task 9 | 19 (`core_set_settings`) |
 | `Store`, `with_conn`, `with_conn_mut`, `open`, `open_in_memory` | Task 8 | 9, 10, 11, 19, 20, 21 |
 | `Store::get_raw` / `set_raw` / `stored_settings` / `save_settings` / `polling_halted` / `set_polling_halted` / `clear_polling_halted` | Task 9 | 19, 20, 21 |
 | `Store::list_accounts` / `enabled_account_ids` / `account_by_id` / `add_account` / `update_account` / `remove_account` / `mark_guard_tripped` / `seed_accounts_if_empty` / `rescan_accounts` | Task 10 | 16, 19, 20, 21 |
 | `Store::insert_snapshot` / `latest_per_account` / `history` / `prune` / `snapshot_raw`, `HistoryPoint`, `RETENTION_MS` | Task 11 | 16, 19, 20, 21; TS `HistoryPoint` in Task 22 |
 | `UserSettings`, `validate_settings`, the six clamp constants | Task 9 | 19, 20, 23; TS `UserSettings` in Task 22 |
 | `Level`, `tray_state`, `level_rgb`, `icon_rgba`, `should_hide_on_close`, `MENU_*` | Tasks 16 and 21 | 21 |
-| `Core`, `SharedCore`, `DriverStatus`, `lock_status`, `Dashboard`, `AccountRow`, `BinaryInfo`, `RawSnapshot` | Task 19 | 20, 21; TS `Dashboard`, `AccountRow`, `BinaryInfo`, `RawSnapshot` in Task 22 |
+| `Core`, `SharedCore`, `BinarySlot`, `lock_status`, `lock_binary`, `Dashboard`, `AccountRow`, `BinaryInfo`, `RawSnapshot` | Task 19 | 20, 21; TS `Dashboard`, `AccountRow`, `BinaryInfo`, `RawSnapshot` in Task 22 |
+| `blocking<T, F>` (the shared `spawn_blocking` hop) | Task 19 | 19 (every command wrapper), 20 (every driver store call) |
 | `Triggers` | Task 19 | 19, 20 |
-| `EventSink`, `ProcessProbe`, `BinaryProbe`, `Driver`, `deadline_for`, `watchdog_limit_ms`, `HaltSink`, `perform_halt`, `PRUNE_INTERVAL_MS` | Task 20 | 21 |
+| `EventSink`, `ProcessProbe`, `BinaryProbe`, `Driver`, `deadline_for`, `watchdog_limit_ms`, `publish_status`, `HaltSink`, `perform_halt`, `PRUNE_INTERVAL_MS` | Task 20 | 21 |
 | Command names `get_dashboard`, `get_history`, `poll_now`, `add_account`, `update_account`, `remove_account`, `rescan_profiles`, `get_settings`, `set_settings`, `clear_halt`, `open_login`, `open_log_dir`, `get_snapshot_raw` | Task 19 | 21 (`generate_handler!`), 23 (`invoke`) |
 | Event names `usage:updated`, `cycle:finished`, `gate:changed`, `poller:stalled` | Task 20 (`EventSink`) / Task 21 (`TauriEvents`) | 23 (`useDashboard`) |
 | `formatCountdown`, `formatAgo`, `buildSparklinePaths`, `statusPill`, `bannerFor` | Task 22 | 23 |
