@@ -2,6 +2,7 @@ pub mod discovery;
 pub mod error;
 pub mod paths;
 pub mod process;
+pub mod scheduler;
 pub mod store;
 pub mod usage;
 
