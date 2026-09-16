@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="./usage-tracker-kit.js"></script>
+<style>
+  body { margin:0; background:#0b0d0e; --ui: ui-sans-serif, 'Segoe UI', Helvetica, Arial, sans-serif; --mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace; font-family: var(--ui); }
+  a { color:#8ab4f8; } a:hover { color:#adc9fb; }
+  * { box-sizing:border-box; }
+  input, select, button { font-family:inherit; }
+</style>
+</helmet>
+<div style="min-height:100vh;padding:28px 22px 48px;display:flex;justify-content:center;background:#0b0d0e;color:#e7eaec;font-family:var(--ui);--ui:{{ uiFont }};--mono:{{ monoFont }};zoom:{{ zoom }}">
+  <div style="width:100%;max-width:1120px;display:flex;flex-direction:column;gap:14px">
+
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div style="display:flex;align-items:baseline;gap:10px;flex:1;min-width:200px">
+        <div style="font-size:19px;font-weight:600;letter-spacing:-0.01em">Usage Tracker</div>
+        <div style="font-family:var(--mono);font-size:12px;color:#8b949e">{{ accountCount }} accounts</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:7px;padding:6px 12px 6px 10px;border:1px solid #23282c;border-radius:999px;background:#131719">
+          <div style="width:7px;height:7px;border-radius:50%;background:#5fb98a"></div>
+          <div style="font-family:var(--mono);font-size:12px;color:#adb6bd">polling every 60 s</div>
+        </div>
+        <button type="button" onClick="{{ onRefresh }}" style="font-family:var(--mono);font-size:12px;color:#cfd6db;background:#181c1f;border:1px solid #262c31;border-radius:7px;padding:7px 13px;cursor:pointer" style-hover="background:#1f252a;color:#fff">refresh</button>
+        <button type="button" onClick="{{ onToggleSettings }}" style="font-family:var(--mono);font-size:12px;color:#cfd6db;background:#181c1f;border:1px solid #262c31;border-radius:7px;padding:7px 13px;cursor:pointer" style-hover="background:#1f252a;color:#fff">settings</button>
+      </div>
+    </div>
+
+    <div style="border:1px solid #1e2327;border-radius:14px;background:#101315;overflow:hidden">
+      <div style="position:relative">
+        <div style="display:grid;grid-template-columns:{{ gridCols }};align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid #1c2125;background:#0d1012">
+          <div></div>
+          <sc-for list="{{ headers }}" as="h" hint-placeholder-count="6">
+            <div data-colcell="1" onPointerDown="{{ h.onDown }}" title="Drag to move column" style="font-family:var(--mono);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;user-select:none;padding:3px 5px;margin:-3px -5px;border-radius:5px;color:{{ h.color }};background:{{ h.bg }};transform:{{ h.tf }};transition:{{ h.trans }};position:relative;z-index:{{ h.z }}" style-hover="color:#dde2e6;background:#191e22">{{ h.label }}</div>
+          </sc-for>
+          <div></div>
+        </div>
+        <div style="position:absolute;top:0;bottom:0;width:2px;border-radius:2px;background:#8ab4f8;pointer-events:none;z-index:5;display:{{ colLine.display }};left:{{ colLine.left }}"></div>
+      </div>
+
+      <div style="position:relative">
+        <div style="position:absolute;left:12px;right:12px;border:1px dashed #3a4a57;border-radius:10px;background:rgba(122,162,247,0.05);pointer-events:none;z-index:1;display:{{ ph.display }};top:{{ ph.top }};height:{{ ph.height }}"></div>
+        <sc-for list="{{ rows }}" as="row" hint-placeholder-count="3">
+          <div style="position:relative;background:#101315;border-bottom:1px solid #191e21;transform:{{ row.tf }};box-shadow:{{ row.shadow }};transition:{{ row.trans }};z-index:{{ row.z }};opacity:{{ row.op }};border-radius:{{ row.radius }}">
+            <div style="display:grid;grid-template-columns:{{ gridCols }};align-items:center;gap:10px;padding:14px 16px;height:66px">
+              <div onPointerDown="{{ row.onHandleDown }}" title="Drag to reorder rows" style="display:flex;flex-direction:column;gap:3px;width:16px;padding:6px 2px;cursor:grab;border-radius:5px" style-hover="background:#1b2024">
+                <div style="display:flex;gap:3px"><div style="width:3px;height:3px;border-radius:50%;background:#626b72"></div><div style="width:3px;height:3px;border-radius:50%;background:#626b72"></div></div>
+                <div style="display:flex;gap:3px"><div style="width:3px;height:3px;border-radius:50%;background:#626b72"></div><div style="width:3px;height:3px;border-radius:50%;background:#626b72"></div></div>
+                <div style="display:flex;gap:3px"><div style="width:3px;height:3px;border-radius:50%;background:#626b72"></div><div style="width:3px;height:3px;border-radius:50%;background:#626b72"></div></div>
+              </div>
+
+              <sc-for list="{{ row.cells }}" as="cell" hint-placeholder-count="6">
+                <div style="min-width:0;background:{{ cell.bg }};border-radius:6px">
+                  <sc-if value="{{ cell.isAccount }}">
+                    <div style="display:flex;align-items:center;gap:8px;min-width:0">
+                      <div style="width:6px;height:6px;border-radius:50%;background:{{ cell.dotColor }};flex:none"></div>
+                      <div style="font-size:14px;font-weight:500;color:{{ cell.nameColor }};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ cell.name }}</div>
+                      <sc-if value="{{ cell.isDefault }}" hint-placeholder-val="{{ true }}">
+                        <div style="font-family:var(--mono);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:#9fb6d3;border:1px solid #2c3a49;background:#161d24;border-radius:4px;padding:2px 5px;flex:none">default</div>
+                      </sc-if>
+                    </div>
+                  </sc-if>
+
+                  <sc-if value="{{ cell.isMeter }}">
+                    <div style="display:flex;flex-direction:column;gap:6px;min-width:0">
+                      <div style="height:5px;border-radius:3px;background:#1e2429;overflow:hidden">
+                        <div style="height:100%;border-radius:3px;background:{{ cell.barColor }};width:{{ cell.barW }}"></div>
+                      </div>
+                      <div style="display:flex;align-items:baseline;gap:5px;min-width:0;font-family:var(--mono);font-size:11px">
+                        <div style="color:#dbe1e6;font-size:12px;width:38px;flex:none;font-variant-numeric:tabular-nums">{{ cell.pct }}</div>
+                        <div style="color:#5a6369;flex:none">·</div>
+                        <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:{{ cell.noteColor }}">{{ cell.note }}</div>
+                      </div>
+                    </div>
+                  </sc-if>
+
+                  <sc-if value="{{ cell.isSpark }}">
+                    <div onClick="{{ cell.onChart }}" title="Click for 30 days" style="height:32px;display:flex;align-items:center;cursor:pointer;border-radius:6px;padding:3px 5px;border:1px solid {{ cell.sparkBorder }};background:{{ cell.sparkBg }}" style-hover="border-color:#33404b;background:#161b1f">
+                      <svg viewBox="0 0 100 24" preserveAspectRatio="none" style="width:100%;height:24px;overflow:visible">
+                        <sc-for list="{{ cell.segments }}" as="seg" hint-placeholder-count="1">
+                          <polyline points="{{ seg.line }}" fill="none" stroke="{{ cell.stroke }}" strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"></polyline>
+                        </sc-for>
+                      </svg>
+                    </div>
+                  </sc-if>
+
+                  <sc-if value="{{ cell.isUpdated }}">
+                    <div style="font-family:var(--mono);font-size:11.5px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums">{{ cell.updated }}</div>
+                  </sc-if>
+                </div>
+              </sc-for>
+
+              <div style="display:flex;justify-content:flex-end">
+                <button type="button" onClick="{{ row.onEdit }}" style="font-family:var(--mono);font-size:11.5px;color:{{ row.editColor }};background:{{ row.editBg }};border:1px solid {{ row.editBorder }};border-radius:7px;padding:6px 11px;cursor:pointer" style-hover="color:#ffffff;background:#242b31">edit</button>
+              </div>
+            </div>
+
+            <sc-if value="{{ row.chartOpen }}">
+              <div style="padding:16px 18px 18px 56px;background:#0d1113;border-top:1px solid #191e21;display:flex;flex-direction:column;gap:10px">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;font-family:var(--mono);font-size:11px">
+                  <div style="letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa">Last 30 days · weekly limit use</div>
+                  <div style="display:flex;gap:14px;color:#8b949e">
+                    <div>peak {{ row.peak }}</div>
+                    <div>avg {{ row.avg }}</div>
+                    <div>missing {{ row.missing }}</div>
+                    <button type="button" onClick="{{ row.onChart }}" style="font-family:var(--mono);font-size:11px;color:#8b949e;background:transparent;border:none;cursor:pointer;padding:0" style-hover="color:#dde2e6">collapse</button>
+                  </div>
+                </div>
+                <div style="position:relative;height:148px;border:1px solid #1c2125;border-radius:10px;background:#0f1416;padding:14px 16px">
+                  <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%;height:100%;overflow:visible">
+                    <line x1="0" y1="0" x2="100" y2="0" stroke="#1e252a" strokeWidth="1" vectorEffect="non-scaling-stroke"></line>
+                    <line x1="0" y1="50" x2="100" y2="50" stroke="#1e252a" strokeWidth="1" vectorEffect="non-scaling-stroke"></line>
+                    <line x1="0" y1="100" x2="100" y2="100" stroke="#1e252a" strokeWidth="1" vectorEffect="non-scaling-stroke"></line>
+                    <sc-for list="{{ row.bigSegments }}" as="seg" hint-placeholder-count="1">
+                      <polyline points="{{ seg.line }}" fill="none" stroke="{{ row.stroke }}" strokeWidth="1.8" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"></polyline>
+                    </sc-for>
+                  </svg>
+                  <div style="position:absolute;inset:14px 16px;pointer-events:none">
+                    <sc-for list="{{ row.dots }}" as="dot" hint-placeholder-count="30">
+                      <div onMouseEnter="{{ dot.onEnter }}" onMouseLeave="{{ dot.onLeave }}" style="position:absolute;transform:translate(-50%,50%);pointer-events:auto;left:{{ dot.left }};bottom:{{ dot.bottom }};width:8px;height:8px;border-radius:50%;background:#e9eef3;border:2px solid #0f1416;box-shadow:0 0 8px rgba(0,0,0,0.6)" style-hover="transform:translate(-50%,50%) scale(1.55);background:#ffffff"></div>
+                    </sc-for>
+                    <sc-if value="{{ row.tip.show }}">
+                      <div style="position:absolute;z-index:8;pointer-events:none;white-space:nowrap;font-family:var(--mono);font-size:11px;color:#eef3f8;background:#1d2429;border:1px solid #333d45;border-radius:7px;padding:5px 8px;box-shadow:0 8px 20px rgba(0,0,0,0.45);left:{{ row.tip.left }};bottom:{{ row.tip.bottom }};transform:{{ row.tip.tf }}">{{ row.tip.text }}</div>
+                    </sc-if>
+                  </div>
+                  <div style="position:absolute;left:-4px;top:8px;font-family:var(--mono);font-size:10px;color:#8b949e">100%</div>
+                  <div style="position:absolute;left:-4px;bottom:6px;font-family:var(--mono);font-size:10px;color:#8b949e">0%</div>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:#8b949e">
+                  <sc-for list="{{ row.axis }}" as="tick" hint-placeholder-count="4">
+                    <div>{{ tick }}</div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ row.isEditing }}">
+              <div style="padding:16px 16px 18px 56px;display:flex;flex-direction:column;gap:14px;background:#0d1113;border-top:1px solid #191e21">
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                  <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa;width:78px">Name</div>
+                  <input type="text" value="{{ row.draftName }}" onChange="{{ row.onName }}" style="flex:1;min-width:180px;max-width:320px;background:#15191c;border:1px solid #262d33;border-radius:7px;padding:8px 10px;color:#e7eaec;font-size:13px;outline:none" />
+                  <button type="button" onClick="{{ row.onSave }}" style="font-family:var(--mono);font-size:11.5px;color:#0b0d0e;background:#8ab4f8;border:none;border-radius:7px;padding:8px 14px;cursor:pointer">save</button>
+                  <button type="button" onClick="{{ row.onEdit }}" style="font-family:var(--mono);font-size:11.5px;color:#9aa3aa;background:transparent;border:1px solid #262d33;border-radius:7px;padding:8px 12px;cursor:pointer">cancel</button>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                  <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa;width:78px">Resets</div>
+                  <select value="{{ row.resetDay }}" onChange="{{ row.onResetDay }}" style="background:#15191c;border:1px solid #262d33;border-radius:7px;padding:8px 10px;color:#e7eaec;font-family:var(--mono);font-size:12px;outline:none;cursor:pointer">
+                    <sc-for list="{{ dayOptions }}" as="day" hint-placeholder-count="7">
+                      <option value="{{ day }}">{{ day }}</option>
+                    </sc-for>
+                  </select>
+                  <input type="time" value="{{ row.resetTime }}" onChange="{{ row.onResetTime }}" style="background:#15191c;border:1px solid #262d33;border-radius:7px;padding:8px 10px;color:#e7eaec;font-family:var(--mono);font-size:12px;outline:none" />
+                  <select value="{{ row.resetTz }}" onChange="{{ row.onResetTz }}" style="background:#15191c;border:1px solid #262d33;border-radius:7px;padding:8px 10px;color:#e7eaec;font-family:var(--mono);font-size:12px;outline:none;cursor:pointer">
+                    <sc-for list="{{ tzOptions }}" as="tz" hint-placeholder-count="2">
+                      <option value="{{ tz }}">{{ tz }}</option>
+                    </sc-for>
+                  </select>
+                  <div style="font-family:var(--mono);font-size:11px;color:#8b949e">weekly window · next {{ row.nextReset }}</div>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                  <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa;width:78px">Account</div>
+                  <button type="button" onClick="{{ row.onToggleEnabled }}" style="font-family:var(--mono);font-size:11.5px;color:#cfd6db;background:#181c1f;border:1px solid #262d33;border-radius:7px;padding:8px 12px;cursor:pointer" style-hover="background:#20262b">{{ row.enableLabel }}</button>
+                  <button type="button" style="font-family:var(--mono);font-size:11.5px;color:#cfd6db;background:#181c1f;border:1px solid #262d33;border-radius:7px;padding:8px 12px;cursor:pointer" style-hover="background:#20262b">log in</button>
+                  <button type="button" onClick="{{ row.onSetDefault }}" style="font-family:var(--mono);font-size:11.5px;color:#cfd6db;background:#181c1f;border:1px solid #262d33;border-radius:7px;padding:8px 12px;cursor:pointer" style-hover="background:#20262b">make default</button>
+                  <button type="button" onClick="{{ row.onRemove }}" style="font-family:var(--mono);font-size:11.5px;color:#e58e84;background:transparent;border:1px solid #3a2a28;border-radius:7px;padding:8px 12px;cursor:pointer;margin-left:auto" style-hover="background:#241a19;color:#f3a79d">remove</button>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="font-family:var(--mono);font-size:11px;color:#8b949e">drag a row handle to set failover priority · drag a column header to reorder columns</div>
+
+    <sc-if value="{{ settingsOpen }}">
+      <div style="border:1px solid #1e2327;border-radius:14px;background:#101315;padding:22px 24px;display:flex;flex-direction:column;gap:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div style="font-size:15px;font-weight:600">Settings</div>
+          <button type="button" onClick="{{ onToggleSettings }}" style="font-family:var(--mono);font-size:11.5px;color:#9aa3aa;background:transparent;border:1px solid #262d33;border-radius:7px;padding:6px 11px;cursor:pointer">close</button>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa">Typeface</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-for list="{{ fontChoices }}" as="f" hint-placeholder-count="3">
+              <button type="button" onClick="{{ f.onPick }}" style="display:flex;flex-direction:column;gap:3px;align-items:flex-start;padding:9px 13px;border-radius:8px;cursor:pointer;border:1px solid {{ f.border }};background:{{ f.bg }};color:{{ f.color }}" style-hover="border-color:#3a464f">
+                <div style="font-size:13px;font-family:{{ f.sample }}">{{ f.label }}</div>
+                <div style="font-family:{{ f.monoSample }};font-size:11px;color:#8b949e">46% · 1 min ago</div>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa">Text size</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-for list="{{ sizeChoices }}" as="s" hint-placeholder-count="4">
+              <button type="button" onClick="{{ s.onPick }}" style="font-family:var(--mono);font-size:11.5px;padding:8px 14px;border-radius:8px;cursor:pointer;border:1px solid {{ s.border }};background:{{ s.bg }};color:{{ s.color }}" style-hover="border-color:#3a464f">{{ s.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="height:1px;background:#1c2125"></div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
+          <div style="display:flex;flex-direction:column;gap:7px">
+            <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa">Poll gap</div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="text" value="60" style="width:90px;background:#15191c;border:1px solid #262d33;border-radius:7px;padding:8px 10px;color:#e7eaec;font-family:var(--mono);font-size:12.5px;outline:none" />
+              <div style="font-family:var(--mono);font-size:11px;color:#8b949e">seconds · 10–3600</div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px">
+            <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa">Poll timeout</div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="text" value="30" style="width:90px;background:#15191c;border:1px solid #262d33;border-radius:7px;padding:8px 10px;color:#e7eaec;font-family:var(--mono);font-size:12.5px;outline:none" />
+              <div style="font-family:var(--mono);font-size:11px;color:#8b949e">seconds · 5–120</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <div style="font-family:var(--mono);font-size:11px;letter-spacing:0.07em;text-transform:uppercase;color:#9aa3aa">Binary override</div>
+          <input type="text" placeholder="leave blank to auto-detect" style="width:100%;max-width:520px;background:#15191c;border:1px solid #262d33;border-radius:7px;padding:9px 11px;color:#e7eaec;font-family:var(--mono);font-size:12px;outline:none" />
+          <div style="font-family:var(--mono);font-size:11px;color:#8b949e">detected: C:\Users\isjav\.local\bin\claude.exe</div>
+        </div>
+
+        <div style="height:1px;background:#1c2125"></div>
+
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <sc-for list="{{ toggles }}" as="t" hint-placeholder-count="3">
+            <div onClick="{{ t.onToggle }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 2px;cursor:pointer;border-bottom:1px solid #171b1e">
+              <div style="display:flex;flex-direction:column;gap:2px">
+                <div style="font-size:13px;color:#dde2e6">{{ t.label }}</div>
+                <div style="font-family:var(--mono);font-size:11px;color:#8b949e">{{ t.hint }}</div>
+              </div>
+              <div style="width:36px;height:20px;border-radius:999px;padding:2px;flex:none;background:{{ t.trackBg }};transition:background 160ms ease">
+                <div style="width:16px;height:16px;border-radius:50%;background:{{ t.knobBg }};transform:{{ t.knobTf }};transition:transform 160ms ease"></div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center">
+          <input type="text" placeholder="path to a config directory" style="flex:1;min-width:220px;background:#15191c;border:1px solid #262d33;border-radius:7px;padding:9px 11px;color:#e7eaec;font-family:var(--mono);font-size:12px;outline:none" />
+          <button type="button" style="font-family:var(--mono);font-size:11.5px;color:#cfd6db;background:#181c1f;border:1px solid #262d33;border-radius:7px;padding:9px 13px;cursor:pointer" style-hover="background:#20262b">add account</button>
+          <button type="button" style="font-family:var(--mono);font-size:11.5px;color:#cfd6db;background:#181c1f;border:1px solid #262d33;border-radius:7px;padding:9px 13px;cursor:pointer" style-hover="background:#20262b">rescan profiles</button>
+          <button type="button" style="font-family:var(--mono);font-size:11.5px;color:#8b949e;background:transparent;border:1px solid #262d33;border-radius:7px;padding:9px 13px;cursor:pointer" style-hover="color:#dde2e6">open logs</button>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1160,&quot;height&quot;:560},&quot;font&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;system&quot;,&quot;plex&quot;,&quot;jetbrains&quot;],&quot;default&quot;:&quot;system&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;textSize&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;sm&quot;,&quot;md&quot;,&quot;lg&quot;,&quot;xl&quot;],&quot;default&quot;:&quot;md&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+/* Usage Tracker — view layer only.
+   All data shape, columns, colors, fonts and math live in usage-tracker-kit.js
+   (loaded in <helmet>). This class owns interaction state: row drag, column
+   drag, which drawer is open, tooltip target, edit draft, settings. */
+class Component extends DCLogic {
+  state = {
+    accounts: null,          // null → kit sample data
+    order: null,             // null → kit DEFAULT_ORDER
+    drag: null, colDrag: null,
+    chartId: null, editingId: null, tip: null,
+    draftName: '',
+    settingsOpen: false,
+    font: this.props.font || 'system',
+    size: this.props.textSize || 'md',
+    toggleState: { tray: true, login: false, debug: false }
+  };
+
+  rowH = 66;
+
+  get kit() { return window.UsageTrackerKit; }
+  accounts() { return this.state.accounts || (this.kit ? this.kit.SAMPLE_ACCOUNTS : []); }
+  order() { return this.state.order || (this.kit ? this.kit.DEFAULT_ORDER : []); }
+
+  componentDidMount() {
+    if (this.kit) return;
+    this.waitTimer = setInterval(() => { if (this.kit) { clearInterval(this.waitTimer); this.forceUpdate(); } }, 40);
+  }
+  componentWillUnmount() { clearInterval(this.waitTimer); }
+
+  patch = (id, changes) => this.setState({
+    accounts: this.accounts().map(a => a.id === id ? Object.assign({}, a, changes) : a)
+  });
+
+  /* ---- row drag ---- */
+  startDrag = (e, index) => {
+    e.preventDefault();
+    const grid = e.currentTarget.parentElement;
+    this.rowH = (grid && grid.offsetHeight + 1) || this.rowH;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    this.setState({ editingId: null, chartId: null, tip: null, drag: { index, target: index, startY: e.clientY, dy: 0 } });
+    window.addEventListener('pointermove', this.onRowMove);
+    window.addEventListener('pointerup', this.endRowDrag);
+  };
+  onRowMove = (e) => {
+    const d = this.state.drag;
+    if (!d) return;
+    const dy = e.clientY - d.startY;
+    const target = this.kit.clamp(d.index + Math.round(dy / this.rowH), 0, this.accounts().length - 1);
+    this.setState({ drag: Object.assign({}, d, { dy, target }) });
+  };
+  endRowDrag = () => {
+    const d = this.state.drag;
+    window.removeEventListener('pointermove', this.onRowMove);
+    window.removeEventListener('pointerup', this.endRowDrag);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    if (!d) return;
+    this.setState({ accounts: this.kit.reorder(this.accounts(), d.index, d.target), drag: null });
+  };
+
+  /* ---- column drag ---- */
+  startColDrag = (e, index) => {
+    e.preventDefault();
+    const header = e.currentTarget.parentElement;
+    this.colRects = Array.prototype.map.call(header.querySelectorAll('[data-colcell]'), el => el.getBoundingClientRect());
+    this.wrapLeft = header.parentElement.getBoundingClientRect().left;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    this.setState({ editingId: null, chartId: null, tip: null, colDrag: { index, target: index, startX: e.clientX, dx: 0, lineX: this.colLineX(index, index) } });
+    window.addEventListener('pointermove', this.onColMove);
+    window.addEventListener('pointerup', this.endColDrag);
+  };
+  colLineX(target, index) {
+    const r = this.colRects && this.colRects[target];
+    return r ? (target <= index ? r.left - 5 : r.right + 5) - this.wrapLeft : 0;
+  }
+  onColMove = (e) => {
+    const c = this.state.colDrag;
+    if (!c) return;
+    const rects = this.colRects || [];
+    let target = rects.findIndex(r => e.clientX < r.left + r.width / 2);
+    if (target < 0) target = rects.length - 1;
+    this.setState({ colDrag: Object.assign({}, c, { dx: e.clientX - c.startX, target, lineX: this.colLineX(target, c.index) }) });
+  };
+  endColDrag = () => {
+    const c = this.state.colDrag;
+    window.removeEventListener('pointermove', this.onColMove);
+    window.removeEventListener('pointerup', this.endColDrag);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    if (!c) return;
+    this.setState({ order: this.kit.reorder(this.order(), c.index, c.target), colDrag: null });
+  };
+
+  toggleEdit = (id) => {
+    const acc = this.accounts().find(a => a.id === id);
+    this.setState(s => ({ editingId: s.editingId === id ? null : id, chartId: null, draftName: acc ? acc.name : '' }));
+  };
+  toggleChart = (id) => this.setState(s => ({ chartId: s.chartId === id ? null : id, editingId: null, tip: null }));
+
+  buildRow(a, i, ctx) {
+    const K = this.kit, d = this.state.drag, cd = this.state.colDrag;
+    const days = (a.days && a.days.length) ? a.days : [];
+    const total = days.length || 1;
+    const stroke = K.metricColor(a.week);
+    const chartOpen = this.state.chartId === a.id;
+    const editing = this.state.editingId === a.id;
+    const stats = K.series.stats(days);
+
+    let tf = 'none', shadow = 'none', trans = 'transform 150ms ease, box-shadow 150ms ease', z = 0, op = 1, radius = '0px';
+    if (d) {
+      if (i === d.index) { tf = 'translateY(' + d.dy + 'px) scale(1.012)'; shadow = '0 18px 38px rgba(0,0,0,0.55)'; trans = 'none'; z = 20; radius = '10px'; }
+      else {
+        const shift = (i > d.index && i <= d.target) ? -this.rowH : (i < d.index && i >= d.target) ? this.rowH : 0;
+        tf = 'translateY(' + shift + 'px)'; op = 0.72;
+      }
+    }
+
+    const cellCtx = { days, stroke, chartOpen, onChart: () => this.toggleChart(a.id) };
+    const cells = this.order().map((key, ci) => K.buildCell(key, a,
+      Object.assign({}, cellCtx, { bg: (cd && cd.index === ci) ? 'rgba(122,162,247,0.07)' : 'transparent' })));
+
+    const dots = K.series.dots(days).map(p => {
+      const left = p.leftPct.toFixed(2) + '%';
+      const edge = p.leftPct > 78 ? 'right' : p.leftPct < 22 ? 'left' : 'mid';
+      const text = K.format.dayLabel(p.index, total) + ' · ' + p.value + '%';
+      return {
+        left, bottom: p.value + '%',
+        onEnter: () => this.setState({ tip: { id: a.id, left, bottom: p.value + '%', edge, text } }),
+        onLeave: () => this.setState(s => (s.tip && s.tip.id === a.id ? { tip: null } : {}))
+      };
+    });
+
+    const tip = this.state.tip;
+    const tipTf = { right: 'translate(-100%, calc(100% + 14px))', left: 'translate(0, calc(100% + 14px))', mid: 'translate(-50%, calc(100% + 14px))' };
+
+    return {
+      cells, tf, shadow, trans, z, op, radius, stroke,
+      bigSegments: K.series.segments(days, 100, 100),
+      dots,
+      axis: K.series.axis(total, 4),
+      peak: stats.peak + '%', avg: stats.avg + '%', missing: stats.missing + ' d',
+      chartOpen,
+      tip: (tip && tip.id === a.id)
+        ? { show: true, text: tip.text, left: tip.left, bottom: tip.bottom, tf: tipTf[tip.edge] }
+        : { show: false, text: '', left: '0%', bottom: '0%', tf: 'none' },
+      isEditing: editing,
+      editColor: editing ? '#0b0d0e' : '#b9c1c7',
+      editBg: editing ? '#8ab4f8' : '#181c1f',
+      editBorder: editing ? '#8ab4f8' : '#262d33',
+      draftName: editing ? this.state.draftName : a.name,
+      enableLabel: a.enabled ? 'disable' : 'enable',
+      resetDay: a.resetDay || 'Monday', resetTime: a.resetTime || '00:00', resetTz: a.resetTz || 'local',
+      nextReset: K.format.nextReset(a),
+      onResetDay: (e) => this.patch(a.id, { resetDay: e.target.value }),
+      onResetTime: (e) => this.patch(a.id, { resetTime: e.target.value }),
+      onResetTz: (e) => this.patch(a.id, { resetTz: e.target.value }),
+      onHandleDown: (e) => this.startDrag(e, i),
+      onEdit: () => this.toggleEdit(a.id),
+      onChart: () => this.toggleChart(a.id),
+      onName: (e) => this.setState({ draftName: e.target.value }),
+      onSave: () => { this.patch(a.id, { name: this.state.draftName || a.name }); this.setState({ editingId: null }); },
+      onToggleEnabled: () => this.patch(a.id, { enabled: !a.enabled }),
+      onSetDefault: () => this.setState({ accounts: this.accounts().map(x => Object.assign({}, x, { isDefault: x.id === a.id })) }),
+      onRemove: () => this.setState({ accounts: this.accounts().filter(x => x.id !== a.id), editingId: null })
+    };
+  }
+
+  pickerOptions(map, current, onPick) {
+    return Object.keys(map).map(k => ({
+      label: map[k].label, sample: map[k].ui, monoSample: map[k].mono,
+      border: current === k ? '#8ab4f8' : '#262d33',
+      bg: current === k ? '#151c24' : '#15191c',
+      color: current === k ? '#eef3f8' : '#c3cad0',
+      onPick: () => onPick(k)
+    }));
+  }
+
+  renderVals() {
+    const K = this.kit;
+    if (!K) return { rows: [], headers: [], fontChoices: [], sizeChoices: [], toggles: [], dayOptions: [], tzOptions: [],
+      gridCols: '26px 1fr 62px', accountCount: 0, uiFont: 'inherit', monoFont: 'monospace', zoom: 1,
+      ph: { display: 'none', top: '0px', height: '0px' }, colLine: { display: 'none', left: '0px' },
+      settingsOpen: false, onRefresh: () => {}, onToggleSettings: () => {} };
+
+    const d = this.state.drag, cd = this.state.colDrag, order = this.order();
+    const rows = this.accounts().map((a, i) => this.buildRow(a, i));
+
+    const headers = order.map((key, ci) => {
+      const dragging = cd && cd.index === ci;
+      return {
+        label: K.COLUMNS[key].label,
+        onDown: (e) => this.startColDrag(e, ci),
+        tf: dragging ? 'translateX(' + cd.dx + 'px)' : 'none',
+        trans: dragging ? 'none' : 'transform 140ms ease',
+        color: dragging ? '#ffffff' : (cd ? '#767f86' : '#9aa3aa'),
+        bg: dragging ? '#232b32' : 'transparent',
+        z: dragging ? 6 : 0
+      };
+    });
+
+    const ts = this.state.toggleState;
+    const toggle = (key, label, hint) => ({
+      label, hint,
+      trackBg: ts[key] ? '#3f6fb5' : '#1e2429',
+      knobBg: ts[key] ? '#eaf1fb' : '#6b747b',
+      knobTf: ts[key] ? 'translateX(16px)' : 'translateX(0px)',
+      onToggle: () => this.setState(s => ({ toggleState: Object.assign({}, s.toggleState, { [key]: !s.toggleState[key] }) }))
+    });
+
+    const font = K.FONTS[this.state.font] || K.FONTS.system;
+    const size = K.SIZES[this.state.size] || K.SIZES.md;
+
+    return {
+      rows, headers,
+      gridCols: K.gridTemplate(order),
+      ph: d ? { display: 'block', top: (d.target * this.rowH + 6) + 'px', height: (this.rowH - 12) + 'px' }
+            : { display: 'none', top: '0px', height: '0px' },
+      colLine: cd ? { display: 'block', left: cd.lineX + 'px' } : { display: 'none', left: '0px' },
+      accountCount: this.accounts().length,
+      uiFont: font.ui, monoFont: font.mono, zoom: size.zoom,
+      fontChoices: this.pickerOptions(K.FONTS, this.state.font, k => this.setState({ font: k })),
+      sizeChoices: this.pickerOptions(K.SIZES, this.state.size, k => this.setState({ size: k })),
+      dayOptions: K.WEEKDAYS, tzOptions: K.TIMEZONES,
+      settingsOpen: this.state.settingsOpen,
+      onRefresh: () => this.setState({ accounts: this.accounts().map(a => Object.assign({}, a, { updated: 'just now' })) }),
+      onToggleSettings: () => this.setState(s => ({ settingsOpen: !s.settingsOpen })),
+      toggles: [
+        toggle('tray', 'Close to tray', 'keep polling in the background'),
+        toggle('login', 'Launch at login', 'start with the system'),
+        toggle('debug', 'Debug logging', 'verbose logs, pruned after 30 days')
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>
