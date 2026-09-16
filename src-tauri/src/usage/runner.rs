@@ -101,9 +101,18 @@ pub fn check_envelope(stdout: &str) -> GuardVerdict {
 }
 
 /// D15: the names removed from the child environment, sorted for stable logs.
+/// Matching is case-insensitive: Windows environment-variable names are
+/// case-insensitive to the OS but case-preserving, so a variable set as
+/// `anthropic_api_key` still reaches `std::env::vars()` in that spelling and
+/// must still be recognised. The original spelling is returned (not
+/// upper-cased) so the caller removes the variable exactly as the OS holds
+/// it.
 pub fn env_names_to_strip(names: impl Iterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = names
-        .filter(|n| n.starts_with("ANTHROPIC_") || n.starts_with("CLAUDE_"))
+        .filter(|n| {
+            let upper = n.to_ascii_uppercase();
+            upper.starts_with("ANTHROPIC_") || upper.starts_with("CLAUDE_")
+        })
         .collect();
     out.sort();
     out.dedup();
@@ -309,7 +318,11 @@ mod tests {
     // --- D15 env sanitisation ---
 
     #[test]
-    fn only_anthropic_and_claude_prefixed_names_are_stripped() {
+    fn only_anthropic_and_claude_prefixed_names_are_stripped_case_insensitively() {
+        // Windows environment-variable names are case-insensitive to the OS
+        // but case-preserving, so a variable set as `anthropic_lowercase` or
+        // `Claude_Mixed_Case` must still be recognised and stripped under
+        // its original spelling.
         let names = [
             "ANTHROPIC_API_KEY",
             "CLAUDE_CONFIG_DIR",
@@ -318,6 +331,7 @@ mod tests {
             "HOME",
             "MY_CLAUDE_THING",
             "anthropic_lowercase",
+            "Claude_Mixed_Case",
         ]
         .into_iter()
         .map(|s| s.to_string());
@@ -329,6 +343,8 @@ mod tests {
                 "ANTHROPIC_API_KEY".to_string(),
                 "CLAUDE_CODE_USE_BEDROCK".to_string(),
                 "CLAUDE_CONFIG_DIR".to_string(),
+                "Claude_Mixed_Case".to_string(),
+                "anthropic_lowercase".to_string(),
             ]
         );
     }
