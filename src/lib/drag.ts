@@ -37,3 +37,14 @@ export function colLineX(rects: readonly Rect[], target: number, index: number, 
   if (r === undefined) return 0;
   return (target <= index ? r.left - 5 : r.right + 5) - wrapLeft;
 }
+
+/**
+ * Decides what to do, at drag end, with a rows update that arrived mid-drag
+ * and was stashed rather than applied immediately: pass it through when
+ * nothing was committed, or discard it once a reorder committed (the
+ * commit's own refetch supersedes it, so re-applying the pre-commit
+ * snapshot afterward would revert the just-committed change).
+ */
+export function settlePendingRows<T>(pending: T[] | null, committed: boolean): T[] | null {
+  return committed ? null : pending;
+}

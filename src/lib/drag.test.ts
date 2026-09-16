@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { colDragTarget, colLineX, rowDragTarget, rowShift, toLocal } from "./drag";
+import { colDragTarget, colLineX, rowDragTarget, rowShift, settlePendingRows, toLocal } from "./drag";
 
 describe("rowDragTarget", () => {
   it("rounds the displacement to whole rows and clamps to the list", () => {
@@ -58,5 +58,18 @@ describe("colLineX", () => {
     expect(colLineX(rects, 2, 0, 20)).toBe(305);
     expect(colLineX(rects, 1, 1, 0)).toBe(105);
     expect(colLineX(rects, 7, 0, 0)).toBe(0);
+  });
+});
+
+describe("settlePendingRows", () => {
+  it("passes a stashed rows update through when nothing committed", () => {
+    expect(settlePendingRows(["a", "b"], false)).toEqual(["a", "b"]);
+  });
+  it("discards the stash once a reorder committed (the commit's own refetch resyncs)", () => {
+    expect(settlePendingRows(["a", "b"], true)).toBeNull();
+  });
+  it("is a no-op with nothing stashed, committed or not", () => {
+    expect(settlePendingRows(null, false)).toBeNull();
+    expect(settlePendingRows(null, true)).toBeNull();
   });
 });

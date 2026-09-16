@@ -2,7 +2,7 @@ import type { JSX, PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { COLUMNS, type ColumnKey, gridTemplate } from "../lib/columns";
-import { type Rect, colDragTarget, colLineX, rowDragTarget, toLocal } from "../lib/drag";
+import { type Rect, colDragTarget, colLineX, rowDragTarget, settlePendingRows, toLocal } from "../lib/drag";
 import { errorMessage } from "../lib/errors";
 import { moveItem } from "../lib/reorder";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
@@ -56,13 +56,18 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
   const onColumnOrderRef = useRef(onColumnOrder);
   const zoomRef = useRef(zoom);
   // Rows that arrived mid-drag: applying them immediately would resync
-  // `order` under the drag's stale index, so they wait until the drag ends.
+  // `order` under the drag's stale index, so they wait until the drag ends
+  // (see `settleDrag`, which always clears this before the drag's commit
+  // decision is made, so a later drag can never apply a stale snapshot).
   const pendingRowsRef = useRef<AccountRowData[] | null>(null);
 
   useEffect(() => {
     if (dragRef.current !== null || colDragRef.current !== null) {
+      // Holds only the latest snapshot while a drag is live; each update
+      // overwrites the last.
       pendingRowsRef.current = rows;
     } else {
+      pendingRowsRef.current = null;
       setOrder(rows);
     }
   }, [rows]);
@@ -71,11 +76,16 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
   useEffect(() => { onColumnOrderRef.current = onColumnOrder; }, [onColumnOrder]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
-  function applyPendingRows(): void {
-    if (pendingRowsRef.current !== null) {
-      setOrder(pendingRowsRef.current);
-      pendingRowsRef.current = null;
-    }
+  /**
+   * Called once, at the end of either drag: always clears the stash (so a
+   * later drag that ends without committing can never apply a stale
+   * snapshot left behind by an earlier commit), and applies it only when
+   * this drag didn't commit a reorder.
+   */
+  function settleDrag(committed: boolean): void {
+    const next = settlePendingRows(pendingRowsRef.current, committed);
+    pendingRowsRef.current = null;
+    if (next !== null) setOrder(next);
   }
 
   const commitOrder = async (next: AccountRowData[]): Promise<void> => {
@@ -117,9 +127,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
           }
         }
       }
-      if (!committed && colDragRef.current === null) {
-        applyPendingRows();
-      }
+      settleDrag(committed);
     },
     colMove: (e: PointerEvent): void => {
       const c = colDragRef.current;
@@ -135,12 +143,12 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
       detachCol();
       colDragRef.current = null;
       setColDrag(null);
+      let committed = false;
       if (c !== null && c.target !== c.index) {
+        committed = true;
         onColumnOrderRef.current(moveItem(columnOrderRef.current, c.index, c.target));
       }
-      if (dragRef.current === null) {
-        applyPendingRows();
-      }
+      settleDrag(committed);
     },
   });
 
@@ -156,7 +164,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
     window.removeEventListener("pointercancel", handlers.current.colUp);
     endBodyDrag();
   }
-  useEffect(() => () => { detachRow(); detachCol(); }, []);
+  useEffect(() => () => { detachRow(); detachCol(); pendingRowsRef.current = null; }, []);
 
   const startRowDrag = (e: ReactPointerEvent<HTMLDivElement>, index: number): void => {
     e.preventDefault();
