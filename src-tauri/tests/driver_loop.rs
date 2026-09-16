@@ -85,10 +85,33 @@ impl EventSink for Recorder {
     fn refresh_tray(&self) {}
 }
 
-struct FixedProcess(AtomicBool);
+/// Records every exclusion it is handed, so a test can assert what the
+/// process gate actually sees rather than what the driver meant to send.
+#[derive(Default)]
+struct FixedProcess {
+    running: AtomicBool,
+    excludes: Mutex<Vec<Option<u32>>>,
+}
+
+impl FixedProcess {
+    fn new(running: bool) -> FixedProcess {
+        FixedProcess {
+            running: AtomicBool::new(running),
+            excludes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn excludes(&self) -> Vec<Option<u32>> {
+        self.excludes.lock().expect("lock").clone()
+    }
+}
+
 impl ProcessProbe for FixedProcess {
-    fn claude_running(&self, _exclude_pid: Option<u32>) -> bool {
-        self.0.load(Ordering::SeqCst)
+    fn claude_running(&self, exclude_pid: Option<u32>) -> bool {
+        if let Ok(mut v) = self.excludes.lock() {
+            v.push(exclude_pid);
+        }
+        self.running.load(Ordering::SeqCst)
     }
 }
 
@@ -148,7 +171,7 @@ fn harness(running: bool) -> Harness {
         _tmp: tmp,
         core,
         events: Arc::new(Recorder::default()),
-        process: Arc::new(FixedProcess(AtomicBool::new(running))),
+        process: Arc::new(FixedProcess::new(running)),
         shutdown: CancellationToken::new(),
     }
 }
@@ -186,6 +209,71 @@ async fn wait_for_busy(h: &Harness) {
         assert!(
             std::time::Instant::now() < deadline,
             "the driver never started a cycle"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Blocks until the driver has published an idle state.
+async fn wait_for_idle(h: &Harness) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let busy = lock_status(&h.core.status).busy;
+        if !busy {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the driver never became idle"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Blocks until at least `want` snapshots have been persisted.
+async fn wait_for_snapshots(h: &Harness, want: i64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let have = snapshot_count(h);
+        if have >= want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {want} snapshots, still at {have}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Blocks until the watchdog has reported a stall. The driver publishes the
+/// post-stall snapshot before it emits the event, so seeing the count move is
+/// proof that the republish has already happened.
+async fn wait_for_stall(h: &Harness) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if h.events.stalls.load(Ordering::SeqCst) >= 1 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watchdog never fired"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Blocks until the process gate has been consulted at least `want` times.
+async fn wait_for_process_checks(h: &Harness, want: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let have = h.process.excludes().len();
+        if have >= want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {want} process checks, still at {have}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -244,7 +332,7 @@ async fn triggers_arriving_during_a_cycle_coalesce_and_never_queue() {
     let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
     let handle = tokio::spawn(driver.run());
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_busy(&h).await;
     for _ in 0..5 {
         assert_eq!(
             core_poll_now(&h.core).expect("poll_now"),
@@ -333,9 +421,30 @@ async fn five_unclassifiable_envelopes_escalate_into_a_guard_trip() {
     let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
     let handle = tokio::spawn(driver.run());
 
-    for _ in 0..5 {
-        let _ = core_poll_now(&h.core);
-        tokio::time::sleep(Duration::from_millis(700)).await;
+    // Strike 1 is the startup cycle. Waiting for it also guarantees the
+    // binary has been published, so the manual polls below cannot be refused
+    // with `skipped:no_binary`.
+    wait_for_snapshots(&h, 1).await;
+    wait_for_idle(&h).await;
+
+    // Strikes 2 to 5, each one driven to completion before the next, so a
+    // poll can never be silently coalesced away as `skipped:busy`.
+    for strike in 2..=5i64 {
+        assert_eq!(
+            core_poll_now(&h.core).expect("poll_now"),
+            "started",
+            "strike {strike} must actually run"
+        );
+        wait_for_snapshots(&h, strike).await;
+        // The halt flag reaches disk before the outcome snapshot does, so by
+        // the time the snapshot count moves the trip has already been
+        // recorded if it was going to be.
+        let halted = h.core.store.polling_halted().expect("read").is_some();
+        assert_eq!(
+            halted,
+            strike == 5,
+            "the guard must trip on the fifth strike and not before (strike {strike})"
+        );
     }
 
     assert!(
@@ -416,7 +525,7 @@ async fn a_guard_trip_halts_the_poller_and_abandons_the_rest_of_the_cycle() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_watchdog_aborts_a_hung_cycle_and_busy_clears() {
+async fn the_watchdog_aborts_a_hung_cycle_and_leaves_the_driver_usable() {
     // A child that sleeps far past the watchdog limit, with the per-poll
     // timeout raised so the timeout path cannot rescue it first.
     let mut env = EnvGuard::new().await;
@@ -442,18 +551,38 @@ async fn the_watchdog_aborts_a_hung_cycle_and_busy_clears() {
     s.timeout_secs = 5;
     core_set_settings(&h.core, &s).expect("shrink the limit");
 
-    tokio::time::sleep(Duration::from_secs(25)).await;
-    h.shutdown.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+    wait_for_stall(&h).await;
 
+    // Aborting a task only flags it; the CycleToken inside it is dropped
+    // when the runtime unwinds it. If the driver publishes without waiting
+    // for that, the snapshot says busy with no cycle left to clear it and
+    // every Refresh is refused until the next timer tick.
     assert!(
         !lock_status(&h.core.status).busy,
-        "aborting the cycle task drops its token, and the driver republishes"
+        "the published snapshot must be idle as soon as the stall is handled"
     );
     assert!(
-        h.events.stalls.load(Ordering::SeqCst) >= 1,
-        "the watchdog must have emitted poller:stalled"
+        lock_status(&h.core.status).stalled_at.is_some(),
+        "the stall must be recorded for the UI"
     );
+
+    // The aborted poll never reached run_usage's own pid-clearing paths, so
+    // the driver must clear the slot itself: a dead pid handed to the gate as
+    // an exclusion could mask a real user `claude` once the OS recycles it.
+    let before = h.process.excludes().len();
+    wait_for_process_checks(&h, before + 1).await;
+    assert_eq!(
+        h.process.excludes().last().copied().flatten(),
+        None,
+        "no stale child pid may be excluded after an abort: {:?}",
+        h.process.excludes()
+    );
+
+    // And the driver is usable again rather than stuck reporting busy.
+    assert_eq!(core_poll_now(&h.core).expect("poll_now"), "started");
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
