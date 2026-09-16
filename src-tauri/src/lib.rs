@@ -1,4 +1,5 @@
 pub mod error;
+pub mod usage;
 
 /// Entry point called by `main.rs`. Fully wired in Task 20.
 pub fn run() {
