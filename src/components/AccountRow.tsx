@@ -7,6 +7,7 @@ import { accountDotColor, sessionNote, summarizeModels, weekNote } from "../lib/
 import { metricColor } from "../lib/theme";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
 import type { RowDragState } from "./AccountsTable";
+import { HistoryDrawer } from "./HistoryDrawer";
 import { Meter } from "./Meter";
 import { Sparkline } from "./Sparkline";
 
@@ -109,7 +110,7 @@ export function AccountRow(props: Props): JSX.Element {
           <button type="button" className={`btn btn-sm${editing ? " btn-edit-on" : ""}`} onClick={onToggleEdit}>edit</button>
         </div>
       </div>
-      {/* Task 9: chartOpen && <HistoryDrawer row={row} points={points} now={now} onError={onError} /> */}
+      {chartOpen && <HistoryDrawer points={points} now={now} stroke={stroke} onCollapse={onToggleChart} />}
       {/* Task 10: editing && <EditDrawer row={row} onChanged={onChanged} onError={onError} onClose={onToggleEdit} /> */}
     </div>
   );
