@@ -209,7 +209,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
   const gridCols = gridTemplate(columnOrder);
   return (
     <section className="panel" role="table" aria-label="Accounts">
-      <div className="thead-wrap">
+      <div className="thead-wrap" role="rowgroup">
         <div className="thead" role="row" style={{ gridTemplateColumns: gridCols }}>
           <div role="columnheader" aria-label="Reorder" />
           {columnOrder.map((key, ci) => {
@@ -227,7 +227,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
         </div>
         {colDrag !== null && <div className="col-line" style={{ left: `${colDrag.lineX}px` }} />}
       </div>
-      <div className="rows">
+      <div className="rows" role="rowgroup">
         {drag !== null && (
           <div className="row-placeholder" style={{ top: `${drag.target * rowH.current + 6}px`, height: `${rowH.current - 12}px` }} />
         )}

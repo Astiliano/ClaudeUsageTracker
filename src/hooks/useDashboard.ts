@@ -26,15 +26,25 @@ export function useDashboard(): UseDashboard {
   const [now, setNow] = useState<number>(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guards against two in-flight get_dashboard calls resolving out of
+  // order (a debounced refetch racing a cycle:finished load, say): only
+  // the call that is still the most recently *started* one when it
+  // resolves is allowed to write dashboard/error.
+  const seqRef = useRef(0);
 
   const load = useCallback(async (): Promise<Dashboard | null> => {
+    const seq = ++seqRef.current;
     try {
       const next = await backend().invoke<Dashboard>("get_dashboard");
-      setDashboard(next);
-      setError(null);
+      if (seq === seqRef.current) {
+        setDashboard(next);
+        setError(null);
+      }
       return next;
     } catch (e) {
-      setError(errorMessage(e));
+      if (seq === seqRef.current) {
+        setError(errorMessage(e));
+      }
       return null;
     }
   }, []);

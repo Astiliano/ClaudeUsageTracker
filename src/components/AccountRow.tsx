@@ -100,7 +100,7 @@ export function AccountRow(props: Props): JSX.Element {
   };
 
   return (
-    <div className={["row", lifted ? "row-lifted" : "", parked ? "row-parked" : ""].filter(Boolean).join(" ")} style={style}>
+    <div className={["row", lifted ? "row-lifted" : "", parked ? "row-parked" : ""].filter(Boolean).join(" ")} role="presentation" style={style}>
       <div className="row-grid" role="row" style={{ gridTemplateColumns: gridCols }}>
         <div role="cell">
           <div className="grip" role="button" tabIndex={0}
