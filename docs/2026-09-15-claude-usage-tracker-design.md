@@ -208,7 +208,7 @@ pub enum PollOutcome {
   ParseError(String),   // usage report detected, a required line failed
   SpawnError(String),   // binary missing/not executable, non-zero exit,
                         // stdout not JSON — message = stderr/stdout tail
-  Timeout,              // killed after timeout_secs; error = "timed out after {n}s"
+  Timeout(u32),         // killed after timeout_secs (carried); error = "timed out after {n}s"
   GuardTripped(String), // §6.3 violated — halts the whole poller
 }
 
@@ -422,7 +422,10 @@ boundary serialises as `snake_case`, like `outcome`: `DisabledReason` →
 - **Execution model:** the driver loop never runs a poll inline. A `Run`
   decision spawns a **cycle task** that owns the `CycleToken`, a
   `CancellationToken`, and the current `Child` handle (behind a
-  `Mutex<Option<Child>>` shared with the driver). The loop therefore stays
+  `Child` owned outright by the cycle task — not behind a shared mutex, which
+  would deadlock the shutdown path that waits on it; shutdown and the
+  watchdog reach the child through the `CancellationToken`). The loop
+  therefore stays
   responsive: any trigger arriving during a cycle is decided immediately and
   gets `Skip(Busy)` (D7). Triggers reach the driver through a
   `tokio::sync::Notify` per trigger kind (never an unbounded queue), so five
