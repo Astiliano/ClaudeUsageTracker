@@ -79,11 +79,12 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
   /**
    * Called once, at the end of either drag: always clears the stash (so a
    * later drag can never apply a snapshot left behind by an earlier one),
-   * and applies it unless a refetch is already going to resync `order` on
-   * its own. Only a committed ROW reorder triggers such a refetch (via
-   * `commitOrder` -> `onChanged`); a committed COLUMN reorder never does
-   * (it only writes local prefs), so `colUp` always passes `false` here
-   * even when it committed.
+   * and applies it unless something else is already going to resync
+   * `order` on its own: a committed ROW reorder's own refetch (via
+   * `commitOrder` -> `onChanged`), or — for `colUp` only — a row drag
+   * that is still live (both drags active at once, e.g. touch), whose
+   * own eventual end will decide again against fresher data rather than
+   * having `order` swapped out from under it mid-drag.
    */
   function settleDrag(refetchWillResync: boolean): void {
     const next = settlePendingRows(pendingRowsRef.current, refetchWillResync);
@@ -149,9 +150,12 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
       if (c !== null && c.target !== c.index) {
         onColumnOrderRef.current(moveItem(columnOrderRef.current, c.index, c.target));
       }
-      // A column reorder only writes local prefs; it never triggers a
-      // rows refetch, so any stashed rows update must always be applied.
-      settleDrag(false);
+      // A column reorder only writes local prefs, never a rows refetch,
+      // so a stashed rows update is normally applied here. But if a row
+      // drag is still live, applying it now would swap `order` out from
+      // under that drag; discard instead and let the row drag's own end
+      // decide, against whatever rows are current by then.
+      settleDrag(dragRef.current !== null);
     },
   });
 
@@ -228,11 +232,11 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
           })}
           <div role="columnheader" aria-label="Actions" />
         </div>
-        {colDrag !== null && <div className="col-line" style={{ left: `${colDrag.lineX}px` }} />}
+        {colDrag !== null && <div className="col-line" role="presentation" style={{ left: `${colDrag.lineX}px` }} />}
       </div>
       <div className="rows" role="rowgroup">
         {drag !== null && (
-          <div className="row-placeholder" style={{ top: `${drag.target * rowH.current + 6}px`, height: `${rowH.current - 12}px` }} />
+          <div className="row-placeholder" role="presentation" style={{ top: `${drag.target * rowH.current + 6}px`, height: `${rowH.current - 12}px` }} />
         )}
         {order.map((row, idx) => (
           <AccountRow key={row.account.id} row={row} index={idx} total={order.length}

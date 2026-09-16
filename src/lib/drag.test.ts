@@ -65,11 +65,12 @@ describe("settlePendingRows", () => {
   it("passes a stashed rows update through when nothing committed", () => {
     expect(settlePendingRows(["a", "b"], false)).toEqual(["a", "b"]);
   });
-  it("applies a stashed rows update on a committed column reorder, which never refetches rows", () => {
-    // A column drag always passes `refetchWillResync: false`, even when
-    // the column reorder itself committed, because reordering columns
-    // only writes local prefs and never triggers a `rows` refetch — so
-    // there is nothing else that will ever resync the stash.
+  it("applies a stashed rows update on a committed column reorder with no row drag live", () => {
+    // A column reorder only writes local prefs and never triggers a
+    // `rows` refetch, so `colUp` passes `refetchWillResync: false` here
+    // even when the column reorder itself committed — unless a row drag
+    // is still live too, in which case `colUp` passes `true` instead
+    // (see AccountsTable.tsx) so `order` isn't swapped out from under it.
     expect(settlePendingRows(["a", "b"], false)).toEqual(["a", "b"]);
   });
   it("discards the stash when a refetch will resync it (a committed row reorder)", () => {
