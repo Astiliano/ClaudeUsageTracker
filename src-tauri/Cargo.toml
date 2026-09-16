@@ -1,0 +1,48 @@
+[package]
+name = "claude-usage-tracker"
+version = "0.1.0"
+description = "Task-manager style Claude subscription usage tracker"
+authors = ["Josh"]
+edition = "2021"
+rust-version = "1.96"
+
+[lib]
+name = "cut_core"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "claude-usage-tracker"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake_claude"
+path = "src/bin/fake_claude.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.4"
+tauri-plugin-autostart = "2.5"
+tauri-plugin-opener = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sysinfo = "0.39"
+tokio = { version = "1", features = ["time", "process", "sync", "macros", "rt"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+chrono-tz = "0.10"
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+dunce = "1"
+dirs = "6"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["time", "process", "sync", "macros", "rt", "rt-multi-thread"] }
