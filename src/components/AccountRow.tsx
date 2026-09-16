@@ -1,4 +1,4 @@
-import type { CSSProperties, JSX, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { type ColumnKey } from "../lib/columns";
 import { rowShift } from "../lib/drag";
 import { formatAgo } from "../lib/format";
@@ -7,6 +7,7 @@ import { accountDotColor, sessionNote, summarizeModels, weekNote } from "../lib/
 import { metricColor } from "../lib/theme";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
 import type { RowDragState } from "./AccountsTable";
+import { EditDrawer } from "./EditDrawer";
 import { HistoryDrawer } from "./HistoryDrawer";
 import { Meter } from "./Meter";
 import { Sparkline } from "./Sparkline";
@@ -53,12 +54,9 @@ function StatusPill({ pill, onShowFailure }: { pill: Pill; onShowFailure: (id: n
 }
 
 export function AccountRow(props: Props): JSX.Element {
-  // `total`, `onMove`, `onChanged` and `onError` are part of the contract this
-  // component exposes to its caller (AccountsTable) and to the drawers Tasks
-  // 9-10 mount below, but nothing in this task's own render reads them yet.
   const {
-    row, index, points, now, columnOrder, gridCols, hotColumn, drag, rowH,
-    chartOpen, editing, onHandleDown, onToggleChart, onToggleEdit, onShowFailure,
+    row, index, total, points, now, columnOrder, gridCols, hotColumn, drag, rowH,
+    chartOpen, editing, onHandleDown, onToggleChart, onToggleEdit, onMove, onChanged, onError, onShowFailure,
   } = props;
 
   const pill = statusPill(row, now);
@@ -95,10 +93,15 @@ export function AccountRow(props: Props): JSX.Element {
     }
   };
 
+  const onGripKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === "ArrowUp") { e.preventDefault(); onMove(-1); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); onMove(1); }
+  };
+
   return (
     <div className={["row", lifted ? "row-lifted" : "", parked ? "row-parked" : ""].filter(Boolean).join(" ")} style={style}>
       <div className="row-grid" style={{ gridTemplateColumns: gridCols }}>
-        <div className="grip" role="button" aria-label="Drag to reorder" title="Drag to reorder rows" onPointerDown={onHandleDown}>
+        <div className="grip" role="button" tabIndex={0} aria-label="Drag to reorder" title="Drag to reorder rows" onPointerDown={onHandleDown} onKeyDown={onGripKeyDown}>
           <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
           <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
           <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
@@ -111,7 +114,18 @@ export function AccountRow(props: Props): JSX.Element {
         </div>
       </div>
       {chartOpen && <HistoryDrawer points={points} now={now} stroke={stroke} onCollapse={onToggleChart} />}
-      {/* Task 10: editing && <EditDrawer row={row} onChanged={onChanged} onError={onError} onClose={onToggleEdit} /> */}
+      {editing && (
+        <EditDrawer
+          row={row}
+          index={index}
+          total={total}
+          now={now}
+          onClose={onToggleEdit}
+          onMove={onMove}
+          onChanged={onChanged}
+          onError={onError}
+        />
+      )}
     </div>
   );
 }
