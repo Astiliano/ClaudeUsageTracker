@@ -744,29 +744,63 @@ impl Driver {
                 _ = watchdog.tick(), if cycle_running => {
                     let age = lock_machine(&self.machine)
                         .cycle_age(chrono::Utc::now().timestamp_millis());
-                    if let (Some(age), Some(cycle)) = (age, live.as_ref()) {
+                    if let Some(age) = age {
+                        let age_ms = age.as_millis() as u64;
                         let limit = watchdog_limit_ms(
                             self.enabled().await.len(),
                             settings.timeout_secs,
                         );
-                        if age.as_millis() as u64 > limit {
-                            let at = chrono::Utc::now().timestamp_millis();
-                            error!(
-                                cycle_age_ms = age.as_millis() as u64,
-                                limit_ms = limit,
-                                "watchdog: aborting a stalled cycle task"
-                            );
-                            cycle.cancel.cancel();
-                            cycle.handle.abort();
-                            lock_status(&self.core.status).stalled_at = Some(at);
-                            self.events.poller_stalled(at, age.as_millis() as u64);
-                            live = None;
-                            last_cycle_end = at;
-                            // Aborting dropped the token, so busy is clear.
-                            self.publish();
-                            if changed_deferred {
-                                changed_deferred = false;
-                                self.core.triggers.account_changed(Vec::new());
+                        if age_ms > limit {
+                            if let Some(cycle) = live.take() {
+                                let at = chrono::Utc::now().timestamp_millis();
+                                error!(
+                                    cycle_age_ms = age_ms,
+                                    limit_ms = limit,
+                                    "watchdog: aborting a stalled cycle task"
+                                );
+                                cycle.cancel.cancel();
+                                cycle.handle.abort();
+                                // `abort()` only flags the task: the
+                                // `CycleToken` inside it is dropped when the
+                                // runtime actually unwinds it, which has not
+                                // happened yet. Publishing now would write
+                                // `busy: true` with no cycle left to clear
+                                // it, and `preview_manual` would refuse every
+                                // Refresh until the next timer tick. So wait
+                                // for the join first; a cancelled join is the
+                                // expected success.
+                                if tokio::time::timeout(
+                                    Duration::from_secs(2),
+                                    cycle.handle,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    warn!(
+                                        "watchdog: the aborted cycle task did not \
+                                         stop within 2 s"
+                                    );
+                                }
+                                // An aborted poll never reaches `run_usage`'s
+                                // own pid-clearing paths, so the slot is
+                                // cleared here. A pid that has exited must
+                                // never stay published as an exclusion: the
+                                // OS can recycle it, and the gate would then
+                                // ignore a real user `claude`.
+                                self.pid_slot.store(0, Ordering::SeqCst);
+                                lock_status(&self.core.status).stalled_at = Some(at);
+                                last_cycle_end = at;
+                                // The token has been observed dropping, so
+                                // this snapshot is idle.
+                                self.publish();
+                                // Published before the event, so anything
+                                // woken by `poller:stalled` reads the settled
+                                // state rather than the stale one.
+                                self.events.poller_stalled(at, age_ms);
+                                if changed_deferred {
+                                    changed_deferred = false;
+                                    self.core.triggers.account_changed(Vec::new());
+                                }
                             }
                         }
                     }
