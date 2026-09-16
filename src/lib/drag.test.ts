@@ -62,11 +62,14 @@ describe("colLineX", () => {
 });
 
 describe("settlePendingRows", () => {
-  it("passes a stashed rows update through when no refetch will resync it", () => {
-    // Covers both a non-committing drag AND a committed column reorder:
-    // reordering columns only writes local prefs and never refetches
-    // rows, so a column drag always passes `refetchWillResync: false`,
-    // even when it committed.
+  it("passes a stashed rows update through when nothing committed", () => {
+    expect(settlePendingRows(["a", "b"], false)).toEqual(["a", "b"]);
+  });
+  it("applies a stashed rows update on a committed column reorder, which never refetches rows", () => {
+    // A column drag always passes `refetchWillResync: false`, even when
+    // the column reorder itself committed, because reordering columns
+    // only writes local prefs and never triggers a `rows` refetch — so
+    // there is nothing else that will ever resync the stash.
     expect(settlePendingRows(["a", "b"], false)).toEqual(["a", "b"]);
   });
   it("discards the stash when a refetch will resync it (a committed row reorder)", () => {
