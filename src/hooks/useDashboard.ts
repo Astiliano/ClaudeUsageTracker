@@ -1,10 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { backend } from "../lib/backend";
 import type { Dashboard, HistoryPoint } from "../lib/types";
 
 const DEBOUNCE_MS = 250;
 const TICK_MS = 1000;
+export const HISTORY_DAYS = 30;
 
 interface UseDashboard {
   dashboard: Dashboard | null;
@@ -28,7 +28,7 @@ export function useDashboard(): UseDashboard {
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const next = await invoke<Dashboard>("get_dashboard");
+      const next = await backend().invoke<Dashboard>("get_dashboard");
       setDashboard(next);
       setError(null);
     } catch (e) {
@@ -38,11 +38,12 @@ export function useDashboard(): UseDashboard {
 
   const loadHistory = useCallback(async (): Promise<void> => {
     try {
-      const current = await invoke<Dashboard>("get_dashboard");
+      const current = await backend().invoke<Dashboard>("get_dashboard");
       const entries = await Promise.all(
         current.accounts.map(async (row) => {
-          const points = await invoke<HistoryPoint[]>("get_history", {
+          const points = await backend().invoke<HistoryPoint[]>("get_history", {
             accountId: row.account.id,
+            days: HISTORY_DAYS,
           });
           return [row.account.id, points] as const;
         }),
@@ -80,14 +81,14 @@ export function useDashboard(): UseDashboard {
     const attach = async (): Promise<void> => {
       const names = ["usage:updated", "gate:changed", "poller:stalled"];
       for (const name of names) {
-        const off = await listen(name, () => refetch());
+        const off = await backend().listen(name, () => refetch());
         if (cancelled) {
           off();
         } else {
           unlisteners.push(off);
         }
       }
-      const offCycle = await listen("cycle:finished", () => {
+      const offCycle = await backend().listen("cycle:finished", () => {
         refetch();
         void loadHistory();
       });
