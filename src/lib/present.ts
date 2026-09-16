@@ -1,5 +1,5 @@
 import { bannerFor } from "./banner";
-import { formatCountdown } from "./format";
+import { formatLeft } from "./format";
 import type { Pill } from "./pill";
 import { THEME, THRESHOLDS } from "./theme";
 import type { AccountRow, Dashboard, ModelWindow, Win } from "./types";
@@ -34,7 +34,7 @@ export function weekNote(pct: number): { text: string; warn: boolean } {
 export function sessionNote(session: Win | null, now: number): string {
   if (session === null) return "no data";
   if (session.resets_at === null) return "idle";
-  return formatCountdown(session.resets_at, now);
+  return formatLeft(session.resets_at, now);
 }
 
 export function accountCountLabel(n: number): string {

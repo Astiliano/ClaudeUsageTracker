@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { COLUMNS, DEFAULT_ORDER, gridTemplate, isColumnOrder } from "./columns";
+import { COLUMNS, DEFAULT_ORDER, gridTemplate, normalizeColumnOrder } from "./columns";
 
 describe("gridTemplate", () => {
   it("leads with the grip column, ends with the action column, widths in order", () => {
@@ -12,15 +12,19 @@ describe("gridTemplate", () => {
   });
 });
 
-describe("isColumnOrder", () => {
-  it("accepts a permutation of every column exactly once", () => {
-    expect(isColumnOrder([...DEFAULT_ORDER].reverse())).toBe(true);
+describe("normalizeColumnOrder", () => {
+  it("returns a full valid permutation unchanged", () => {
+    const reversed = [...DEFAULT_ORDER].reverse();
+    expect(normalizeColumnOrder(reversed)).toEqual(reversed);
   });
-  it("rejects missing, duplicated or unknown keys and non-arrays", () => {
-    expect(isColumnOrder(DEFAULT_ORDER.slice(1))).toBe(false);
-    expect(isColumnOrder([...DEFAULT_ORDER, "account"])).toBe(false);
-    expect(isColumnOrder(["account", "session", "week", "model", "spark", "cost"])).toBe(false);
-    expect(isColumnOrder("account")).toBe(false);
-    expect(isColumnOrder(null)).toBe(false);
+  it("keeps known keys in their stored order, drops unknowns and duplicates, appends missing keys in default order", () => {
+    expect(normalizeColumnOrder(["spark", "account", "bogus", "account"])).toEqual([
+      "spark", "account", "session", "week", "model", "updated",
+    ]);
+  });
+  it("returns null for a non-array or an array of non-strings", () => {
+    expect(normalizeColumnOrder(null)).toBeNull();
+    expect(normalizeColumnOrder("x")).toBeNull();
+    expect(normalizeColumnOrder([1, 2, 3])).toBeNull();
   });
 });

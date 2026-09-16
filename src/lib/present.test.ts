@@ -55,7 +55,7 @@ describe("notes and labels", () => {
   it("sessionNote covers missing, idle and counting-down sessions", () => {
     expect(sessionNote(null, 0)).toBe("no data");
     expect(sessionNote({ pct: 0, resets_at: null }, 0)).toBe("idle");
-    expect(sessionNote({ pct: 40, resets_at: 3_600_000 * 2 + 60_000 * 3 }, 0)).toBe("resets in 2h 3m");
+    expect(sessionNote({ pct: 40, resets_at: 3_600_000 * 2 + 60_000 * 3 }, 0)).toBe("2h 3m left");
   });
   it("accountCountLabel pluralises", () => {
     expect(accountCountLabel(1)).toBe("1 account");

@@ -77,6 +77,7 @@ input, select, button { font-family: inherit; }
 .btn-ghost { background: transparent; color: var(--muted-2); border: 1px solid var(--btn-border); }
 .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger-border); }
 .btn-danger:hover { background: var(--danger-hover-bg); color: #f3a79d; }
+.btn-danger-armed { background: #241a19; color: #f3a79d; border-color: #5a3532; }
 .btn-link { font-family: var(--mono); font-size: 11px; color: var(--muted); background: transparent; border: none; cursor: pointer; padding: 0; }
 .btn-link:hover { background: transparent; color: #dde2e6; }
 .btn:disabled { opacity: 0.5; cursor: default; }
@@ -156,7 +157,7 @@ input, select, button { font-family: inherit; }
 }
 
 /* ---- status pill ---- */
-.pill { font-family: var(--mono); font-size: 10px; border-radius: 4px; padding: 2px 5px; border: 1px solid transparent; }
+.pill { font-family: var(--mono); font-size: 10px; border-radius: 4px; padding: 2px 5px; border: 1px solid transparent; white-space: nowrap; flex: none; }
 .pill-tone-success { color: var(--live); border-color: var(--live); }
 .pill-tone-warn { color: var(--warn); border-color: var(--warn); }
 .pill-tone-error { color: var(--crit); border-color: var(--crit); background: rgba(224, 112, 95, 0.12); }
@@ -295,7 +296,7 @@ button.pill { cursor: pointer; background: transparent; }
 .hint { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 
 /* ---- modal + toast ---- */
-.modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; }
+.modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; z-index: 50; }
 .modal-body {
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
   padding: 20px 22px; max-width: 720px; max-height: 80vh; overflow: auto;
@@ -306,7 +307,7 @@ button.pill { cursor: pointer; background: transparent; }
 }
 .raw { max-height: 320px; overflow: auto; }
 .toast {
-  position: fixed; right: 16px; bottom: 16px;
+  position: fixed; right: 16px; bottom: 16px; z-index: 60;
   background: #241a19; border: 1px solid var(--danger-border); color: #f3a79d;
   font-family: var(--mono); font-size: 12px; border-radius: 10px; padding: 10px 14px;
 }

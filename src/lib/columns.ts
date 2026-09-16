@@ -24,12 +24,33 @@ export function gridTemplate(order: readonly ColumnKey[]): string {
   return [LEAD_WIDTH, ...order.map((k) => COLUMNS[k].width), TRAIL_WIDTH].join(" ");
 }
 
-export function isColumnOrder(v: unknown): v is ColumnKey[] {
-  if (!Array.isArray(v) || v.length !== DEFAULT_ORDER.length) return false;
-  const seen = new Set<string>();
+function isColumnKey(v: string): v is ColumnKey {
+  return v in COLUMNS;
+}
+
+/**
+ * Migrates a stored column order into a valid one: keeps known keys in
+ * their stored order (dropping unknown or duplicate keys), then appends any
+ * column missing from the stored value in default order. Returns null only
+ * when `v` is not an array of strings at all.
+ */
+export function normalizeColumnOrder(v: unknown): ColumnKey[] | null {
+  if (!Array.isArray(v)) return null;
+  const strs: string[] = [];
   for (const item of v) {
-    if (typeof item !== "string" || !(item in COLUMNS) || seen.has(item)) return false;
-    seen.add(item);
+    if (typeof item !== "string") return null;
+    strs.push(item);
   }
-  return true;
+  const seen = new Set<string>();
+  const known: ColumnKey[] = [];
+  for (const item of strs) {
+    if (isColumnKey(item) && !seen.has(item)) {
+      seen.add(item);
+      known.push(item);
+    }
+  }
+  for (const key of DEFAULT_ORDER) {
+    if (!seen.has(key)) known.push(key);
+  }
+  return known;
 }

@@ -4,6 +4,16 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/**
+ * Converts a screen-space (client) pixel quantity into the element's local,
+ * unzoomed CSS px, given the active CSS `zoom` factor. A zero or non-finite
+ * zoom is treated as 1 (no scaling) rather than dividing by zero or NaN.
+ */
+export function toLocal(screenPx: number, zoom: number): number {
+  const z = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  return screenPx / z;
+}
+
 export function rowDragTarget(index: number, dy: number, rowH: number, length: number): number {
   return clamp(index + Math.round(dy / rowH), 0, Math.max(0, length - 1));
 }

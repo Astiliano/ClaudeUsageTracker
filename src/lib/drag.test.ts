@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { colDragTarget, colLineX, rowDragTarget, rowShift } from "./drag";
+import { colDragTarget, colLineX, rowDragTarget, rowShift, toLocal } from "./drag";
 
 describe("rowDragTarget", () => {
   it("rounds the displacement to whole rows and clamps to the list", () => {
@@ -8,6 +8,20 @@ describe("rowDragTarget", () => {
     expect(rowDragTarget(1, 32, 66, 3)).toBe(1);
     expect(rowDragTarget(1, -500, 66, 3)).toBe(0);
     expect(rowDragTarget(1, 500, 66, 3)).toBe(2);
+  });
+  it("clamps to index 0 for an empty list", () => {
+    expect(rowDragTarget(0, 500, 66, 0)).toBe(0);
+  });
+});
+
+describe("toLocal", () => {
+  it("converts a screen-space pixel quantity into local (unzoomed) px", () => {
+    expect(toLocal(122, 1.22)).toBeCloseTo(100);
+    expect(toLocal(50, 1)).toBe(50);
+  });
+  it("treats a zero or non-finite zoom as 1", () => {
+    expect(toLocal(50, 0)).toBe(50);
+    expect(toLocal(50, NaN)).toBe(50);
   });
 });
 

@@ -1,9 +1,11 @@
 import type { JSX, KeyboardEvent } from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { errorMessage } from "../lib/errors";
 import { formatCountdown } from "../lib/format";
 import type { AccountRow as AccountRowData } from "../lib/types";
+
+const CONFIRM_REMOVE_MS = 4000;
 
 interface Props {
   row: AccountRowData;
@@ -19,6 +21,12 @@ interface Props {
 export function EditDrawer({ row, index, total, now, onClose, onMove, onChanged, onError }: Props): JSX.Element {
   const { account } = row;
   const [draft, setDraft] = useState(account.label);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const removeTimer = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
+  }, []);
 
   const call = async (command: string, args: Record<string, unknown>): Promise<void> => {
     try {
@@ -34,7 +42,25 @@ export function EditDrawer({ row, index, total, now, onClose, onMove, onChanged,
     onClose();
   };
 
+  const disarmRemove = (): void => {
+    if (removeTimer.current !== null) {
+      window.clearTimeout(removeTimer.current);
+      removeTimer.current = null;
+    }
+    setConfirmRemove(false);
+  };
+
   const remove = (): void => {
+    if (!confirmRemove) {
+      setConfirmRemove(true);
+      if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
+      removeTimer.current = window.setTimeout(() => {
+        removeTimer.current = null;
+        setConfirmRemove(false);
+      }, CONFIRM_REMOVE_MS);
+      return;
+    }
+    disarmRemove();
     void call("remove_account", { id: account.id });
     onClose();
   };
@@ -44,12 +70,16 @@ export function EditDrawer({ row, index, total, now, onClose, onMove, onChanged,
     else if (e.key === "Escape") onClose();
   };
 
+  const onDrawerKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === "Escape" && confirmRemove) disarmRemove();
+  };
+
   const session = row.latest?.session ?? null;
   const week = row.latest?.week_all ?? null;
   const models = row.latest?.week_models ?? [];
 
   return (
-    <div className="drawer">
+    <div className="drawer" tabIndex={-1} onKeyDown={onDrawerKeyDown}>
       <div className="edit-row">
         <span className="edit-label">Name</span>
         <input
@@ -101,8 +131,12 @@ export function EditDrawer({ row, index, total, now, onClose, onMove, onChanged,
         <button type="button" className="btn btn-sm" disabled={index === total - 1} onClick={() => onMove(1)}>
           move down
         </button>
-        <button type="button" className="btn btn-sm btn-danger ml-auto" onClick={remove}>
-          remove
+        <button
+          type="button"
+          className={`btn btn-sm btn-danger ml-auto${confirmRemove ? " btn-danger-armed" : ""}`}
+          onClick={remove}
+        >
+          {confirmRemove ? "confirm remove" : "remove"}
         </button>
       </div>
     </div>

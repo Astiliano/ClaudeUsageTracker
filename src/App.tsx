@@ -56,6 +56,7 @@ export default function App(): JSX.Element {
           rows={dashboard.accounts}
           history={history}
           now={now}
+          zoom={SIZES[prefs.size].zoom}
           columnOrder={prefs.columnOrder}
           onColumnOrder={(columnOrder) => update({ columnOrder })}
           onChanged={refetch}

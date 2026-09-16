@@ -1,5 +1,8 @@
 import type { HistoryPoint } from "./types";
 
+/** Days of history the drawer requests and derives its sparkline from. */
+export const HISTORY_DAYS = 30;
+
 const DAY_MS = 86_400_000;
 
 function startOfLocalDay(t: number): number {
@@ -33,21 +36,34 @@ export function dailyMax(
   return out;
 }
 
-/** Connected polyline through the known values (design: nulls are skipped). */
-export function polylinePoints(
+/**
+ * One `points` string per contiguous run of known values, so a gap in the
+ * data breaks the line instead of connecting across missing days. A run of
+ * length 1 is emitted as a single point (harmless as a `<polyline>`; the
+ * drawer already draws a dot for it).
+ */
+export function polylineRuns(
   vals: readonly (number | null)[],
   width: number,
   height: number,
-): string {
+): string[] {
   const n = vals.length;
-  const pts: string[] = [];
-  vals.forEach((v, i) => {
-    if (v === null) return;
+  const point = (i: number, v: number): string => {
     const x = n === 1 ? 0 : (i / (n - 1)) * width;
     const y = height - (clamp(v, 0, 100) / 100) * height;
-    pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  };
+  const runs: string[] = [];
+  let current: string[] = [];
+  vals.forEach((v, i) => {
+    if (v === null) {
+      if (current.length > 0) { runs.push(current.join(" ")); current = []; }
+      return;
+    }
+    current.push(point(i, v));
   });
-  return pts.length > 1 ? pts.join(" ") : "";
+  if (current.length > 0) runs.push(current.join(" "));
+  return runs;
 }
 
 export interface SeriesDot { index: number; value: number; leftPct: number }

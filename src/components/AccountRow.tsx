@@ -86,7 +86,7 @@ export function AccountRow(props: Props): JSX.Element {
       case "week": { const n = weekNote(weekPct); return <Meter pct={week?.pct ?? null} note={week === null ? "no data" : n.text} noteWarn={n.warn} />; }
       case "model": return models === null ? <Meter pct={null} note="no data" /> : <Meter pct={models.pct} note={models.note} title={models.title} />;
       case "spark": return (
-        <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for 30 days" onClick={onToggleChart}>
+        <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for 30 days" aria-expanded={chartOpen} onClick={onToggleChart}>
           <Sparkline points={last7(points, now)} stroke={stroke} />
         </button>);
       case "updated": return <span className="updated">{formatAgo(row.latest?.taken_at ?? null, now)}</span>;
@@ -96,35 +96,46 @@ export function AccountRow(props: Props): JSX.Element {
   const onGripKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (e.key === "ArrowUp") { e.preventDefault(); onMove(-1); }
     else if (e.key === "ArrowDown") { e.preventDefault(); onMove(1); }
+    else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggleEdit(); }
   };
 
   return (
     <div className={["row", lifted ? "row-lifted" : "", parked ? "row-parked" : ""].filter(Boolean).join(" ")} style={style}>
-      <div className="row-grid" style={{ gridTemplateColumns: gridCols }}>
-        <div className="grip" role="button" tabIndex={0} aria-label="Drag to reorder" title="Drag to reorder rows" onPointerDown={onHandleDown} onKeyDown={onGripKeyDown}>
-          <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
-          <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
-          <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
+      <div className="row-grid" role="row" style={{ gridTemplateColumns: gridCols }}>
+        <div role="cell">
+          <div className="grip" role="button" tabIndex={0}
+            aria-label="Reorder account: arrow keys move, Enter opens the edit drawer"
+            title="Drag to reorder rows" onPointerDown={onHandleDown} onKeyDown={onGripKeyDown}>
+            <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
+            <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
+            <div className="grip-row"><div className="grip-dot" /><div className="grip-dot" /></div>
+          </div>
         </div>
         {columnOrder.map((key, ci) => (
-          <div key={key} className={`cell${hotColumn === ci ? " cell-hot" : ""}`}>{cell(key)}</div>
+          <div key={key} role="cell" className={`cell${hotColumn === ci ? " cell-hot" : ""}`}>{cell(key)}</div>
         ))}
-        <div className="row-actions">
-          <button type="button" className={`btn btn-sm${editing ? " btn-edit-on" : ""}`} onClick={onToggleEdit}>edit</button>
+        <div className="row-actions" role="cell">
+          <button type="button" className={`btn btn-sm${editing ? " btn-edit-on" : ""}`} aria-expanded={editing} onClick={onToggleEdit}>edit</button>
         </div>
       </div>
-      {chartOpen && <HistoryDrawer points={points} now={now} stroke={stroke} onCollapse={onToggleChart} />}
+      {chartOpen && (
+        <div role="row"><div role="cell">
+          <HistoryDrawer points={points} now={now} stroke={stroke} onCollapse={onToggleChart} />
+        </div></div>
+      )}
       {editing && (
-        <EditDrawer
-          row={row}
-          index={index}
-          total={total}
-          now={now}
-          onClose={onToggleEdit}
-          onMove={onMove}
-          onChanged={onChanged}
-          onError={onError}
-        />
+        <div role="row"><div role="cell">
+          <EditDrawer
+            row={row}
+            index={index}
+            total={total}
+            now={now}
+            onClose={onToggleEdit}
+            onMove={onMove}
+            onChanged={onChanged}
+            onError={onError}
+          />
+        </div></div>
       )}
     </div>
   );

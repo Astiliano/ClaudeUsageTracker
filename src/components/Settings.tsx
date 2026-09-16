@@ -45,9 +45,13 @@ export function Settings({
     void load();
   }, [onError]);
 
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>): void => {
+    if (e.key === "Escape") onClose();
+  };
+
   if (settings === null) {
     return (
-      <section className="panel settings">
+      <section className="panel settings" tabIndex={-1} onKeyDown={onKeyDown}>
         <p className="loading">loading…</p>
       </section>
     );
@@ -114,7 +118,7 @@ export function Settings({
   };
 
   return (
-    <section className="panel settings">
+    <section className="panel settings" tabIndex={-1} onKeyDown={onKeyDown}>
       <div className="settings-head">
         <h2 className="settings-title">Settings</h2>
         <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
@@ -262,6 +266,7 @@ export function Settings({
           open logs
         </button>
       </form>
+      <p className="edit-hint">usage history is kept for 30 days, then pruned</p>
     </section>
   );
 }

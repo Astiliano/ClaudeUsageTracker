@@ -1,4 +1,4 @@
-import { type ColumnKey, DEFAULT_ORDER, isColumnOrder } from "./columns";
+import { type ColumnKey, DEFAULT_ORDER, normalizeColumnOrder } from "./columns";
 import { type FontKey, type SizeKey, isFontKey, isSizeKey } from "./theme";
 
 export interface Prefs {
@@ -9,11 +9,11 @@ export interface Prefs {
 
 export const PREFS_KEY = "usage-tracker.prefs.v1";
 
-export const DEFAULT_PREFS: Readonly<Prefs> = Object.freeze({
+export const DEFAULT_PREFS: Readonly<Prefs> = {
   font: "system",
   size: "md",
-  columnOrder: Object.freeze([...DEFAULT_ORDER]) as unknown as ColumnKey[],
-});
+  columnOrder: [...DEFAULT_ORDER],
+};
 
 /** The subset of the Web Storage API the app touches; injectable for tests. */
 export interface PrefsStore {
@@ -39,7 +39,11 @@ export function parsePrefs(raw: string | null): Prefs {
   const rec = parsed as Record<string, unknown>;
   if (isFontKey(rec.font)) out.font = rec.font;
   if (isSizeKey(rec.size)) out.size = rec.size;
-  if (isColumnOrder(rec.columnOrder)) out.columnOrder = [...rec.columnOrder];
+  const order = normalizeColumnOrder(rec.columnOrder);
+  if (order !== null) out.columnOrder = order;
+  if (Array.isArray(rec.columnOrder) && JSON.stringify(order) !== JSON.stringify(rec.columnOrder)) {
+    console.warn("prefs: stored column order was invalid or out of date; normalizing", rec.columnOrder);
+  }
   return out;
 }
 

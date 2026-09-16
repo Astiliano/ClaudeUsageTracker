@@ -30,6 +30,20 @@ describe("parsePrefs", () => {
     a.columnOrder.reverse();
     expect(parsePrefs(null).columnOrder).toEqual([...DEFAULT_ORDER]);
   });
+  it("warns when a stored column order array had to be normalized", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const parsed = parsePrefs(JSON.stringify({ columnOrder: ["spark", "account", "bogus"] }));
+    expect(parsed.columnOrder).toEqual(["spark", "account", "session", "week", "model", "updated"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+  it("does not warn when a stored column order array is already normalized", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const order = [...DEFAULT_ORDER].reverse();
+    parsePrefs(JSON.stringify({ columnOrder: order }));
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
 });
 
 describe("loadPrefs / savePrefs", () => {

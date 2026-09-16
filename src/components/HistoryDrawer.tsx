@@ -1,7 +1,6 @@
 import type { JSX } from "react";
 import { useState } from "react";
-import { HISTORY_DAYS } from "../hooks/useDashboard";
-import { axisLabels, dailyMax, dayLabel, polylinePoints, seriesDots, seriesStats } from "../lib/series";
+import { HISTORY_DAYS, axisLabels, dailyMax, dayLabel, polylineRuns, seriesDots, seriesStats } from "../lib/series";
 import type { HistoryPoint } from "../lib/types";
 
 interface Props { points: HistoryPoint[]; now: number; stroke: string; onCollapse: () => void }
@@ -17,7 +16,7 @@ export function HistoryDrawer({ points, now, stroke, onCollapse }: Props): JSX.E
   const [tip, setTip] = useState<Tip | null>(null);
   const days = dailyMax(points, HISTORY_DAYS, now);
   const stats = seriesStats(days);
-  const line = polylinePoints(days, 100, 100);
+  const lines = polylineRuns(days, 100, 100);
   const dots = seriesDots(days);
   return (
     <div className="drawer">
@@ -33,7 +32,9 @@ export function HistoryDrawer({ points, now, stroke, onCollapse }: Props): JSX.E
       <div className="chart">
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="weekly usage, last 30 days">
           {[0, 50, 100].map((y) => <line key={y} x1={0} y1={y} x2={100} y2={y} stroke="#1e252a" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
-          {line !== "" && <polyline points={line} fill="none" stroke={stroke} strokeWidth={1.8} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />}
+          {lines.map((points, i) => (
+            <polyline key={i} points={points} fill="none" stroke={stroke} strokeWidth={1.8} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+          ))}
         </svg>
         <div className="chart-dots">
           {dots.map((d) => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { axisLabels, dailyMax, dayLabel, polylinePoints, seriesDots, seriesStats } from "./series";
+import { HISTORY_DAYS, axisLabels, dailyMax, dayLabel, polylineRuns, seriesDots, seriesStats } from "./series";
 
 const HOUR = 3_600_000;
 // A fixed local instant: 2026-09-16 15:00 local.
@@ -29,16 +29,28 @@ describe("dailyMax", () => {
   });
 });
 
-describe("polylinePoints", () => {
-  it("spaces known points by index and skips nulls without breaking the line", () => {
-    expect(polylinePoints([0, null, 100], 100, 24)).toBe("0.00,24.00 100.00,0.00");
+describe("polylineRuns", () => {
+  it("emits one run per contiguous span of known values, breaking across nulls", () => {
+    expect(polylineRuns([0, null, 100], 100, 24)).toEqual(["0.00,24.00", "100.00,0.00"]);
   });
-  it("is empty with fewer than two known values", () => {
-    expect(polylinePoints([50], 100, 24)).toBe("");
-    expect(polylinePoints([null, null], 100, 24)).toBe("");
+  it("emits a single-point run for an isolated known value amid gaps", () => {
+    expect(polylineRuns([10, 20, null, 30], 100, 24)).toEqual([
+      "0.00,21.60 33.33,19.20",
+      "100.00,16.80",
+    ]);
+  });
+  it("is empty for an empty series or a series with no known values", () => {
+    expect(polylineRuns([], 100, 24)).toEqual([]);
+    expect(polylineRuns([null, null], 100, 24)).toEqual([]);
   });
   it("clamps values into 0..100", () => {
-    expect(polylinePoints([150, -10], 100, 100)).toBe("0.00,0.00 100.00,100.00");
+    expect(polylineRuns([150, -10], 100, 100)).toEqual(["0.00,0.00 100.00,100.00"]);
+  });
+});
+
+describe("HISTORY_DAYS", () => {
+  it("is the single source of truth for the drawer window", () => {
+    expect(HISTORY_DAYS).toBe(30);
   });
 });
 
@@ -53,6 +65,9 @@ describe("seriesDots / seriesStats", () => {
   it("computes peak, rounded average and missing count", () => {
     expect(seriesStats([10, null, 31])).toEqual({ peak: 31, avg: 21, missing: 1 });
     expect(seriesStats([null])).toEqual({ peak: 0, avg: 0, missing: 1 });
+  });
+  it("is all zeros for an empty series", () => {
+    expect(seriesStats([])).toEqual({ peak: 0, avg: 0, missing: 0 });
   });
 });
 
