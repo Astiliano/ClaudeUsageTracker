@@ -1,7 +1,7 @@
 # Claude Usage Tracker — Design Spec
 
 Date: 2026-09-15
-Status: **spec v4 — hostile review passed; consistency confirmation pending** (see §15 Review log)
+Status: **spec v5 — FINAL (hostile + consistency review passed)** (see §15 Review log)
 
 ## 1. Goal
 
@@ -140,7 +140,7 @@ dir.** No in-app OAuth. "Log in" opens a visible terminal with
 | D13 | Logging: `tracing` JSON lines to a daily-rotating file in the app log dir; runtime level toggle via `reload::Handle`; "Open log folder" menu item | Debuggable in production without adding code; firehose one switch away |
 | D14 | Frontend testing: Vitest on pure helpers only. No E2E in v1 | Logic lives in Rust; the webview is presentational |
 | D15 | Child environment is **sanitised**: inherit the parent environment, remove every variable whose name starts with `ANTHROPIC_` or `CLAUDE_`, then set `CLAUDE_CONFIG_DIR` | An inherited `ANTHROPIC_API_KEY` would turn a guard miss into metered spend; `CLAUDE_CODE_USE_BEDROCK` etc. would change the auth path |
-| D16 | Per-account **failure backoff**: on the k-th consecutive non-`ok` outcome (k ≥ 1) set `next_allowed = now + min(900 s, 60 s × 2^(k−1))`; reset to zero on `ok`, manual refresh, account edit, or settings change | A logged-out account or missing binary must not write an identical failure row every cycle |
+| D16 | Per-account **failure backoff**: on the k-th consecutive non-`ok` outcome (k ≥ 1) set `next_allowed = now + min(900 s, 60 s × 2^(k−1))`; reset to zero on `ok`, manual refresh, account edit, or a change to a **polling-relevant** setting (`interval_secs`, `timeout_secs`, `claude_binary`) — `close_to_tray`, `launch_at_login`, `log_level` do not touch the scheduler | A logged-out account or missing binary must not write an identical failure row every cycle; fixing the binary path or interval is a deliberate "try again" |
 | D17 | Account order: default account first, then by label (case-insensitive). No manual reordering in v1 | YAGNI (drag-to-reorder cut in review) |
 
 Defaults D9–D12 were chosen by the implementing agent and can be changed
@@ -216,6 +216,13 @@ pub struct Snapshot { id: i64, account_id: String, taken_at: i64 /*epoch ms*/,
                       outcome: PollOutcome, raw: Option<String>,
                       duration_ms: u32 }
 
+/// Published by the driver into AppState after every `decide()` and every
+/// `record()`; the ONLY way code outside driver.rs reads scheduler state
+/// (Machine's own fields are never read across tasks, so nothing can drift).
+pub struct DriverStatus { gate: Gate, busy: bool, stalled_at: Option<i64>,
+                          backoff_until: HashMap<AccountId, i64> }
+// AppState holds Arc<Mutex<DriverStatus>>; get_dashboard copies it.
+
 /// Wire shape sent to the frontend (flattened; built by store from a row).
 pub struct SnapshotDto { id, account_id, taken_at, outcome: &'static str,
                          session: Option<Window>, week_all: Option<Window>,
@@ -284,9 +291,12 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
      `SpawnError("unexpected envelope: <reason>")` (backs off; raw stored).
   2. The envelope is a `result`. `local_command` absent or not equal to
      `"usage"` → **`GuardTripped`** (primary turn evidence — a model turn
-     has no such field). This is checked before anything else about the
-     envelope's shape, so a malformed turn envelope can never be
-     misclassified as a shape problem and retried.
+     has no such field). This is checked before the `num_turns` /
+     `result`-presence checks in step 4, so a turn envelope with an odd
+     shape can never be misclassified as a shape problem and retried. (Step
+     1 runs first by necessity: a non-JSON or non-`result` payload cannot
+     carry `local_command` at all; §2.2 shows real turns always produce a
+     `result` envelope.)
   3. `num_turns > 0`, or `total_cost_usd > 0`, or non-empty `modelUsage` →
      `GuardTripped` (secondary/advisory: under subscription auth cost can
      read 0 for a billed turn, so these add trips, never excuse one).
@@ -295,7 +305,11 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
   5. **Escalation:** five consecutive `unexpected envelope` spawn errors on
      one account → treated as `GuardTripped("unclassifiable envelope ×5")`,
      because an envelope the app cannot classify is exactly the case where
-     it cannot prove no turn was spent.
+     it cannot prove no turn was spent. The counter is
+     `Backoff.unexpected_envelope_streak: u8` in `machine.rs` (§6.5),
+     incremented by `record()` for that error kind and reset to 0 by any
+     other outcome; the escalation decision is made in `record()`, which
+     returns `Escalate` so the cycle task performs the trip sequence below.
   On a trip, in this order: (1) persist the **global halt**
   (`settings.polling_halted = "guard_tripped:<ts>"`) — the flag is the safety
   property, so it goes to disk first; (2) log the raw envelope at ERROR;
@@ -348,6 +362,12 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
 pub enum Gate { Idle, Active }
 pub struct Machine { gate: Gate, cycle: Option<CycleToken>,
                      backoff: HashMap<AccountId, Backoff> }
+pub struct Backoff { consecutive_failures: u32, next_allowed: i64,
+                     unexpected_envelope_streak: u8 }
+pub enum Recorded { Continue, Escalate /* §6.3 step 5 */ }
+pub fn record(&mut self, id: &AccountId, outcome: &PollOutcome, now: i64) -> Recorded
+pub fn reset_all_backoff(&mut self)
+pub fn status(&self, now: i64) -> DriverStatus   // snapshot for AppState
 pub enum Trigger { Timer, Manual, Startup, AccountChanged(Vec<AccountId>) }
 pub enum Decision { Run { accounts: Vec<AccountId>, reason: Trigger,
                           gate_transition: Option<Gate> },   // driver emits gate:changed
@@ -608,7 +628,7 @@ Single window, dark/light follows OS.
 | `update_account` | `{id, label?, enabled?}` → Account. `enabled: false` sets `disabled_reason = user`; `enabled: true` clears it and triggers `AccountChanged` |
 | `remove_account` | `{id}` → () (cascades snapshots) |
 | `rescan_profiles` | → `[Account]` newly added (disabled) |
-| `get_settings` / `set_settings` | user-facing settings struct (`interval_secs`, `timeout_secs`, `claude_binary`, `close_to_tray`, `launch_at_login`, `log_level`); clamps rejected with `out_of_range`; a successful change publishes on the settings watch (moves the deadline, resets backoff per D16). `polling_halted` is **not** part of this struct and writes to it do **not** touch the watch |
+| `get_settings` / `set_settings` | user-facing settings struct (`interval_secs`, `timeout_secs`, `claude_binary`, `close_to_tray`, `launch_at_login`, `log_level`); clamps rejected with `out_of_range`; a change to `interval_secs`, `timeout_secs` or `claude_binary` publishes on the settings watch (moves the deadline, resets backoff per D16); changes to the other three keys are applied directly (log reload handle, autostart plugin, in-memory flag) and do **not** touch the watch. `polling_halted` is **not** part of this struct and writes to it do **not** touch the watch |
 | `clear_halt` | → () — clears `polling_halted` and logs WARN with the previous value. **Does not poll**: every quota-spending action stays a separate, explicit act (the user presses Refresh) |
 | `open_login` | `{id}` → () |
 | `open_log_dir` | → () via opener plugin |
@@ -736,4 +756,9 @@ Facts an implementer may rely on without re-testing, with the date verified:
   (855 MB worst case, `incremental_vacuum` in `prune`, settings change
   resets backoff, `stalled_at` home, no-enabled banner derivation,
   `clear_halt` test, advisory-rule fixture).
-- Round 4: consistency confirmation only.
+- 2026-09-16 v4 → v5 (final): round 4 consistency confirmation — all
+  round-3 items closed, 0 must-fix, 3 should-fix applied (`local_command`
+  ordering sentence made precise; escalation counter owned by `Backoff` in
+  `machine.rs`; `DriverStatus` declared in §5.1 as the sole cross-task
+  scheduler view) and 1 nit (backoff reset limited to polling-relevant
+  settings). **Spec closed; implementation planning started.**
