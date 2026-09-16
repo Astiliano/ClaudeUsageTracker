@@ -302,38 +302,61 @@ pub async fn poll_now(core: State<'_, SharedCore>) -> AppResult<String> {
 
 #[tauri::command]
 pub async fn add_account(
+    app: tauri::AppHandle,
     core: State<'_, SharedCore>,
     config_dir: String,
 ) -> AppResult<Account> {
     let core = Arc::clone(&core);
-    blocking(move || core_add_account(&core, Path::new(&config_dir), now_ms())).await
+    let tray_core = Arc::clone(&core);
+    let account =
+        blocking(move || core_add_account(&core, Path::new(&config_dir), now_ms())).await?;
+    crate::tray::apply_tray(&app, &tray_core).await;
+    Ok(account)
 }
 
 #[tauri::command]
 pub async fn update_account(
+    app: tauri::AppHandle,
     core: State<'_, SharedCore>,
     id: String,
     label: Option<String>,
     enabled: Option<bool>,
 ) -> AppResult<Account> {
     let core = Arc::clone(&core);
-    blocking(move || core_update_account(&core, &id, label.as_deref(), enabled)).await
+    let tray_core = Arc::clone(&core);
+    let account =
+        blocking(move || core_update_account(&core, &id, label.as_deref(), enabled)).await?;
+    crate::tray::apply_tray(&app, &tray_core).await;
+    Ok(account)
 }
 
 #[tauri::command]
-pub async fn remove_account(core: State<'_, SharedCore>, id: String) -> AppResult<()> {
+pub async fn remove_account(
+    app: tauri::AppHandle,
+    core: State<'_, SharedCore>,
+    id: String,
+) -> AppResult<()> {
     let core = Arc::clone(&core);
-    blocking(move || core_remove_account(&core, &id)).await
+    let tray_core = Arc::clone(&core);
+    blocking(move || core_remove_account(&core, &id)).await?;
+    crate::tray::apply_tray(&app, &tray_core).await;
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn rescan_profiles(core: State<'_, SharedCore>) -> AppResult<Vec<Account>> {
+pub async fn rescan_profiles(
+    app: tauri::AppHandle,
+    core: State<'_, SharedCore>,
+) -> AppResult<Vec<Account>> {
     let core = Arc::clone(&core);
-    blocking(move || {
+    let tray_core = Arc::clone(&core);
+    let added = blocking(move || {
         let home = crate::paths::home_dir()?;
         core_rescan_profiles(&core, &home, now_ms())
     })
-    .await
+    .await?;
+    crate::tray::apply_tray(&app, &tray_core).await;
+    Ok(added)
 }
 
 #[tauri::command]
@@ -354,8 +377,10 @@ pub async fn set_settings(
 ) -> AppResult<()> {
     let want_autostart = settings.launch_at_login;
     let core_ref = Arc::clone(&core);
+    let tray_core = Arc::clone(&core);
     let to_save = settings.clone();
     blocking(move || core_set_settings(&core_ref, &to_save)).await?;
+    crate::tray::apply_tray(&app, &tray_core).await;
 
     // Written through to the plugin's live state; never stored in the table.
     let result = if want_autostart {
@@ -373,9 +398,14 @@ pub async fn set_settings(
 }
 
 #[tauri::command]
-pub async fn clear_halt(core: State<'_, SharedCore>) -> AppResult<()> {
+pub async fn clear_halt(app: tauri::AppHandle, core: State<'_, SharedCore>) -> AppResult<()> {
     let core = Arc::clone(&core);
-    blocking(move || core_clear_halt(&core)).await
+    let tray_core = Arc::clone(&core);
+    blocking(move || core_clear_halt(&core)).await?;
+    // Clearing the guard must remove the Halted badge immediately, not on
+    // the next poll cycle.
+    crate::tray::apply_tray(&app, &tray_core).await;
+    Ok(())
 }
 
 #[tauri::command]

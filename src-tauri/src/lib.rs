@@ -136,7 +136,17 @@ pub fn run() {
             });
             app.manage(Arc::clone(&core));
 
-            // Tray.
+            // Tray. `tauri.conf.json` must NOT declare `app.trayIcon`: Tauri's
+            // own `Builder::build` unconditionally creates a tray from that
+            // config entry (tauri-2.11.5 src/app.rs, "initialize default tray
+            // icon if defined") before this `setup` closure ever runs, and
+            // `AppHandle::tray_by_id` resolves the first match in insertion
+            // order (src/manager/tray.rs `find_map`). A config-declared tray
+            // with the same id "main" would therefore win every `tray_by_id`
+            // lookup over the one built here — with no menu and no click
+            // handlers — so `apply_tray` would keep updating a dead icon
+            // while the real, interactive one never changes. This builder is
+            // the sole creator of the tray.
             let open = MenuItem::with_id(app, MENU_OPEN, "Open", true, None::<&str>)?;
             let refresh =
                 MenuItem::with_id(app, MENU_REFRESH, "Refresh now", true, None::<&str>)?;
@@ -180,7 +190,15 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            apply_tray(&handle, &core);
+            // `setup` is a sync closure, so the now-async `apply_tray`
+            // (Fix round 1, item 3: one `blocking` hop instead of three
+            // synchronous store calls on the setup thread) is spawned
+            // rather than awaited here.
+            let startup_handle = handle.clone();
+            let startup_core = Arc::clone(&core);
+            tauri::async_runtime::spawn(async move {
+                apply_tray(&startup_handle, &startup_core).await;
+            });
 
             // Scheduler.
             let events: Arc<dyn EventSink> =

@@ -169,29 +169,53 @@ pub fn should_hide_on_close(close_to_tray: bool) -> bool {
     close_to_tray
 }
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::image::Image;
 use tracing::warn;
 
-use crate::commands::Core;
+use crate::commands::{blocking, Core};
+use crate::error::AppResult;
 
 const TRAY_ICON_SIZE: u32 = 32;
 
+/// An unreadable halt flag is treated as halted (fail closed): the flag is
+/// the safety property (spec 6.3), so a read failure must never silently
+/// look like "polling is fine". Pure, so the decision is unit-tested without
+/// a live Tauri app or store; matches `Driver::halted`'s own fail-closed rule.
+fn halted_fail_closed(result: AppResult<Option<String>>) -> bool {
+    match result {
+        Ok(v) => v.is_some(),
+        Err(e) => {
+            warn!(error = %e, "could not read the halt flag for the tray; assuming halted");
+            true
+        }
+    }
+}
+
 /// Recomputes the level and tooltip from the store and pushes them onto the
-/// tray icon. Called after each account's poll and on account/settings change.
-pub fn apply_tray(app: &tauri::AppHandle, core: &Core) {
-    let accounts = match core.store.list_accounts() {
-        Ok(a) => a,
+/// tray icon. Called after each account's poll (from the driver) and after
+/// every mutating command (account/settings/halt changes) so the icon never
+/// shows stale data. All three store reads happen inside one `blocking` hop
+/// so the async runtime worker never blocks on the connection mutex.
+pub async fn apply_tray(app: &tauri::AppHandle, core: &Core) {
+    let store = Arc::clone(&core.store);
+    let fetched: AppResult<(Vec<Account>, HashMap<String, SnapshotDto>, bool)> =
+        blocking(move || {
+            let accounts = store.list_accounts()?;
+            let latest = store.latest_per_account()?;
+            let halted = halted_fail_closed(store.polling_halted());
+            Ok((accounts, latest, halted))
+        })
+        .await;
+
+    let (accounts, latest, halted) = match fetched {
+        Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "could not read accounts for the tray");
             return;
         }
     };
-    let latest = core.store.latest_per_account().unwrap_or_default();
-    let halted = core
-        .store
-        .polling_halted()
-        .unwrap_or_default()
-        .is_some();
 
     let rows: Vec<(Account, Option<SnapshotDto>)> = accounts
         .into_iter()
@@ -222,7 +246,6 @@ pub fn apply_tray(app: &tauri::AppHandle, core: &Core) {
 }
 
 use serde::Serialize;
-use std::sync::Arc;
 use tauri::Emitter;
 
 use crate::scheduler::driver::EventSink;
@@ -272,7 +295,16 @@ impl EventSink for TauriEvents {
             .emit("poller:stalled", StalledEvent { at, cycle_age_ms });
     }
     fn refresh_tray(&self) {
-        apply_tray(&self.app, &self.core);
+        // `EventSink` is a plain (non-async) trait so it stays object-safe
+        // for `Arc<dyn EventSink>` (Task 20); `apply_tray` itself is async
+        // now that it makes a `blocking` hop, so the call is spawned onto
+        // the same runtime. The driver's own call sites are already inside
+        // an async fn (`run_cycle`), so spawning here never blocks them.
+        let app = self.app.clone();
+        let core = Arc::clone(&self.core);
+        tauri::async_runtime::spawn(async move {
+            apply_tray(&app, &core).await;
+        });
     }
 }
 
@@ -512,5 +544,21 @@ mod tests {
     fn close_to_tray_decides_whether_a_window_close_hides_or_quits() {
         assert!(should_hide_on_close(true));
         assert!(!should_hide_on_close(false));
+    }
+
+    #[test]
+    fn an_unreadable_halt_flag_fails_closed_to_halted() {
+        let err = crate::error::AppError::Db("boom".to_string());
+        assert!(halted_fail_closed(Err(err)));
+    }
+
+    #[test]
+    fn a_present_halt_value_is_halted() {
+        assert!(halted_fail_closed(Ok(Some("guard_tripped:1".to_string()))));
+    }
+
+    #[test]
+    fn no_halt_value_is_not_halted() {
+        assert!(!halted_fail_closed(Ok(None)));
     }
 }
