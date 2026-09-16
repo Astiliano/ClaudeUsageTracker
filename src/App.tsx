@@ -11,7 +11,7 @@ import "./styles.css";
 
 export default function App(): JSX.Element {
   const { dashboard, history, now, error, refetch } = useDashboard();
-  const { prefs } = usePrefs(); // `update` joins in Task 8
+  const { prefs, update } = usePrefs();
   const [showSettings, setShowSettings] = useState(false);
   const [failureId, setFailureId] = useState<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -50,12 +50,13 @@ export default function App(): JSX.Element {
           onChanged={refetch}
           onError={showError}
         />
-        {/* Task 7 state: AccountsTable and Settings keep their CURRENT props.
-            Task 8 replaces this AccountsTable call, Task 11 the Settings call. */}
+        {/* Settings keeps its CURRENT props; Task 11 replaces this call. */}
         <AccountsTable
           rows={dashboard.accounts}
           history={history}
           now={now}
+          columnOrder={prefs.columnOrder}
+          onColumnOrder={(columnOrder) => update({ columnOrder })}
           onChanged={refetch}
           onError={showError}
           onShowFailure={(id) => setFailureId(id)}

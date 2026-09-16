@@ -1,278 +1,195 @@
-import { invoke } from "@tauri-apps/api/core";
-import type { JSX } from "react";
-import { useEffect, useState } from "react";
-import { formatAgo, formatCountdown } from "../lib/format";
-import { statusPill } from "../lib/pill";
+import type { JSX, PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState } from "react";
+import { backend } from "../lib/backend";
+import { COLUMNS, type ColumnKey, gridTemplate } from "../lib/columns";
+import { type Rect, colDragTarget, colLineX, rowDragTarget } from "../lib/drag";
 import { moveItem } from "../lib/reorder";
-import type { AccountRow, HistoryPoint } from "../lib/types";
-import { Sparkline } from "./Sparkline";
+import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
+import { AccountRow } from "./AccountRow";
+
+export interface RowDragState { index: number; target: number; startY: number; dy: number }
+export interface ColDragState { index: number; target: number; startX: number; dx: number; lineX: number }
 
 interface Props {
-  rows: AccountRow[];
+  rows: AccountRowData[];
   history: Record<string, HistoryPoint[]>;
   now: number;
+  columnOrder: ColumnKey[];
+  onColumnOrder: (order: ColumnKey[]) => void;
   onChanged: () => void;
   onError: (message: string) => void;
   onShowFailure: (snapshotId: number) => void;
 }
 
-function Bar({ pct }: { pct: number }): JSX.Element {
-  const tone = pct >= 90 ? "red" : pct >= 70 ? "amber" : "green";
-  return (
-    <div className="bar" title={`${pct}%`}>
-      <div className={`bar-fill bar-${tone}`} style={{ width: `${pct}%` }} />
-      <span className="bar-label">{pct}%</span>
-    </div>
-  );
+const DEFAULT_ROW_H = 66;
+
+function beginBodyDrag(): void {
+  document.body.style.cursor = "grabbing";
+  document.body.style.userSelect = "none";
+}
+function endBodyDrag(): void {
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
 }
 
-export function AccountsTable({
-  rows,
-  history,
-  now,
-  onChanged,
-  onError,
-  onShowFailure,
-}: Props): JSX.Element {
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [draftLabel, setDraftLabel] = useState<string>("");
-  // Local, reorderable view of `rows`. Kept separate so a drag or a Move
-  // up/down click can show its result immediately (optimistic reorder)
-  // instead of waiting for the debounced dashboard refetch; re-synced from
-  // `rows` whenever the backend's own order changes.
-  const [order, setOrder] = useState<AccountRow[]>(rows);
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
+export function AccountsTable({ rows, history, now, columnOrder, onColumnOrder, onChanged, onError, onShowFailure }: Props): JSX.Element {
+  const [order, setOrder] = useState<AccountRowData[]>(rows);
+  const [drag, setDrag] = useState<RowDragState | null>(null);
+  const [colDrag, setColDrag] = useState<ColDragState | null>(null);
+  const [chartId, setChartId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
-  useEffect(() => {
-    setOrder(rows);
-  }, [rows]);
+  // Refs mirror the values the stable window handlers need to read.
+  const orderRef = useRef(order);
+  const columnOrderRef = useRef(columnOrder);
+  const dragRef = useRef<RowDragState | null>(null);
+  const colDragRef = useRef<ColDragState | null>(null);
+  const rowH = useRef(DEFAULT_ROW_H);
+  const colRects = useRef<Rect[]>([]);
+  const wrapLeft = useRef(0);
+  const onColumnOrderRef = useRef(onColumnOrder);
 
-  const call = async (
-    command: string,
-    args: Record<string, unknown>,
-  ): Promise<void> => {
-    try {
-      await invoke(command, args);
-      onChanged();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  useEffect(() => { setOrder(rows); }, [rows]);
+  useEffect(() => { orderRef.current = order; }, [order]);
+  useEffect(() => { columnOrderRef.current = columnOrder; }, [columnOrder]);
+  useEffect(() => { onColumnOrderRef.current = onColumnOrder; }, [onColumnOrder]);
 
-  const commitOrder = async (next: AccountRow[]): Promise<void> => {
+  const commitOrder = async (next: AccountRowData[]): Promise<void> => {
     setOrder(next);
     try {
-      await invoke("reorder_accounts", { ids: next.map((r) => r.account.id) });
+      await backend().invoke("reorder_accounts", { ids: next.map((r) => r.account.id) });
       onChanged();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
-      // The optimistic order may not match what got persisted; resync.
-      onChanged();
+      onChanged(); // optimistic order may not match what was persisted; resync
     }
   };
+  const commitOrderRef = useRef(commitOrder);
+  useEffect(() => { commitOrderRef.current = commitOrder; });
 
-  const handleDrop = (dropIndex: number): void => {
-    const from = dragIndex;
-    setDragIndex(null);
-    setOverIndex(null);
-    if (from === null || from === dropIndex) {
-      return;
-    }
-    void commitOrder(moveItem(order, from, dropIndex));
+  /* ---- stable window handlers (created once) ---- */
+  const handlers = useRef({
+    rowMove: (e: PointerEvent): void => {
+      const d = dragRef.current;
+      if (d === null) return;
+      const dy = e.clientY - d.startY;
+      const target = rowDragTarget(d.index, dy, rowH.current, orderRef.current.length);
+      dragRef.current = { ...d, dy, target };
+      setDrag(dragRef.current);
+    },
+    rowUp: (): void => {
+      const d = dragRef.current;
+      detachRow();
+      dragRef.current = null;
+      setDrag(null);
+      if (d !== null && d.target !== d.index) {
+        void commitOrderRef.current(moveItem(orderRef.current, d.index, d.target));
+      }
+    },
+    colMove: (e: PointerEvent): void => {
+      const c = colDragRef.current;
+      if (c === null) return;
+      const target = colDragTarget(colRects.current, e.clientX);
+      colDragRef.current = { ...c, dx: e.clientX - c.startX, target, lineX: colLineX(colRects.current, target, c.index, wrapLeft.current) };
+      setColDrag(colDragRef.current);
+    },
+    colUp: (): void => {
+      const c = colDragRef.current;
+      detachCol();
+      colDragRef.current = null;
+      setColDrag(null);
+      if (c !== null && c.target !== c.index) {
+        onColumnOrderRef.current(moveItem(columnOrderRef.current, c.index, c.target));
+      }
+    },
+  });
+
+  function detachRow(): void {
+    window.removeEventListener("pointermove", handlers.current.rowMove);
+    window.removeEventListener("pointerup", handlers.current.rowUp);
+    endBodyDrag();
+  }
+  function detachCol(): void {
+    window.removeEventListener("pointermove", handlers.current.colMove);
+    window.removeEventListener("pointerup", handlers.current.colUp);
+    endBodyDrag();
+  }
+  useEffect(() => () => { detachRow(); detachCol(); }, []);
+
+  const startRowDrag = (e: ReactPointerEvent<HTMLDivElement>, index: number): void => {
+    e.preventDefault();
+    const grid = e.currentTarget.parentElement;
+    rowH.current = grid !== null ? grid.offsetHeight + 1 : DEFAULT_ROW_H;
+    beginBodyDrag();
+    setChartId(null);
+    setEditingId(null);
+    dragRef.current = { index, target: index, startY: e.clientY, dy: 0 };
+    setDrag(dragRef.current);
+    window.addEventListener("pointermove", handlers.current.rowMove);
+    window.addEventListener("pointerup", handlers.current.rowUp);
   };
 
-  const moveByKeyboard = (index: number, delta: number): void => {
+  const startColDrag = (e: ReactPointerEvent<HTMLDivElement>, index: number): void => {
+    e.preventDefault();
+    const head = e.currentTarget.parentElement;
+    if (head === null) return;
+    colRects.current = Array.from(head.querySelectorAll<HTMLElement>("[data-colcell]")).map((el) => {
+      const r = el.getBoundingClientRect();
+      return { left: r.left, right: r.right, width: r.width };
+    });
+    wrapLeft.current = (head.parentElement ?? head).getBoundingClientRect().left;
+    beginBodyDrag();
+    setChartId(null);
+    setEditingId(null);
+    colDragRef.current = { index, target: index, startX: e.clientX, dx: 0, lineX: colLineX(colRects.current, index, index, wrapLeft.current) };
+    setColDrag(colDragRef.current);
+    window.addEventListener("pointermove", handlers.current.colMove);
+    window.addEventListener("pointerup", handlers.current.colUp);
+  };
+
+  const moveBy = (index: number, delta: number): void => {
     const target = index + delta;
-    if (target < 0 || target >= order.length) {
-      return;
-    }
+    if (target < 0 || target >= order.length) return;
     void commitOrder(moveItem(order, index, target));
   };
 
+  const gridCols = gridTemplate(columnOrder);
   return (
-    <table className="accounts">
-      <thead>
-        <tr>
-          <th aria-hidden="true"></th>
-          <th>Account</th>
-          <th>Session</th>
-          <th>Week (all)</th>
-          <th>Per model</th>
-          <th>Last 7 days</th>
-          <th>Updated</th>
-          <th>Status</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {order.map((row, idx) => {
-          const pill = statusPill(row, now);
-          const session = row.latest?.session ?? null;
-          const week = row.latest?.week_all ?? null;
-          const models = row.latest?.week_models ?? [];
-          const rowClasses = [
-            row.account.enabled ? "" : "row-off",
-            dragIndex === idx ? "row-dragging" : "",
-            overIndex === idx && dragIndex !== null && dragIndex !== idx
-              ? "row-drag-over"
-              : "",
-          ]
-            .filter(Boolean)
-            .join(" ");
-          return (
-            <tr
-              key={row.account.id}
-              className={rowClasses}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData("text/plain", row.account.id);
-                e.dataTransfer.effectAllowed = "move";
-                setDragIndex(idx);
-              }}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                setOverIndex(idx);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                handleDrop(idx);
-              }}
-              onDragEnd={() => {
-                setDragIndex(null);
-                setOverIndex(null);
-              }}
-            >
-              <td className="grip-cell">
-                <span className="grip" aria-label="Drag to reorder" title="Drag to reorder">
-                  ⋮⋮
-                </span>
-              </td>
-              <td>
-                {renaming === row.account.id ? (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      setRenaming(null);
-                      void call("update_account", {
-                        id: row.account.id,
-                        label: draftLabel,
-                      });
-                    }}
-                  >
-                    <input
-                      value={draftLabel}
-                      onChange={(e) => setDraftLabel(e.target.value)}
-                      autoFocus
-                    />
-                  </form>
-                ) : (
-                  <span title={row.account.config_dir}>
-                    {row.account.label}
-                    {row.account.is_default && <em className="tag">default</em>}
-                  </span>
-                )}
-              </td>
-              <td>
-                {session !== null ? (
-                  <>
-                    <Bar pct={session.pct} />
-                    <div className="sub">
-                      {formatCountdown(session.resets_at, now)}
-                    </div>
-                  </>
-                ) : (
-                  "—"
-                )}
-              </td>
-              <td>{week !== null ? <Bar pct={week.pct} /> : "—"}</td>
-              <td>
-                {models.length === 0
-                  ? "—"
-                  : models.map((m) => (
-                      <span key={m.label} className="model">
-                        {m.label} {m.pct}%
-                      </span>
-                    ))}
-              </td>
-              <td>
-                <Sparkline points={history[row.account.id] ?? []} />
-              </td>
-              <td>{formatAgo(row.latest?.taken_at ?? null, now)}</td>
-              <td>
-                <button
-                  type="button"
-                  className={`pill pill-${pill.kind} pill-tone-${pill.tone}`}
-                  title={pill.tooltip}
-                  disabled={pill.snapshotId === undefined || pill.outcome === "ok"}
-                  onClick={() => {
-                    if (pill.snapshotId !== undefined) {
-                      onShowFailure(pill.snapshotId);
-                    }
-                  }}
-                >
-                  {pill.label}
-                </button>
-              </td>
-              <td className="actions">
-                <button
-                  type="button"
-                  className="move-btn"
-                  aria-label="Move up"
-                  title="Move up"
-                  disabled={idx === 0}
-                  onClick={() => moveByKeyboard(idx, -1)}
-                >
-                  ▲
-                </button>
-                <button
-                  type="button"
-                  className="move-btn"
-                  aria-label="Move down"
-                  title="Move down"
-                  disabled={idx === order.length - 1}
-                  onClick={() => moveByKeyboard(idx, 1)}
-                >
-                  ▼
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void call("update_account", {
-                      id: row.account.id,
-                      enabled: !row.account.enabled,
-                    })
-                  }
-                >
-                  {row.account.enabled ? "Disable" : "Enable"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRenaming(row.account.id);
-                    setDraftLabel(row.account.label);
-                  }}
-                >
-                  Rename
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void call("open_login", { id: row.account.id })}
-                >
-                  Log in
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void call("remove_account", { id: row.account.id })}
-                >
-                  Remove
-                </button>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <section className="panel" aria-label="Accounts">
+      <div className="thead-wrap">
+        <div className="thead" style={{ gridTemplateColumns: gridCols }}>
+          <div />
+          {columnOrder.map((key, ci) => {
+            const dragging = colDrag !== null && colDrag.index === ci;
+            const cls = ["th", dragging ? "th-dragging" : "", colDrag !== null && !dragging ? "th-dimmed" : ""].filter(Boolean).join(" ");
+            return (
+              <div key={key} data-colcell="1" className={cls} title="Drag to move column"
+                style={{ transform: dragging ? `translateX(${colDrag.dx}px)` : undefined }}
+                onPointerDown={(e) => startColDrag(e, ci)}>
+                {COLUMNS[key].label}
+              </div>
+            );
+          })}
+          <div />
+        </div>
+        {colDrag !== null && <div className="col-line" style={{ left: `${colDrag.lineX}px` }} />}
+      </div>
+      <div className="rows">
+        {drag !== null && (
+          <div className="row-placeholder" style={{ top: `${drag.target * rowH.current + 6}px`, height: `${rowH.current - 12}px` }} />
+        )}
+        {order.map((row, idx) => (
+          <AccountRow key={row.account.id} row={row} index={idx} total={order.length}
+            points={history[row.account.id] ?? []} now={now} columnOrder={columnOrder} gridCols={gridCols}
+            hotColumn={colDrag?.index ?? null} drag={drag} rowH={rowH.current}
+            chartOpen={chartId === row.account.id} editing={editingId === row.account.id}
+            onHandleDown={(e) => startRowDrag(e, idx)}
+            onToggleChart={() => { setEditingId(null); setChartId((c) => (c === row.account.id ? null : row.account.id)); }}
+            onToggleEdit={() => { setChartId(null); setEditingId((c) => (c === row.account.id ? null : row.account.id)); }}
+            onMove={(delta) => moveBy(idx, delta)}
+            onChanged={onChanged} onError={onError} onShowFailure={onShowFailure} />
+        ))}
+      </div>
+    </section>
   );
 }

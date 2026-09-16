@@ -138,6 +138,8 @@ input, select, button { font-family: inherit; }
   padding: 6px 2px; cursor: grab; border-radius: 5px;
 }
 .grip:hover { background: #1b2024; }
+.grip-row { display: flex; gap: 3px; }
+.grip-dot { width: 3px; height: 3px; border-radius: 50%; background: #626b72; }
 .cell { min-width: 0; border-radius: 6px; }
 .cell-hot { background: rgba(122, 162, 247, 0.07); }
 
@@ -315,50 +317,6 @@ button.pill { cursor: pointer; background: transparent; }
 /* ---- loading state ---- */
 .loading { font-family: var(--mono); font-size: 12px; color: var(--muted); padding: 28px; }
 
-/* legacy until Task 8/11 */
-.accounts { width: 100%; border-collapse: collapse; }
-.accounts th,
-.accounts td {
-  text-align: left;
-  padding: 8px;
-  border-bottom: 1px solid var(--line);
-  vertical-align: top;
-}
-.row-off { opacity: 0.55; }
-.grip-cell { width: 20px; text-align: center; cursor: grab; }
-.accounts tr[draggable="true"] { cursor: grab; }
-.row-dragging { opacity: 0.5; cursor: grabbing; }
-.row-drag-over { outline: 2px dashed var(--muted); outline-offset: -2px; }
-.move-btn { font-size: 10px; line-height: 1; padding: 2px 6px; }
-
-.bar {
-  position: relative;
-  width: 110px;
-  height: 14px;
-  background: var(--line);
-  border-radius: 7px;
-  overflow: hidden;
-}
-.bar-fill { height: 100%; }
-.bar-green { background: var(--live); }
-.bar-amber { background: var(--warn); }
-.bar-red { background: var(--crit); }
-.bar-label {
-  position: absolute;
-  inset: 0;
-  font-size: 11px;
-  text-align: center;
-  line-height: 14px;
-  color: var(--fg-strong);
-}
-
-.sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
-
-.model { display: inline-block; margin-right: 8px; white-space: nowrap; }
-
-.sparkline path { stroke: var(--live); }
-.sparkline-empty { color: var(--muted); }
-
-.actions button { margin-right: 4px; }
-
+/* legacy until Task 11 */
 .settings label { display: flex; flex-direction: column; gap: 4px; }
+.sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
