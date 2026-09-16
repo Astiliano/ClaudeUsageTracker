@@ -4,6 +4,7 @@ pub mod paths;
 pub mod process;
 pub mod scheduler;
 pub mod store;
+pub mod tray;
 pub mod usage;
 
 /// Entry point called by `main.rs`. Fully wired in Task 20.
