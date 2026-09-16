@@ -307,8 +307,10 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
      because an envelope the app cannot classify is exactly the case where
      it cannot prove no turn was spent. The counter is
      `Backoff.unexpected_envelope_streak: u8` in `machine.rs` (§6.5),
-     incremented by `record()` for that error kind and reset to 0 by any
-     other outcome; the escalation decision is made in `record()`, which
+     incremented by `record()` for that error kind and reset to 0 only by a
+     non-strike outcome in `record()` — **never** by the backoff resets
+     that manual refresh, account edit or a settings change perform (the
+     streak is guard evidence; a Refresh click must not erase it); the escalation decision is made in `record()`, which
      returns `Escalate` so the cycle task performs the trip sequence below.
   On a trip, in this order: (1) persist the **global halt**
   (`settings.polling_halted = "guard_tripped:<ts>"`) — the flag is the safety
