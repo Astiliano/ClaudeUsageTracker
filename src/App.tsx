@@ -1,5 +1,5 @@
 import type { CSSProperties, JSX } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AccountsTable } from "./components/AccountsTable";
 import { FailureDetail } from "./components/FailureDetail";
 import { Header } from "./components/Header";
@@ -17,11 +17,13 @@ export default function App(): JSX.Element {
   const [toast, setToast] = useState<string | null>(null);
 
   const toastTimer = useRef<number | null>(null);
-  const showError = (message: string): void => {
+  // Stable identity: consumers (e.g. Settings) key a load effect off this
+  // callback, and App re-renders every second from the `now` tick.
+  const showError = useCallback((message: string): void => {
     if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     setToast(message);
     toastTimer.current = window.setTimeout(() => setToast(null), 6000);
-  };
+  }, []);
   useEffect(() => () => { if (toastTimer.current !== null) window.clearTimeout(toastTimer.current); }, []);
 
   const font = FONTS[prefs.font];
@@ -50,7 +52,6 @@ export default function App(): JSX.Element {
           onChanged={refetch}
           onError={showError}
         />
-        {/* Settings keeps its CURRENT props; Task 11 replaces this call. */}
         <AccountsTable
           rows={dashboard.accounts}
           history={history}
@@ -65,6 +66,8 @@ export default function App(): JSX.Element {
         {showSettings && (
           <Settings
             binary={dashboard.binary}
+            prefs={prefs}
+            onPrefs={update}
             onClose={() => setShowSettings(false)}
             onChanged={refetch}
             onError={showError}

@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
-import type { JSX } from "react";
+import type { JSX, KeyboardEvent } from "react";
 import { useEffect, useState } from "react";
+import { backend } from "../lib/backend";
 import type { RawSnapshot } from "../lib/types";
 
 interface Props {
@@ -15,7 +15,7 @@ export function FailureDetail({ snapshotId, onClose }: Props): JSX.Element {
   useEffect(() => {
     const load = async (): Promise<void> => {
       try {
-        setData(await invoke<RawSnapshot>("get_snapshot_raw", { snapshotId }));
+        setData(await backend().invoke<RawSnapshot>("get_snapshot_raw", { snapshotId }));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -23,21 +23,31 @@ export function FailureDetail({ snapshotId, onClose }: Props): JSX.Element {
     void load();
   }, [snapshotId]);
 
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === "Escape") onClose();
+  };
+
   return (
-    <div className="modal" role="dialog" aria-modal="true">
+    <div
+      className="modal"
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+    >
       <div className="modal-body">
-        <h2>Poll failure</h2>
+        <h2 className="settings-title">Poll failure</h2>
         {error !== null && <p className="error">{error}</p>}
         {data !== null && (
           <>
-            <h3>Error</h3>
+            <h3 className="section-label">Error</h3>
             <pre>{data.error ?? "(none recorded)"}</pre>
-            <h3>Raw output</h3>
+            <h3 className="section-label">Raw output</h3>
             <pre className="raw">{data.raw ?? "(no output captured)"}</pre>
           </>
         )}
-        <button type="button" onClick={onClose}>
-          Close
+        <button type="button" className="btn btn-sm btn-ghost" autoFocus onClick={onClose}>
+          close
         </button>
       </div>
     </div>
