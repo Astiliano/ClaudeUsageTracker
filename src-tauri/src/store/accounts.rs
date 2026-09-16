@@ -32,6 +32,105 @@ fn label_for(dir: &Path) -> String {
 const SELECT_COLS: &str =
     "id, label, config_dir, enabled, disabled_reason, is_default, created_at";
 
+/// True for a UNIQUE or PRIMARY KEY constraint violation, which is the
+/// signature of a raced insert against the `accounts.config_dir` UNIQUE
+/// index (see `insert_account`). Any other SQLite error is left alone.
+fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                extended_code,
+            },
+            _,
+        ) if *extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            || *extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+    )
+}
+
+/// Maps an `INSERT` failure to `AppError::Duplicate` when it was caused by
+/// the `config_dir` UNIQUE constraint, so a raced insert reports the same
+/// error as the up-front existence check. Kept local to this module rather
+/// than folded into `error.rs`'s generic `From<rusqlite::Error>`, which has
+/// no way to distinguish a duplicate account from any other constraint
+/// failure.
+fn map_unique_violation(e: rusqlite::Error, canonical_str: &str) -> AppError {
+    if is_unique_violation(&e) {
+        AppError::Duplicate(format!("already tracked: {canonical_str}"))
+    } else {
+        AppError::from(e)
+    }
+}
+
+/// Validates and canonicalises `config_dir`, and builds the `Account` row
+/// (with a fresh id) without touching the database. Split out of
+/// `add_account` so callers that need to insert several rows under one
+/// `with_conn` closure (`seed_accounts_if_empty`) can build each row first
+/// and let `insert_account` do the atomic check-and-insert.
+fn build_account(
+    config_dir: &Path,
+    enabled: bool,
+    disabled_reason: Option<DisabledReason>,
+    is_default: bool,
+    now: i64,
+) -> AppResult<(Account, String)> {
+    if !config_dir.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "no such directory: {}",
+            config_dir.display()
+        )));
+    }
+    let canonical =
+        dunce::canonicalize(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
+    let canonical_str = canonical.to_string_lossy().to_string();
+    let account = Account {
+        id: uuid::Uuid::new_v4().to_string(),
+        label: label_for(&canonical),
+        config_dir: canonical,
+        enabled,
+        disabled_reason,
+        is_default,
+        created_at: now,
+    };
+    Ok((account, canonical_str))
+}
+
+/// Existence check plus `INSERT`, run against a single already-locked
+/// `Connection` so no other call on this `Store` can interleave between the
+/// two (the `Mutex<Connection>` in `with_conn` is held for the whole
+/// closure). The UNIQUE constraint on `config_dir` is the backstop: even if
+/// this check somehow raced (e.g. a future refactor calls this per-row
+/// inside a shared transaction with yielding), the mapped `INSERT` failure
+/// still reports `duplicate`, never a bare `db` error.
+fn insert_account(conn: &rusqlite::Connection, account: &Account, canonical_str: &str) -> AppResult<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM accounts WHERE config_dir = ?1",
+        params![canonical_str],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Err(AppError::Duplicate(format!(
+            "already tracked: {canonical_str}"
+        )));
+    }
+    conn.execute(
+        "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            account.id,
+            account.label,
+            canonical_str,
+            i64::from(account.enabled),
+            account.disabled_reason.map(|r| r.as_str()),
+            i64::from(account.is_default),
+            account.created_at
+        ],
+    )
+    .map_err(|e| map_unique_violation(e, canonical_str))?;
+    Ok(())
+}
+
 impl Store {
     pub fn list_accounts(&self) -> AppResult<Vec<Account>> {
         self.with_conn(|c| {
@@ -66,7 +165,10 @@ impl Store {
     }
 
     /// Canonicalises, rejects a missing directory (`not_found`) and a path
-    /// already tracked (`duplicate`).
+    /// already tracked (`duplicate`). The existence check and the `INSERT`
+    /// run inside a single `with_conn` closure so the `Mutex<Connection>`
+    /// serialises them against any other call on this `Store` — see
+    /// `insert_account`.
     pub fn add_account(
         &self,
         config_dir: &Path,
@@ -75,56 +177,9 @@ impl Store {
         is_default: bool,
         now: i64,
     ) -> AppResult<Account> {
-        if !config_dir.is_dir() {
-            return Err(AppError::NotFound(format!(
-                "no such directory: {}",
-                config_dir.display()
-            )));
-        }
-        let canonical = dunce::canonicalize(config_dir)
-            .unwrap_or_else(|_| config_dir.to_path_buf());
-        let canonical_str = canonical.to_string_lossy().to_string();
-
-        let exists: i64 = self.with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM accounts WHERE config_dir = ?1",
-                params![canonical_str],
-                |r| r.get(0),
-            )?)
-        })?;
-        if exists > 0 {
-            return Err(AppError::Duplicate(format!(
-                "already tracked: {canonical_str}"
-            )));
-        }
-
-        let account = Account {
-            id: uuid::Uuid::new_v4().to_string(),
-            label: label_for(&canonical),
-            config_dir: canonical,
-            enabled,
-            disabled_reason,
-            is_default,
-            created_at: now,
-        };
-
-        self.with_conn(|c| {
-            c.execute(
-                "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    account.id,
-                    account.label,
-                    canonical_str,
-                    i64::from(account.enabled),
-                    account.disabled_reason.map(|r| r.as_str()),
-                    i64::from(account.is_default),
-                    account.created_at
-                ],
-            )?;
-            Ok(())
-        })?;
-
+        let (account, canonical_str) =
+            build_account(config_dir, enabled, disabled_reason, is_default, now)?;
+        self.with_conn(|c| insert_account(c, &account, &canonical_str))?;
         Ok(account)
     }
 
@@ -183,31 +238,39 @@ impl Store {
         Ok(())
     }
 
-    /// Spec 6.1: first start seeds every candidate **enabled**.
+    /// Spec 6.1: first start seeds every candidate **enabled**. The
+    /// emptiness check and every insert run inside one `with_conn` closure
+    /// (one `Mutex<Connection>` hold) so a concurrent `add_account` or
+    /// `seed_accounts_if_empty` call can't interleave and double-seed.
     pub fn seed_accounts_if_empty(
         &self,
         candidates: &[Candidate],
         default_dir: &Path,
         now: i64,
     ) -> AppResult<usize> {
-        let existing: i64 =
-            self.with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?))?;
-        if existing > 0 {
-            return Ok(0);
-        }
         let default_canonical =
             dunce::canonicalize(default_dir).unwrap_or_else(|_| default_dir.to_path_buf());
 
-        let mut added = 0usize;
-        for c in candidates {
-            let is_default = c.config_dir == default_canonical;
-            match self.add_account(&c.config_dir, true, None, is_default, now) {
-                Ok(_) => added += 1,
-                Err(AppError::Duplicate(_)) => {}
-                Err(e) => return Err(e),
+        self.with_conn(|c| {
+            let existing: i64 =
+                c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
+            if existing > 0 {
+                return Ok(0);
             }
-        }
-        Ok(added)
+
+            let mut added = 0usize;
+            for cand in candidates {
+                let (mut account, canonical_str) =
+                    build_account(&cand.config_dir, true, None, false, now)?;
+                account.is_default = account.config_dir == default_canonical;
+                match insert_account(c, &account, &canonical_str) {
+                    Ok(()) => added += 1,
+                    Err(AppError::Duplicate(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(added)
+        })
     }
 
     /// Spec 6.1: a rescan adds new candidates **disabled** (reason `user`).
@@ -309,6 +372,36 @@ mod tests {
             .add_account(&dir, true, None, false, NOW)
             .expect_err("must reject");
         assert_eq!(err.code(), "duplicate");
+    }
+
+    #[test]
+    fn unique_constraint_violations_map_to_duplicate_but_other_codes_dont() {
+        fn synth(extended_code: i32) -> rusqlite::Error {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::ConstraintViolation,
+                    extended_code,
+                },
+                None,
+            )
+        }
+
+        assert!(matches!(
+            map_unique_violation(synth(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE), "x"),
+            AppError::Duplicate(_)
+        ));
+        assert!(matches!(
+            map_unique_violation(synth(rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY), "x"),
+            AppError::Duplicate(_)
+        ));
+        assert!(!matches!(
+            map_unique_violation(synth(rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL), "x"),
+            AppError::Duplicate(_)
+        ));
+        assert!(!matches!(
+            map_unique_violation(rusqlite::Error::QueryReturnedNoRows, "x"),
+            AppError::Duplicate(_)
+        ));
     }
 
     #[test]
