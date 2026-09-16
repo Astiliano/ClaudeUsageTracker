@@ -141,8 +141,15 @@ mod tests {
         let handle = init_logging(&dir, "info").expect("init");
 
         tracing::info!(probe = "hello", "startup probe");
+        // Still at `info`: this debug-level line must be filtered out, not
+        // merely unread — it proves the filter is actually gating, not a
+        // no-op that happens to let everything through.
+        tracing::debug!(probe = "before", "debug before switch");
         handle.set_level("debug").expect("raise level");
-        tracing::debug!(probe = "hello", "debug probe");
+        // After raising the level: this debug-level line must now be
+        // admitted, proving `reload()` inside `set_level` really took
+        // effect rather than being a no-op.
+        tracing::debug!(probe = "after", "debug after switch");
 
         // The reload handle keeps rejecting unknown levels after a real
         // subscriber is installed.
@@ -185,5 +192,26 @@ mod tests {
         assert_eq!(value["level"], "INFO");
         assert_eq!(value["fields"]["message"], "startup probe");
         assert_eq!(value["fields"]["probe"], "hello");
+
+        // The level filter must actually gate output, not just exist: the
+        // pre-switch debug line was below the `info` threshold and must
+        // never reach the file.
+        assert!(
+            !contents.contains("debug before switch"),
+            "a debug line emitted before raising the level must be filtered out, got:\n{contents}"
+        );
+
+        // The post-switch debug line proves `set_level`'s `reload()` call
+        // took effect: it was emitted after raising the level to `debug`
+        // and must be present, well-formed JSON, at the DEBUG level.
+        let after_line = contents
+            .lines()
+            .find(|line| line.contains("debug after switch"))
+            .expect("debug line emitted after raising the level must be present");
+        let after_value: serde_json::Value =
+            serde_json::from_str(after_line).expect("log line is a JSON object");
+        assert_eq!(after_value["level"], "DEBUG");
+        assert_eq!(after_value["fields"]["message"], "debug after switch");
+        assert_eq!(after_value["fields"]["probe"], "after");
     }
 }
