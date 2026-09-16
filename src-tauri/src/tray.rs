@@ -104,6 +104,178 @@ pub fn tray_state(latest: &[(Account, Option<SnapshotDto>)], halted: bool) -> (L
     (level, tooltip)
 }
 
+pub const MENU_OPEN: &str = "open";
+pub const MENU_REFRESH: &str = "refresh_now";
+pub const MENU_LOGS: &str = "open_log_folder";
+pub const MENU_QUIT: &str = "quit";
+
+/// Icons are drawn rather than shipped as assets, so the five states stay in
+/// sync with `Level` and there is nothing to keep in a bundle.
+pub fn level_rgb(level: Level) -> [u8; 3] {
+    match level {
+        Level::Halted => [0x8B, 0x1A, 0x1A],
+        Level::Grey => [0x8A, 0x8A, 0x8A],
+        Level::Green => [0x2E, 0xA0, 0x43],
+        Level::Amber => [0xD2, 0x96, 0x22],
+        Level::Red => [0xD7, 0x33, 0x33],
+    }
+}
+
+/// A filled circle in the level colour, plus a small opaque badge in the
+/// top-right quadrant for `Halted` so the halted state is distinguishable at
+/// tray size even in monochrome.
+pub fn icon_rgba(level: Level, size: u32) -> Vec<u8> {
+    let rgb = level_rgb(level);
+    let mut buf = vec![0u8; (size * size * 4) as usize];
+    let centre = size as f32 / 2.0;
+    let radius = centre - 1.0;
+    let badge_centre = (size as f32 * 0.8, size as f32 * 0.2);
+    let badge_radius = size as f32 * 0.22;
+
+    for y in 0..size {
+        for x in 0..size {
+            let idx = ((y * size + x) * 4) as usize;
+            let dx = x as f32 + 0.5 - centre;
+            let dy = y as f32 + 0.5 - centre;
+
+            let bdx = x as f32 + 0.5 - badge_centre.0;
+            let bdy = y as f32 + 0.5 - badge_centre.1;
+            let in_badge_slot = bdx * bdx + bdy * bdy <= badge_radius * badge_radius;
+            // The badge slot is cut out of the circle for every level, not
+            // only `Halted`: otherwise the circle's own fill bleeds into the
+            // slot for the other four levels and the badge stops being a
+            // reliable "this is Halted" signal.
+            let inside = dx * dx + dy * dy <= radius * radius && !in_badge_slot;
+            let in_badge = level == Level::Halted && in_badge_slot;
+
+            if in_badge {
+                buf[idx] = 0xFF;
+                buf[idx + 1] = 0xCC;
+                buf[idx + 2] = 0x00;
+                buf[idx + 3] = 255;
+            } else if inside {
+                buf[idx] = rgb[0];
+                buf[idx + 1] = rgb[1];
+                buf[idx + 2] = rgb[2];
+                buf[idx + 3] = 255;
+            }
+        }
+    }
+    buf
+}
+
+/// Window close hides to the tray unless the user turned that off.
+pub fn should_hide_on_close(close_to_tray: bool) -> bool {
+    close_to_tray
+}
+
+use tauri::image::Image;
+use tracing::warn;
+
+use crate::commands::Core;
+
+const TRAY_ICON_SIZE: u32 = 32;
+
+/// Recomputes the level and tooltip from the store and pushes them onto the
+/// tray icon. Called after each account's poll and on account/settings change.
+pub fn apply_tray(app: &tauri::AppHandle, core: &Core) {
+    let accounts = match core.store.list_accounts() {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(error = %e, "could not read accounts for the tray");
+            return;
+        }
+    };
+    let latest = core.store.latest_per_account().unwrap_or_default();
+    let halted = core
+        .store
+        .polling_halted()
+        .unwrap_or_default()
+        .is_some();
+
+    let rows: Vec<(Account, Option<SnapshotDto>)> = accounts
+        .into_iter()
+        .map(|a| {
+            let snap = latest.get(&a.id).cloned();
+            (a, snap)
+        })
+        .collect();
+
+    let (level, tooltip) = tray_state(&rows, halted);
+
+    let tray = match app.tray_by_id("main") {
+        Some(t) => t,
+        None => {
+            warn!("tray icon 'main' not found");
+            return;
+        }
+    };
+
+    let rgba = icon_rgba(level, TRAY_ICON_SIZE);
+    let image = Image::new_owned(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE);
+    if let Err(e) = tray.set_icon(Some(image)) {
+        warn!(error = %e, "could not set the tray icon");
+    }
+    if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
+        warn!(error = %e, "could not set the tray tooltip");
+    }
+}
+
+use serde::Serialize;
+use std::sync::Arc;
+use tauri::Emitter;
+
+use crate::scheduler::driver::EventSink;
+
+#[derive(Serialize, Clone)]
+struct AccountEvent<'a> {
+    account_id: &'a str,
+}
+
+#[derive(Serialize, Clone)]
+struct GateEvent<'a> {
+    gate: &'a str,
+}
+
+#[derive(Serialize, Clone)]
+struct StalledEvent {
+    at: i64,
+    cycle_age_ms: u64,
+}
+
+/// Events are refetch triggers only: the frontend ignores the payloads and
+/// re-reads state through commands. The payloads exist for logs and tests.
+pub struct TauriEvents {
+    app: tauri::AppHandle,
+    core: Arc<Core>,
+}
+
+impl TauriEvents {
+    pub fn new(app: tauri::AppHandle, core: Arc<Core>) -> TauriEvents {
+        TauriEvents { app, core }
+    }
+}
+
+impl EventSink for TauriEvents {
+    fn usage_updated(&self, account_id: &str) {
+        let _ = self.app.emit("usage:updated", AccountEvent { account_id });
+    }
+    fn cycle_finished(&self) {
+        let _ = self.app.emit("cycle:finished", ());
+    }
+    fn gate_changed(&self, gate: &str) {
+        let _ = self.app.emit("gate:changed", GateEvent { gate });
+    }
+    fn poller_stalled(&self, at: i64, cycle_age_ms: u64) {
+        let _ = self
+            .app
+            .emit("poller:stalled", StalledEvent { at, cycle_age_ms });
+    }
+    fn refresh_tray(&self) {
+        apply_tray(&self.app, &self.core);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +444,73 @@ mod tests {
         let (level, tooltip) = tray_state(&[], false);
         assert_eq!(level, Level::Grey);
         assert_eq!(tooltip, "no enabled accounts");
+    }
+
+    #[test]
+    fn menu_ids_are_stable_snake_case_strings() {
+        assert_eq!(MENU_OPEN, "open");
+        assert_eq!(MENU_REFRESH, "refresh_now");
+        assert_eq!(MENU_LOGS, "open_log_folder");
+        assert_eq!(MENU_QUIT, "quit");
+    }
+
+    #[test]
+    fn every_level_has_a_distinct_colour() {
+        let colours = [
+            level_rgb(Level::Halted),
+            level_rgb(Level::Grey),
+            level_rgb(Level::Green),
+            level_rgb(Level::Amber),
+            level_rgb(Level::Red),
+        ];
+        for (i, a) in colours.iter().enumerate() {
+            for (j, b) in colours.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "levels {i} and {j} must look different");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_icon_is_a_square_rgba_buffer() {
+        let size = 32u32;
+        let buf = icon_rgba(Level::Green, size);
+        assert_eq!(buf.len(), (size * size * 4) as usize);
+    }
+
+    #[test]
+    fn the_icon_centre_carries_the_level_colour_at_full_opacity() {
+        let size = 32u32;
+        let buf = icon_rgba(Level::Red, size);
+        let centre = ((size / 2 * size) + size / 2) as usize * 4;
+        assert_eq!(&buf[centre..centre + 3], &level_rgb(Level::Red));
+        assert_eq!(buf[centre + 3], 255);
+    }
+
+    #[test]
+    fn the_icon_corners_are_transparent() {
+        let size = 32u32;
+        let buf = icon_rgba(Level::Green, size);
+        assert_eq!(buf[3], 0, "top-left pixel must be transparent");
+        let last = ((size * size - 1) * 4 + 3) as usize;
+        assert_eq!(buf[last], 0, "bottom-right pixel must be transparent");
+    }
+
+    #[test]
+    fn the_halted_icon_carries_a_badge_the_others_do_not() {
+        let size = 32u32;
+        let halted = icon_rgba(Level::Halted, size);
+        let green = icon_rgba(Level::Green, size);
+        // The badge sits in the top-right quadrant.
+        let badge = ((size / 5 * size) + (size * 4 / 5)) as usize * 4;
+        assert_eq!(halted[badge + 3], 255, "the halted badge must be opaque");
+        assert_eq!(green[badge + 3], 0, "other levels must have no badge");
+    }
+
+    #[test]
+    fn close_to_tray_decides_whether_a_window_close_hides_or_quits() {
+        assert!(should_hide_on_close(true));
+        assert!(!should_hide_on_close(false));
     }
 }
