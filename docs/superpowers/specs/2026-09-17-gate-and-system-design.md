@@ -529,9 +529,11 @@ clears it; every other event stays a no-op.
 - ERROR: `system sample panicked {error, attempt}`; `system sampler stopped
   after repeated panics`.
 - DEBUG: `system sample {elapsed_ms, count, rss_bytes, cpu_pct, did_prime}`;
-  `presence skipped {reason}` for busy / already_active / check failed;
-  `trigger ignored: shutting down {trigger}`; `process check skipped:
-  shutting down`; the existing `decision skipped`
+  `presence skipped {reason}` for busy / already_active / no process
+  answer; `trigger ignored: shutting down {trigger}`; `process check
+  skipped {reason}` with reasons `shutting down` and `busy` (only
+  `probe_if_free` names why there is no answer; a failed hop stays the
+  WARN above); the existing `decision skipped`
   line now also covers `already_active`.
 - The existing `process gate check` DEBUG line is unchanged; which trigger
   spent it is one line above in `decision skipped` / `gate changed`.
