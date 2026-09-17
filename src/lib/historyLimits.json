@@ -1,0 +1,5 @@
+{
+  "minBucketMs": 60000,
+  "maxBuckets": 1000,
+  "maxRangeMs": 2592000000
+}

@@ -60,6 +60,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
             commands::get_history,
+            commands::get_history_models,
             commands::poll_now,
             commands::add_account,
             commands::update_account,
