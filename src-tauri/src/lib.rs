@@ -60,6 +60,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
+            commands::get_system,
             commands::get_history,
             commands::get_history_models,
             commands::poll_now,
@@ -239,6 +240,12 @@ pub fn run() {
                 Arc::clone(&pid_slot),
             );
             tauri::async_runtime::spawn(driver.run());
+            tauri::async_runtime::spawn(system::run_sampler(
+                Arc::clone(&core),
+                events,
+                pid_slot,
+                shutdown.clone(),
+            ));
 
             Ok(())
         })

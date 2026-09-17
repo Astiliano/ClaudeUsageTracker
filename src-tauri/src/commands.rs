@@ -161,6 +161,20 @@ pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
     })
 }
 
+/// What `get_system` hands the frontend.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SystemReport {
+    pub stats: Option<crate::system::SystemStats>,
+    pub stopped: bool,
+}
+
+/// Cheap; called on every `system:sampled`. Clones the slot and never
+/// touches the store.
+pub fn core_get_system(core: &Core) -> SystemReport {
+    let slot = lock_system(&core.system);
+    SystemReport { stats: slot.stats.clone(), stopped: slot.stopped }
+}
+
 /// Spec §3.1: every limit is checked here, never in the store. Errors name
 /// the argument and the bound so a mis-built request is diagnosable from
 /// the toast alone.
@@ -420,6 +434,14 @@ pub async fn get_dashboard(core: State<'_, SharedCore>) -> AppResult<Dashboard> 
 }
 
 #[tauri::command]
+pub async fn get_system(core: State<'_, SharedCore>) -> AppResult<SystemReport> {
+    // Mirrors `get_dashboard`'s shape, but takes no `blocking` hop: this
+    // one only clones a mutex-guarded slot and never touches the store.
+    let core = Arc::clone(&core);
+    Ok(core_get_system(&core))
+}
+
+#[tauri::command]
 pub async fn get_history(
     core: State<'_, SharedCore>,
     account_id: String,
@@ -618,6 +640,7 @@ mod tests {
     use crate::scheduler::machine::Gate;
     use crate::store::settings::UserSettings;
     use crate::store::{HistoryMetric, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS};
+    use crate::system::{ClaudeStats, SystemStats};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -651,6 +674,31 @@ mod tests {
             log_dir: tmp.path().join("logs"),
         });
         (tmp, core)
+    }
+
+    #[test]
+    fn core_get_system_reports_no_stats_before_the_first_sample_then_the_sample_then_stopped() {
+        let (_tmp, core) = core();
+
+        let report = core_get_system(&core);
+        assert_eq!(report.stats, None, "nothing has been sampled yet");
+        assert!(!report.stopped);
+
+        let stats = SystemStats {
+            sampled_at: 1_700_000_000_000,
+            mem_total_bytes: 32 * 1024 * 1024 * 1024,
+            claude: ClaudeStats { count: 2, rss_bytes: 1_200_000_000, cpu_pct: Some(3.5) },
+        };
+        lock_system(&core.system).stats = Some(stats.clone());
+
+        let report = core_get_system(&core);
+        assert_eq!(report.stats, Some(stats));
+        assert!(!report.stopped);
+
+        lock_system(&core.system).stopped = true;
+        let report = core_get_system(&core);
+        assert!(report.stopped, "a dead sampler must be distinguishable from a warming one");
+        assert!(report.stats.is_some(), "the last sample is kept for the stale rule");
     }
 
     /// Pretend the driver found a binary at its last check.
