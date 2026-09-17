@@ -2,21 +2,37 @@ import type { JSX } from "react";
 import { backend } from "../lib/backend";
 import { bannerFor } from "../lib/banner";
 import { errorMessage } from "../lib/errors";
-import { accountCountLabel, chipFor } from "../lib/present";
-import type { Dashboard } from "../lib/types";
+import { accountCountLabel, chipFor, countPlacement } from "../lib/present";
+import type { Dashboard, SystemReport } from "../lib/types";
+import { SystemLine } from "./SystemLine";
 
 interface Props {
   dashboard: Dashboard;
   settingsOpen: boolean;
   compact: boolean;
+  system: SystemReport | null;
+  systemError: string | null;
+  now: number;
   onToggleSettings: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
 }
 
-export function Header({ dashboard, settingsOpen, compact, onToggleSettings, onChanged, onError }: Props): JSX.Element {
+export function Header({
+  dashboard,
+  settingsOpen,
+  compact,
+  system,
+  systemError,
+  now,
+  onToggleSettings,
+  onChanged,
+  onError,
+}: Props): JSX.Element {
   const banner = bannerFor(dashboard);
-  const chip = chipFor(dashboard);
+  const count = system?.stats?.claude.count ?? null;
+  const placement = countPlacement(banner?.kind ?? "idle", compact);
+  const chip = chipFor(dashboard, placement === "chip" ? count : null);
 
   const run = async (command: string): Promise<void> => {
     try {
@@ -49,6 +65,12 @@ export function Header({ dashboard, settingsOpen, compact, onToggleSettings, onC
           </button>
         </div>
       </div>
+      <SystemLine
+        system={system}
+        error={systemError}
+        showCount={placement === "line"}
+        now={now}
+      />
       {banner !== null && banner.tone !== "info" && (
         <div className={`banner banner-${banner.tone}`} role="status">
           <span>{banner.text}</span>

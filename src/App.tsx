@@ -7,6 +7,7 @@ import { Header } from "./components/Header";
 import { Settings } from "./components/Settings";
 import { useDashboard } from "./hooks/useDashboard";
 import { usePrefs } from "./hooks/usePrefs";
+import { useSystem } from "./hooks/useSystem";
 import { useViewport } from "./hooks/useViewport";
 import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
@@ -17,6 +18,7 @@ import "./styles.css";
 
 export default function App(): JSX.Element {
   const { dashboard, history, now, cycle, error, refetch } = useDashboard();
+  const { report: system, error: systemError } = useSystem();
   const { prefs, update } = usePrefs();
   const viewportWidth = useViewport();
   const zoom = SIZES[prefs.size].zoom;
@@ -73,6 +75,9 @@ export default function App(): JSX.Element {
           dashboard={dashboard}
           settingsOpen={showSettings}
           compact={layout === "cards"}
+          system={system}
+          systemError={systemError}
+          now={now}
           onToggleSettings={() => setShowSettings((v) => !v)}
           onChanged={refetch}
           onError={showError}
