@@ -153,11 +153,16 @@ fn validate_history_request(now: i64, since: i64, bucket_ms: i64, metric: &Histo
     if since > now {
         return Err(AppError::OutOfRange(format!("since must not be in the future (since={since}, now={now})")));
     }
-    let range = now - since;
+    let range = now.saturating_sub(since);
     if range > MAX_RANGE_MS + RANGE_SLACK_MS {
         return Err(AppError::OutOfRange(format!("range must be <= {MAX_RANGE_MS} ms (+{RANGE_SLACK_MS} slack), got {range}")));
     }
-    let buckets = (range + bucket_ms - 1) / bucket_ms;
+    // bucket_ms is already known >= MIN_BUCKET_MS > 0 and range >= 0 here, so plain
+    // division plus a remainder check computes the ceiling without the intermediate
+    // `range + bucket_ms` overflow a naive `(range + bucket_ms - 1) / bucket_ms` would hit
+    // when bucket_ms is close to i64::MAX. (`i64::div_ceil` is still unstable on this
+    // toolchain — `int_roundings` is not stabilised for signed integers.)
+    let buckets = range / bucket_ms + i64::from(range % bucket_ms != 0);
     if buckets > MAX_BUCKETS {
         return Err(AppError::OutOfRange(format!("request spans {buckets} buckets; max is {MAX_BUCKETS}")));
     }
@@ -1154,6 +1159,44 @@ exit 0
         assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &blank)), Err("out_of_range"));
         assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &long)), Err("out_of_range"));
         assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &max)), Ok(()), "64 chars, not bytes");
+    }
+
+    #[test]
+    fn get_history_survives_extreme_arguments() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let now = 10_000_000_000i64;
+        let week = HistoryMetric::WeekAll;
+        let code = |r: AppResult<Vec<HistoryPoint>>| r.map(|_| ()).map_err(|e| e.code());
+
+        // since = i64::MIN: `now.saturating_sub(since)` saturates to i64::MAX instead of
+        // overflowing, and i64::MAX is far past the range cap, so this is rejected on the
+        // range check rather than panicking.
+        assert_eq!(
+            code(core_get_history(&core, &a.id, now, i64::MIN, MIN_BUCKET_MS, &week)),
+            Err("out_of_range"),
+        );
+
+        // bucket_ms = i64::MAX with a small, valid range: `range / bucket_ms` plus a
+        // remainder check computes 1 bucket without the intermediate `range + bucket_ms`
+        // overflow the old `(range + bucket_ms - 1) / bucket_ms` formula would hit, so this
+        // succeeds (no data for the account yet, hence an empty result) instead of panicking.
+        assert_eq!(
+            core_get_history(&core, &a.id, now, now - 3_600_000, i64::MAX, &week).expect("no panic"),
+            Vec::<HistoryPoint>::new(),
+        );
+    }
+
+    #[test]
+    fn get_history_accepts_a_bucket_wider_than_the_requested_range() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let now = 10_000_000_000i64;
+        let points = core_get_history(&core, &a.id, now, now - 3_600_000, 86_400_000, &HistoryMetric::WeekAll)
+            .expect("a bucket wider than the range is still exactly one bucket");
+        assert_eq!(points, Vec::<HistoryPoint>::new(), "no data yet, but no error either");
     }
 
     #[test]

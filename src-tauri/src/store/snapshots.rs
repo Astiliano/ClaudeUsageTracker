@@ -297,7 +297,6 @@ mod tests {
         })
     }
 
-
     fn ok_with_models(session: u8, week: u8, models: &[(&str, u8)]) -> PollOutcome {
         PollOutcome::Ok(Parsed {
             session: Window { pct: session, resets_at: None },
