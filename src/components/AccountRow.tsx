@@ -2,7 +2,7 @@ import type { CSSProperties, JSX, KeyboardEvent as ReactKeyboardEvent, PointerEv
 import { type ColumnKey } from "../lib/columns";
 import { rowShift } from "../lib/drag";
 import { formatAgo } from "../lib/format";
-import { type Pill, statusPill } from "../lib/pill";
+import { statusPill } from "../lib/pill";
 import { accountDotColor, sessionNote, summarizeModels, weekNote } from "../lib/present";
 import { metricColor } from "../lib/theme";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
@@ -11,6 +11,7 @@ import { EditDrawer } from "./EditDrawer";
 import { HistoryDrawer } from "./HistoryDrawer";
 import { Meter } from "./Meter";
 import { Sparkline } from "./Sparkline";
+import { StatusPill } from "./StatusPill";
 
 interface Props {
   row: AccountRowData;
@@ -18,6 +19,7 @@ interface Props {
   total: number;
   points: HistoryPoint[];
   now: number;
+  cycle: number;
   columnOrder: readonly ColumnKey[];
   gridCols: string;
   hotColumn: number | null;
@@ -34,28 +36,9 @@ interface Props {
   onShowFailure: (id: number) => void;
 }
 
-/** t >= now - 7 days; trivial enough not to need its own test. */
-function last7(points: HistoryPoint[], now: number): HistoryPoint[] {
-  const cutoff = now - 7 * 86_400_000;
-  return points.filter((p) => p.t >= cutoff);
-}
-
-function StatusPill({ pill, onShowFailure }: { pill: Pill; onShowFailure: (id: number) => void }): JSX.Element {
-  const cls = `pill pill-${pill.kind} pill-tone-${pill.tone}`;
-  const id = pill.snapshotId;
-  if (id !== undefined && pill.outcome !== "ok") {
-    return (
-      <button type="button" className={cls} title={pill.tooltip} onClick={() => onShowFailure(id)}>
-        {pill.label}
-      </button>
-    );
-  }
-  return <span className={cls} title={pill.tooltip}>{pill.label}</span>;
-}
-
 export function AccountRow(props: Props): JSX.Element {
   const {
-    row, index, total, points, now, columnOrder, gridCols, hotColumn, drag, rowH,
+    row, index, total, points, now, cycle, columnOrder, gridCols, hotColumn, drag, rowH,
     chartOpen, editing, onHandleDown, onToggleChart, onToggleEdit, onMove, onChanged, onError, onShowFailure,
   } = props;
 
@@ -79,15 +62,14 @@ export function AccountRow(props: Props): JSX.Element {
         <div className="acct">
           <span className="acct-dot" style={{ background: accountDotColor(row, pill) }} />
           <span className={`acct-name${row.account.enabled ? "" : " acct-name-off"}`} title={row.account.config_dir}>{row.account.label}</span>
-          {row.account.is_default && <span className="tag">default</span>}
           {pill.tone !== "success" && <StatusPill pill={pill} onShowFailure={onShowFailure} />}
         </div>);
       case "session": return <Meter pct={session?.pct ?? null} note={sessionNote(session, now)} />;
       case "week": { const n = weekNote(weekPct); return <Meter pct={week?.pct ?? null} note={week === null ? "no data" : n.text} noteWarn={n.warn} />; }
       case "model": return models === null ? <Meter pct={null} note="no data" /> : <Meter pct={models.pct} note={models.note} title={models.title} />;
       case "spark": return (
-        <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for 30 days" aria-expanded={chartOpen} onClick={onToggleChart}>
-          <Sparkline points={last7(points, now)} stroke={stroke} />
+        <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for history" aria-expanded={chartOpen} onClick={onToggleChart}>
+          <Sparkline points={points} stroke={stroke} />
         </button>);
       case "updated": return <span className="updated">{formatAgo(row.latest?.taken_at ?? null, now)}</span>;
     }
@@ -120,7 +102,7 @@ export function AccountRow(props: Props): JSX.Element {
       </div>
       {chartOpen && (
         <div role="row"><div role="cell">
-          <HistoryDrawer points={points} now={now} stroke={stroke} onCollapse={onToggleChart} />
+          <HistoryDrawer accountId={row.account.id} latest={row.latest} cycle={cycle} onError={onError} onCollapse={onToggleChart} />
         </div></div>
       )}
       {editing && (

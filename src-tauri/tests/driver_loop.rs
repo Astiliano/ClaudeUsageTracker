@@ -183,7 +183,7 @@ fn add_account(h: &Harness, name: &str) -> String {
     std::fs::create_dir_all(&dir).expect("mkdir");
     h.core
         .store
-        .add_account(&dir, true, None, false, 1)
+        .add_account(&dir, true, None, 1)
         .expect("add")
         .id
 }

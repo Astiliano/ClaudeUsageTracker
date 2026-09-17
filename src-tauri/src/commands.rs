@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::discovery::{enumerate_profiles, find_claude_binary};
 use crate::error::{AppError, AppResult};
@@ -11,7 +11,7 @@ use crate::logging::LogHandle;
 use crate::scheduler::machine::{preview_manual, DriverStatus};
 use crate::scheduler::triggers::Triggers;
 use crate::store::settings::{polling_relevant_changed, validate_settings, UserSettings};
-use crate::store::{HistoryPoint, Store};
+use crate::store::{HistoryMetric, HistoryPoint, Store, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS, RETENTION_MS};
 use crate::usage::{Account, SnapshotDto};
 #[cfg(test)]
 use crate::usage::{DisabledReason, PollOutcome};
@@ -143,14 +143,62 @@ pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
     })
 }
 
-/// Longest history the UI can ask for; matches store retention (D10, 30 days).
-pub const MAX_HISTORY_DAYS: u32 = 30;
-const DEFAULT_HISTORY_DAYS: u32 = 7;
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Spec §3.1: every limit is checked here, never in the store. Errors name
+/// the argument and the bound so a mis-built request is diagnosable from
+/// the toast alone.
+fn validate_history_request(now: i64, since: i64, bucket_ms: i64, metric: &HistoryMetric) -> AppResult<()> {
+    if bucket_ms < MIN_BUCKET_MS {
+        return Err(AppError::OutOfRange(format!("bucket_ms must be >= {MIN_BUCKET_MS}, got {bucket_ms}")));
+    }
+    if since > now {
+        return Err(AppError::OutOfRange(format!("since must not be in the future (since={since}, now={now})")));
+    }
+    let range = now.saturating_sub(since);
+    if range > MAX_RANGE_MS + RANGE_SLACK_MS {
+        return Err(AppError::OutOfRange(format!("range must be <= {MAX_RANGE_MS} ms (+{RANGE_SLACK_MS} slack), got {range}")));
+    }
+    // bucket_ms is already known >= MIN_BUCKET_MS > 0 and range >= 0 here, so plain
+    // division plus a remainder check computes the ceiling without the intermediate
+    // `range + bucket_ms` overflow a naive `(range + bucket_ms - 1) / bucket_ms` would hit
+    // when bucket_ms is close to i64::MAX. (`i64::div_ceil` is still unstable on this
+    // toolchain — `int_roundings` is not stabilised for signed integers.)
+    let buckets = range / bucket_ms + i64::from(range % bucket_ms != 0);
+    if buckets > MAX_BUCKETS {
+        return Err(AppError::OutOfRange(format!("request spans {buckets} buckets; max is {MAX_BUCKETS}")));
+    }
+    if let HistoryMetric::Model { label } = metric {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::OutOfRange("model label must not be blank".into()));
+        }
+        if trimmed.chars().count() > MAX_LABEL_LEN {
+            return Err(AppError::OutOfRange(format!("model label must be <= {MAX_LABEL_LEN} characters")));
+        }
+    }
+    Ok(())
+}
 
-pub fn core_get_history(core: &Core, account_id: &str, now: i64, days: u32) -> AppResult<Vec<HistoryPoint>> {
-    let days = i64::from(days.clamp(1, MAX_HISTORY_DAYS));
-    core.store.history(account_id, now - days * DAY_MS)
+pub fn core_get_history(
+    core: &Core,
+    account_id: &str,
+    now: i64,
+    since: i64,
+    bucket_ms: i64,
+    metric: &HistoryMetric,
+) -> AppResult<Vec<HistoryPoint>> {
+    if let Err(e) = validate_history_request(now, since, bucket_ms, metric) {
+        warn!(account_id, since, bucket_ms, ?metric, error = %e, "history request rejected");
+        return Err(e);
+    }
+    let points = core.store.history(account_id, since, bucket_ms, metric)?;
+    debug!(account_id, since, bucket_ms, ?metric, points = points.len(), "history");
+    Ok(points)
+}
+
+pub fn core_get_history_models(core: &Core, account_id: &str, now: i64) -> AppResult<Vec<String>> {
+    let labels = core.store.history_models(account_id, now - RETENTION_MS)?;
+    debug!(account_id, labels = labels.len(), "history models");
+    Ok(labels)
 }
 
 /// Fills the binary slot from the same resolver the driver uses.
@@ -200,7 +248,7 @@ pub fn core_poll_now(core: &Core) -> AppResult<String> {
 }
 
 pub fn core_add_account(core: &Core, config_dir: &Path, now: i64) -> AppResult<Account> {
-    let account = core.store.add_account(config_dir, true, None, false, now)?;
+    let account = core.store.add_account(config_dir, true, None, now)?;
     info!(account_id = %account.id, label = %account.label, "account added");
     core.triggers.account_changed(vec![account.id.clone()]);
     Ok(account)
@@ -357,11 +405,21 @@ pub async fn get_dashboard(core: State<'_, SharedCore>) -> AppResult<Dashboard> 
 pub async fn get_history(
     core: State<'_, SharedCore>,
     account_id: String,
-    days: Option<u32>,
+    since: i64,
+    bucket_ms: i64,
+    metric: HistoryMetric,
 ) -> AppResult<Vec<HistoryPoint>> {
     let core = Arc::clone(&core);
-    let days = days.unwrap_or(DEFAULT_HISTORY_DAYS);
-    blocking(move || core_get_history(&core, &account_id, now_ms(), days)).await
+    blocking(move || core_get_history(&core, &account_id, now_ms(), since, bucket_ms, &metric)).await
+}
+
+#[tauri::command]
+pub async fn get_history_models(
+    core: State<'_, SharedCore>,
+    account_id: String,
+) -> AppResult<Vec<String>> {
+    let core = Arc::clone(&core);
+    blocking(move || core_get_history_models(&core, &account_id, now_ms())).await
 }
 
 #[tauri::command]
@@ -541,6 +599,7 @@ mod tests {
     use super::*;
     use crate::scheduler::machine::Gate;
     use crate::store::settings::UserSettings;
+    use crate::store::{HistoryMetric, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1043,55 +1102,113 @@ exit 0
         assert_eq!(got.error.as_deref(), Some("missing session line"));
     }
 
-    #[test]
-    fn get_history_returns_hourly_points() {
-        let (tmp, core) = core();
-        let d = make_dir(tmp.path(), ".claude3");
-        let a = core_add_account(&core, &d, 1).expect("add");
-        let hour = 3_600_000i64;
-        let base = 100 * hour;
-        for (t, pct) in [(base + 1000, 4u8), (base + 2000, 9), (base + hour, 6)] {
-            let outcome = PollOutcome::Ok(crate::usage::Parsed {
-                session: crate::usage::Window { pct: 1, resets_at: None },
-                week_all: crate::usage::Window { pct, resets_at: None },
-                week_models: vec![],
-            });
-            core.store
-                .insert_snapshot(&a.id, t, &outcome, None, 1)
-                .expect("snapshot");
-        }
-
-        let points = core_get_history(&core, &a.id, base + hour * 8, 7).expect("history");
-        assert_eq!(points.len(), 2);
-        assert_eq!(points[0].pct, 9);
-        assert_eq!(points[1].pct, 6);
+    fn ok_week(pct: u8) -> PollOutcome {
+        PollOutcome::Ok(crate::usage::Parsed {
+            session: crate::usage::Window { pct: 1, resets_at: None },
+            week_all: crate::usage::Window { pct, resets_at: None },
+            week_models: vec![("Fable".to_string(), crate::usage::Window { pct: 7, resets_at: None })],
+        })
     }
 
     #[test]
-    fn history_days_is_clamped_to_one_through_thirty() {
+    fn get_history_buckets_the_requested_metric_from_since() {
         let (tmp, core) = core();
         let d = make_dir(tmp.path(), ".claude3");
         let a = core_add_account(&core, &d, 1).expect("add");
-        let hour = 3_600_000i64;
-        let day = 24 * hour;
-        let base = 1_000 * day;
-        // One ok snapshot per listed day, each in its own hourly bucket.
-        for (days_ago_from_base, pct) in [(0i64, 1u8), (10, 2), (29, 3), (31, 4)] {
-            let outcome = PollOutcome::Ok(crate::usage::Parsed {
-                session: crate::usage::Window { pct: 1, resets_at: None },
-                week_all: crate::usage::Window { pct, resets_at: None },
-                week_models: vec![],
-            });
-            core.store
-                .insert_snapshot(&a.id, base + days_ago_from_base * day, &outcome, None, 1)
-                .expect("snapshot");
+        let since = 1_000_000_000i64;
+        for (t, pct) in [(since + 1000, 4u8), (since + 2000, 9), (since + 3_600_000, 6)] {
+            core.store.insert_snapshot(&a.id, t, &ok_week(pct), None, 1).expect("snapshot");
         }
-        // `now` is one hour past the newest snapshot (day 31), so "N days" reaches
-        // back to day 31 - N + 1/24: 1 day → {31}; 7 → {29, 31}; 30 → {10, 29, 31}.
-        let now = base + 31 * day + hour;
-        assert_eq!(core_get_history(&core, &a.id, now, 0).expect("h").len(), 1, "0 clamps to 1 day");
-        assert_eq!(core_get_history(&core, &a.id, now, 7).expect("h").len(), 2, "7 days: 29, 31");
-        assert_eq!(core_get_history(&core, &a.id, now, 30).expect("h").len(), 3, "30 days: 10, 29, 31");
-        assert_eq!(core_get_history(&core, &a.id, now, 999).expect("h").len(), 3, "999 clamps to 30");
+        let now = since + 8 * 3_600_000;
+        let points = core_get_history(&core, &a.id, now, since, 3_600_000, &HistoryMetric::WeekAll).expect("history");
+        assert_eq!(points.len(), 2);
+        assert_eq!((points[0].t, points[0].pct), (since, 9));
+        assert_eq!((points[1].t, points[1].pct), (since + 3_600_000, 6));
+
+        let fable = core_get_history(&core, &a.id, now, since, 3_600_000, &HistoryMetric::Model { label: "Fable".into() }).expect("model");
+        assert_eq!(fable.iter().map(|p| p.pct).collect::<Vec<u8>>(), vec![7, 7]);
+    }
+
+    #[test]
+    fn get_history_rejects_each_limit_at_the_boundary_and_accepts_one_step_inside() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let now = 10_000_000_000i64;
+        let week = HistoryMetric::WeekAll;
+        let code = |r: AppResult<Vec<HistoryPoint>>| r.map(|_| ()).map_err(|e| e.code());
+
+        // bucket_ms
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS - 1, &week)), Err("out_of_range"));
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &week)), Ok(()));
+        // since in the future
+        assert_eq!(code(core_get_history(&core, &a.id, now, now + 1, MIN_BUCKET_MS, &week)), Err("out_of_range"));
+        assert_eq!(code(core_get_history(&core, &a.id, now, now, MIN_BUCKET_MS, &week)), Ok(()));
+        // range (with slack)
+        let limit = MAX_RANGE_MS + RANGE_SLACK_MS;
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - limit - 1, 86_400_000, &week)), Err("out_of_range"));
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - limit, 86_400_000, &week)), Ok(()));
+        // bucket count: 1000 * 60s = 60_000_000 ms of range at the minimum bucket
+        let full = MAX_BUCKETS * MIN_BUCKET_MS;
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - full - 1, MIN_BUCKET_MS, &week)), Err("out_of_range"));
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - full, MIN_BUCKET_MS, &week)), Ok(()));
+        // labels
+        let blank = HistoryMetric::Model { label: " \t ".into() };
+        let long = HistoryMetric::Model { label: "é".repeat(MAX_LABEL_LEN + 1) };
+        let max = HistoryMetric::Model { label: "é".repeat(MAX_LABEL_LEN) };
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &blank)), Err("out_of_range"));
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &long)), Err("out_of_range"));
+        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &max)), Ok(()), "64 chars, not bytes");
+    }
+
+    #[test]
+    fn get_history_survives_extreme_arguments() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let now = 10_000_000_000i64;
+        let week = HistoryMetric::WeekAll;
+        let code = |r: AppResult<Vec<HistoryPoint>>| r.map(|_| ()).map_err(|e| e.code());
+
+        // since = i64::MIN: `now.saturating_sub(since)` saturates to i64::MAX instead of
+        // overflowing, and i64::MAX is far past the range cap, so this is rejected on the
+        // range check rather than panicking.
+        assert_eq!(
+            code(core_get_history(&core, &a.id, now, i64::MIN, MIN_BUCKET_MS, &week)),
+            Err("out_of_range"),
+        );
+
+        // bucket_ms = i64::MAX with a small, valid range: `range / bucket_ms` plus a
+        // remainder check computes 1 bucket without the intermediate `range + bucket_ms`
+        // overflow the old `(range + bucket_ms - 1) / bucket_ms` formula would hit, so this
+        // succeeds (no data for the account yet, hence an empty result) instead of panicking.
+        assert_eq!(
+            core_get_history(&core, &a.id, now, now - 3_600_000, i64::MAX, &week).expect("no panic"),
+            Vec::<HistoryPoint>::new(),
+        );
+    }
+
+    #[test]
+    fn get_history_accepts_a_bucket_wider_than_the_requested_range() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let now = 10_000_000_000i64;
+        let points = core_get_history(&core, &a.id, now, now - 3_600_000, 86_400_000, &HistoryMetric::WeekAll)
+            .expect("a bucket wider than the range is still exactly one bucket");
+        assert_eq!(points, Vec::<HistoryPoint>::new(), "no data yet, but no error either");
+    }
+
+    #[test]
+    fn get_history_models_lists_labels_within_retention() {
+        let (tmp, core) = core();
+        let d = make_dir(tmp.path(), ".claude3");
+        let a = core_add_account(&core, &d, 1).expect("add");
+        let now = 10_000_000_000i64;
+        core.store.insert_snapshot(&a.id, now - 1000, &ok_week(1), None, 1).expect("recent");
+        core.store
+            .insert_snapshot(&a.id, now - crate::store::RETENTION_MS - 1, &ok_week(1), None, 1)
+            .expect("too old (would already be pruned in production)");
+        assert_eq!(core_get_history_models(&core, &a.id, now).expect("labels"), vec!["Fable".to_string()]);
     }
 }

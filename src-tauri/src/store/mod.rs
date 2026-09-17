@@ -4,7 +4,10 @@ pub mod settings;
 pub mod snapshots;
 
 pub use settings::{validate_settings, UserSettings};
-pub use snapshots::HistoryPoint;
+pub use snapshots::{
+    HistoryMetric, HistoryPoint, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS,
+    RANGE_SLACK_MS, RETENTION_MS,
+};
 
 use rusqlite::Connection;
 use std::path::Path;

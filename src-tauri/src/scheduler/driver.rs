@@ -936,7 +936,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("settings.json"), "{}").expect("marker");
         let account = store
-            .add_account(&dir, true, None, false, 1)
+            .add_account(&dir, true, None, 1)
             .expect("add account");
         let (settings_tx, _rx) = tokio::sync::watch::channel(test_settings());
         let core = Arc::new(Core {

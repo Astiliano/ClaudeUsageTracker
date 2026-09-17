@@ -27,10 +27,17 @@ restart until you clear it.
 Accounts can be reordered by dragging rows with the grip handle, or with the
 Move up/Move down buttons inside a row's edit drawer. Column headers can also
 be dragged to reorder; column order, typeface and text size persist per
-machine in the webview's local storage. Click a row's sparkline to open the
-30-day history drawer. Removing an account (in a row's edit drawer) asks for
+machine in the webview's local storage. Columns other than Account can also
+be hidden from Settings. Click a row's sparkline to open the
+history drawer, which offers range presets from 1 hour to 30 days, a
+granularity override and a metric picker. Removing an account (in a row's edit drawer) asks for
 a second click within 4 seconds before it deletes the account and its
 history.
+
+Below 820 px the table auto-hides the Updated and Per model columns; below
+640 px it switches to one card per account with ring gauges instead of a
+table (the window has a minimum size of 360×240). "Keep window on top" is a
+per-machine toggle in Settings, alongside the others.
 
 ## Requirements
 

@@ -39,7 +39,6 @@ export interface Account {
   config_dir: string;
   enabled: boolean;
   disabled_reason: DisabledReason | null;
-  is_default: boolean;
   created_at: number;
   sort_order: number;
 }

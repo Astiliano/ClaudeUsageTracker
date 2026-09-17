@@ -7,15 +7,6 @@ pub fn home_dir() -> AppResult<PathBuf> {
     dirs::home_dir().ok_or_else(|| AppError::NotFound("home directory not found".into()))
 }
 
-/// D4: the default account is `CLAUDE_CONFIG_DIR` from the app's own
-/// environment if set and non-blank, else `<home>/.claude`.
-pub fn default_config_dir(env_override: Option<&str>, home: &Path) -> PathBuf {
-    match env_override.map(str::trim) {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => home.join(".claude"),
-    }
-}
-
 pub fn db_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("usage.sqlite")
 }
@@ -60,38 +51,7 @@ pub fn empty_dir(dir: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use super::{default_config_dir, db_path, empty_dir, ensure_dir, login_script_dir, poll_cwd};
-
-    #[test]
-    fn default_config_dir_prefers_the_env_override() {
-        let home = Path::new("/home/josh");
-        assert_eq!(
-            default_config_dir(Some("/home/josh/.claude3"), home),
-            PathBuf::from("/home/josh/.claude3")
-        );
-    }
-
-    #[test]
-    fn default_config_dir_falls_back_to_dot_claude() {
-        let home = Path::new("/home/josh");
-        assert_eq!(
-            default_config_dir(None, home),
-            PathBuf::from("/home/josh/.claude")
-        );
-    }
-
-    #[test]
-    fn blank_env_override_is_treated_as_unset() {
-        let home = Path::new("/home/josh");
-        assert_eq!(
-            default_config_dir(Some("   "), home),
-            PathBuf::from("/home/josh/.claude")
-        );
-        assert_eq!(
-            default_config_dir(Some(""), home),
-            PathBuf::from("/home/josh/.claude")
-        );
-    }
+    use super::{db_path, empty_dir, ensure_dir, login_script_dir, poll_cwd};
 
     #[test]
     fn derived_paths_hang_off_the_app_data_dir() {

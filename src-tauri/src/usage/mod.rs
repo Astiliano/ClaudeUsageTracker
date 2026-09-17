@@ -185,11 +185,9 @@ pub struct Account {
     pub config_dir: PathBuf,
     pub enabled: bool,
     pub disabled_reason: Option<DisabledReason>,
-    pub is_default: bool,
     pub created_at: i64,
     /// Manual order (D17, revised 2026-09-16): lower sorts first. Authoritative
-    /// for `list_accounts`/`enabled_account_ids`; `is_default`/label remain a
-    /// tiebreak only.
+    /// for `list_accounts`/`enabled_account_ids`; label is the only tiebreak.
     pub sort_order: i64,
 }
 
@@ -344,7 +342,6 @@ mod tests {
             config_dir: std::path::PathBuf::from("/home/josh/.claude3"),
             enabled: true,
             disabled_reason: None,
-            is_default: false,
             created_at: 1_700_000_000_000,
             sort_order: 0,
         };
@@ -352,7 +349,6 @@ mod tests {
         assert_eq!(v["label"], "claude3");
         assert_eq!(v["enabled"], true);
         assert!(v["disabled_reason"].is_null());
-        assert_eq!(v["is_default"], false);
         assert!(v["config_dir"].is_string());
         assert_eq!(v["sort_order"], 0);
     }
