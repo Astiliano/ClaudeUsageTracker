@@ -68,7 +68,12 @@ impl SysinfoProbe {
 impl ProcessProbe for SysinfoProbe {
     fn claude_running(&self, exclude_pid: Option<u32>) -> bool {
         let mut sys = self.system.lock().unwrap_or_else(PoisonError::into_inner);
-        crate::process::is_claude_running(&mut sys, exclude_pid.map(sysinfo::Pid::from_u32))
+        let exclusion = crate::process::Exclusion {
+            self_pid: std::process::id(),
+            self_started_at: 0,
+            poll_child: exclude_pid,
+        };
+        crate::process::is_claude_running(&mut sys, &exclusion)
     }
 }
 
