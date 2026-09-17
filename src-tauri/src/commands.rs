@@ -640,7 +640,7 @@ mod tests {
     use crate::scheduler::machine::Gate;
     use crate::store::settings::UserSettings;
     use crate::store::{HistoryMetric, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS};
-    use crate::system::{ClaudeStats, SystemStats};
+    use crate::system::SystemStats;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -686,8 +686,10 @@ mod tests {
 
         let stats = SystemStats {
             sampled_at: 1_700_000_000_000,
+            cpu_pct: 12.5,
+            mem_used_bytes: 13 * 1024 * 1024 * 1024,
             mem_total_bytes: 32 * 1024 * 1024 * 1024,
-            claude: ClaudeStats { count: 2, rss_bytes: 1_200_000_000, cpu_pct: Some(3.5) },
+            claude_count: 2,
         };
         lock_system(&core.system).stats = Some(stats.clone());
 

@@ -186,7 +186,7 @@ function seedAccounts(): MockAccount[] {
         taken_at: now - 59_000,
         outcome: "ok",
         session: { pct: 40, resets_at: now + 2 * 60 * 60 * 1000 + 3 * 60 * 1000 },
-        week_all: { pct: 46, resets_at: null },
+        week_all: { pct: 46, resets_at: now + 2 * 24 * 60 * 60 * 1000 + 3 * 60 * 60 * 1000 },
         week_models: [{ label: "Fable", pct: 47, resets_at: null }],
         error: null,
         duration_ms: 1_200,
@@ -216,7 +216,7 @@ function seedAccounts(): MockAccount[] {
         taken_at: now - 53_000,
         outcome: "timeout",
         session: { pct: 0, resets_at: null },
-        week_all: { pct: 98, resets_at: null },
+        week_all: { pct: 98, resets_at: now + 5 * 24 * 60 * 60 * 1000 + 14 * 60 * 60 * 1000 },
         week_models: [
           { label: "Fable", pct: 99, resets_at: null },
           { label: "Opus", pct: 12, resets_at: null },
@@ -292,18 +292,13 @@ export function createMockBackend(): Backend {
   const mockSystem = new URLSearchParams(window.location.search).get("mockSystem");
   const GIB = 1024 * 1024 * 1024;
 
-  const systemStats = (): SystemStats => {
-    const drift = 0.95 + Math.random() * 0.1;
-    return {
-      sampled_at: Date.now(),
-      mem_total_bytes: 32 * GIB,
-      claude: {
-        count: 2,
-        rss_bytes: Math.round(1.2 * GIB * drift),
-        cpu_pct: Math.round((1 + Math.random() * 7) * 10) / 10,
-      },
-    };
-  };
+  const systemStats = (): SystemStats => ({
+    sampled_at: Date.now(),
+    cpu_pct: Math.round((5 + Math.random() * 25) * 10) / 10,
+    mem_used_bytes: Math.round(13 * GIB * (0.97 + Math.random() * 0.06)),
+    mem_total_bytes: 32 * GIB,
+    claude_count: 2,
+  });
 
   const findAccount = (id: string): MockAccount => {
     const found = accounts.find((a) => a.account.id === id);

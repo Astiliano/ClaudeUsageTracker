@@ -274,7 +274,9 @@ about which processes count.
 
 **Sampler.** `src-tauri/src/system.rs` walks the process table every 5 s on
 the blocking pool with its own `sysinfo::System`, publishes `SystemStats`
-into `Core.system`, emits `system:sampled`, and fires the `Presence` trigger
+(whole-machine CPU busy share, memory used and total, and the Claude process
+count; per-process figures were dropped 2026-09-17) into `Core.system`,
+emits `system:sampled`, and fires the `Presence` trigger
 when the Claude process count goes from zero to non-zero. It never spawns the
 CLI. Three consecutive panicking samples stop it for the rest of the run and
 set `stopped`, which the header surfaces.
@@ -667,8 +669,8 @@ Single window, dark/light follows OS.
 - **Accounts table** (D17 order): label · Session % bar + "resets in 3h 12m"
   (clamped at "resets now" when `resets_at` is in the past; "—" when absent)
   · Week (all) % · one cell per per-model line ("Fable 5%"; "—" if none) ·
-  sparkline (hourly max week-all pct, last 7 days; missing hours are path
-  breaks, never zeros) · last updated ("42 s ago", live) · status pill. Pill precedence: `disabled` (with reason
+  sparkline (15-minute max week-all pct, last 24 hours; empty buckets are
+  skipped, never zeros; the line is continuous) · last updated ("42 s ago", live) · status pill. Pill precedence: `disabled` (with reason
   tooltip) > `backing off (next in 4 min)` > latest outcome (`ok` / `no data
   — log in?` / `parse error` / `spawn error` / `timeout` / `guard tripped`).
 - (2026-09-16) The history drawer offers range presets 1h/6h/12h/24h/7d/30d, a granularity override within the limits above, and a metric picker. Columns other than Account can be hidden in Settings. Below 820 px (local) the table hides Updated and Per model; below 640 px it becomes one card per account with ring gauges; minimum window 360×240. "Keep window on top" is a per-device pref. The default-account flag (`is_default`) was removed end to end.
@@ -690,7 +692,7 @@ Single window, dark/light follows OS.
 | Command | Args → Result |
 |---|---|
 | `get_dashboard` | → `{ accounts: [{ account: Account, latest: SnapshotDto?, backoff_until: i64? }], gate, busy, halted: string?, stalled_at: i64?, binary: { path?, source? }, interval_secs }` — cheap; called on every `usage:updated` (debounced). `stalled_at` and `backoff_until` live in the shared `AppState` (`Arc<Mutex<DriverStatus>>`, written by the driver, read by commands), reset on restart; `stalled_at` is set by the watchdog arm and cleared on the next `cycle:finished`; `halted` comes from the store |
-| `get_history` | `{account_id, since, bucket_ms, metric}` → `[{t, pct}]` buckets of max(metric) anchored at `since`; `metric` is `{kind:"week_all"}`, `{kind:"session"}` or `{kind:"model", label}`. Limits (2026-09-16): `bucket_ms ≥ 60 000`, `≤ 1 000` buckets, range `≤ 30 d` (+5 min slack), model label non-blank and `≤ 64` chars; violations are `out_of_range`. The sparkline asks for 7 d / 1 h week-all once per cycle; the drawer fetches on demand |
+| `get_history` | `{account_id, since, bucket_ms, metric}` → `[{t, pct}]` buckets of max(metric) anchored at `since`; `metric` is `{kind:"week_all"}`, `{kind:"session"}` or `{kind:"model", label}`. Limits (2026-09-16): `bucket_ms ≥ 60 000`, `≤ 1 000` buckets, range `≤ 30 d` (+5 min slack), model label non-blank and `≤ 64` chars; violations are `out_of_range`. The sparkline asks for 24 h / 15 min week-all once per cycle; the drawer fetches on demand |
 | `get_history_models` | `{account_id}` → `[label]` distinct model labels seen in `ok` snapshots within retention (2026-09-16) |
 | `poll_now` | → `"started" \| "skipped:<reason>"` |
 | `add_account` | `{config_dir}` → Account. Canonicalises; rejects missing dir (`not_found`) or duplicate (`duplicate`) |
@@ -743,7 +745,7 @@ Linux needs `libayatana-appindicator3-dev` for the tray.
 | process | `matches_claude` on synthetic (name, cmd) tuples: native, npm, unrelated node, excluded pid |
 | tray | `tray_state`: `Halted` beats everything; grey/green/amber/red thresholds, multi-account worst-of, per-model segments, `err` rendering |
 | commands | `add_account` rejects missing/duplicate; `set_settings` boundary values (10/3600, 5/120) accept, one-off values reject; `update_account` enable clears `disabled_reason`, disable sets `user`; `clear_halt` clears the flag, logs, and does not poll; **`core_reorder_accounts` persists the new order and rejects an unknown id** |
-| frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → separate sub-paths), status pill precedence; **`moveItem` pure helper (move down, move up, same-index no-op, out-of-range returns a copy unchanged)** |
+| frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → one continuous path, no zero emitted (2026-09-17)), status pill precedence; **`moveItem` pure helper (move down, move up, same-index no-op, out-of-range returns a copy unchanged)** |
 | scheduler/driver | Tokio-based: triggers during a cycle coalesce to one `Skip(Busy)` and never queue; two `AccountChanged` in quick succession poll both accounts; `clear_halt` does not start a poll; settings change moves the deadline without restarting the clock; watchdog aborts a deliberately hung cycle task and busy clears; shutdown kills a live fake child |
 | integration (manual, documented in README) | Real poll against `~/.claude3`; Git Bash hazard reproduction is **not** run (costs quota) |
 

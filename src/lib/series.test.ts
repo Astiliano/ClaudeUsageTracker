@@ -1,22 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { polylineRuns, seriesDots, seriesStats } from "./series";
+import { seriesDots, seriesLine, seriesStats } from "./series";
 
-describe("polylineRuns", () => {
-  it("emits one run per contiguous span of known values, breaking across nulls", () => {
-    expect(polylineRuns([0, null, 100], 100, 24)).toEqual(["0.00,24.00", "100.00,0.00"]);
+describe("seriesLine", () => {
+  it("draws straight through a null slot instead of breaking", () => {
+    expect(seriesLine([0, null, 100], 100, 24)).toBe("0.00,24.00 100.00,0.00");
   });
-  it("emits a single-point run for an isolated known value amid gaps", () => {
-    expect(polylineRuns([10, 20, null, 30], 100, 24)).toEqual([
-      "0.00,21.60 33.33,19.20",
-      "100.00,16.80",
-    ]);
+  it("skips leading and trailing nulls but keeps the slot positions", () => {
+    // n = 4, so slots 1 and 2 sit at x = 33.33 and 66.67.
+    expect(seriesLine([null, 10, 20, null], 100, 24)).toBe("33.33,21.60 66.67,19.20");
+  });
+  it("places a single known value at its slot", () => {
+    expect(seriesLine([50], 100, 24)).toBe("0.00,12.00");
+    expect(seriesLine([null, 50], 100, 24)).toBe("100.00,12.00");
   });
   it("is empty for an empty series or a series with no known values", () => {
-    expect(polylineRuns([], 100, 24)).toEqual([]);
-    expect(polylineRuns([null, null], 100, 24)).toEqual([]);
+    expect(seriesLine([], 100, 24)).toBe("");
+    expect(seriesLine([null, null], 100, 24)).toBe("");
   });
   it("clamps values into 0..100", () => {
-    expect(polylineRuns([150, -10], 100, 100)).toEqual(["0.00,0.00 100.00,100.00"]);
+    expect(seriesLine([150, -10], 100, 100)).toBe("0.00,0.00 100.00,100.00");
   });
 });
 

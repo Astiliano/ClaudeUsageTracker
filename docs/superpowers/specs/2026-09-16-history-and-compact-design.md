@@ -40,7 +40,9 @@ handle to set failover priority · …") is removed outright (Josh,
   `session_pct`, `week_all_pct`, `week_models` (JSON array of
   `{label, pct, resets_at}`), kept 30 days (`RETENTION_MS`). Density is one
   row per 1.7–3.4 min while Claude Code runs and nothing while idle, so
-  empty buckets are **breaks, never zeros**.
+  empty buckets are **breaks, never zeros**. *(2026-09-17: the line is now
+  continuous through empty buckets, which are skipped, never zeros; see
+  `2026-09-17-charts-and-system-design.md` §3.)*
 - Bundled SQLite is 3.53.2 (`libsqlite3-sys 0.38.2`): `json_each` and
   `ALTER TABLE … DROP COLUMN` are both available. Index
   `snapshots_acct_time(account_id, taken_at DESC, id DESC)` serves every
@@ -48,10 +50,13 @@ handle to set failover priority · …") is removed outright (Josh,
 - `Store::history` is the only place that buckets; it takes `since` and a
   hard-coded `HOUR_MS`. `get_history` / `core_get_history` wrap it with a
   `days` argument (1–30, default 7). `useDashboard` asks for 30 days once per
-  cycle; `AccountRow` filters to 7 days for the sparkline; `HistoryDrawer`
-  derives local-day maxima with `dailyMax`.
-- The chart is hand-rolled SVG: `polylineRuns` emits one `<polyline>` per
-  contiguous run of known values; `seriesDots` places hover targets;
+  cycle; `AccountRow` filters to 7 days for the sparkline *(2026-09-17: the
+  row sparkline requests 24 h at 15 m; see the charts-and-system design
+  §6.)*; `HistoryDrawer` derives local-day maxima with `dailyMax`.
+- The chart is hand-rolled SVG: `polylineRuns` *(2026-09-17: `polylineRuns`
+  was replaced by `seriesLine`, one continuous `<polyline>` through every
+  known slot; see `2026-09-17-charts-and-system-design.md` §3.1.)* emits one
+  `<polyline>` per contiguous run of known values; `seriesDots` places hover targets;
   `seriesStats` computes peak/avg/missing. No chart library; that stays.
 - View prefs live in `localStorage` under `usage-tracker.prefs.v1`
   (`parsePrefs` validates each field independently; `normalizeColumnOrder`
@@ -233,7 +238,7 @@ backstop, not the UX.
 
 Replaces the day-only helpers in `series.ts` (`HISTORY_DAYS`, `dailyMax`,
 `dayLabel`, `axisLabels` are deleted along with their tests;
-`polylineRuns`, `seriesDots`, `seriesStats` stay in `series.ts`).
+`polylineRuns` *(now `seriesLine`, 2026-09-17)*, `seriesDots`, `seriesStats` stay in `series.ts`).
 
 ```ts
 export type PresetKey = "1h" | "6h" | "12h" | "24h" | "7d" | "30d";
@@ -266,7 +271,7 @@ export function bucketCount(since: number, now: number, unit: UnitKey): number;
   // ceil((now - since) / ms), always >= 1 (the last slot is the current, partial unit)
 
 export function nearestKnownSlot(vals: readonly (number | null)[], fraction: number): number | null;
-  // fraction in [0,1] across the plot width. polylineRuns places slot i at
+  // fraction in [0,1] across the plot width. polylineRuns *(now `seriesLine`, 2026-09-17)* places slot i at
   // x = i/(n-1), so the candidate is round(fraction * (n-1)); from there the
   // nearest non-null slot wins (ties to the lower index); null when all null.
 
@@ -288,6 +293,9 @@ export function missingLabel(missing: number, unit: UnitKey): string;
 export function showMissing(unit: UnitKey): boolean;
   // false for "1m" (finer than poll density, so gaps are expected), true otherwise
 ```
+
+*(2026-09-17: `missingLabel` and `showMissing` were removed with the "missing"
+stat; the strip is peak · avg · collapse.)*
 
 DST note (accepted, documented): day buckets are fixed 86 400 000 ms from an
 aligned `since`; across a DST change the day boundary shifts by one hour for
@@ -326,7 +334,7 @@ Effects:
   stays selected (its series may still exist in range) — no automatic reset.
 
 Rendering from `result`: `vals = bucketSeries(points, since, unit, count)`;
-`polylineRuns(vals, 100, 100)`; `seriesDots(vals)`; `seriesStats(vals)`.
+`polylineRuns` *(now `seriesLine`, 2026-09-17)* `(vals, 100, 100)`; `seriesDots(vals)`; `seriesStats(vals)`.
 `fetchNow` is the `Date.now()` captured when the request was built and
 `count = bucketCount(since, fetchNow, unit)` is fixed with it, so the slot
 grid does not drift while the response is in flight. Hover is one code path:
@@ -350,7 +358,8 @@ Stats strip: `peak N%`, `avg N%`, `missing {missingLabel(missing, unit)}`,
 `collapse`. The `missing` stat is shown only when `showMissing(unit)` is
 true, i.e. the unit is 5m or longer: poll density is one row per 1.7–3.4 min,
 so at 1m roughly half the slots are empty on a perfectly healthy account and
-the number would mislead. Axis: `axisLabelsFor(since, unit, count, 4)`.
+the number would mislead. *(2026-09-17: the "missing" stat was removed.)*
+Axis: `axisLabelsFor(since, unit, count, 4)`.
 Y labels unchanged.
 
 Stroke colour: `metricColor(latest value of the selected metric)` — for the
@@ -361,7 +370,9 @@ the session pct; for a model it is that model's latest pct (0 if absent).
 Sparkline: `useDashboard.loadHistoryFor` requests
 `{ since: alignedSince(now, "7d", "1h"), bucketMs: 3_600_000, metric: {kind:"week_all"} }`
 per account. `AccountRow.last7` is deleted (the request is already 7 days).
-The sparkline's hourly-max-with-breaks behaviour is unchanged.
+The sparkline's hourly-max-with-breaks behaviour is unchanged. *(2026-09-17:
+now `alignedSince(now, "24h", "15m")` at 900 000 ms, one continuous path; see
+the charts-and-system design §3.2 and §6.)*
 
 Mock backend: `get_history` and `get_history_models` are implemented against
 per-account raw samples (`{t, session, week_all, models: [{label,pct}]}`)

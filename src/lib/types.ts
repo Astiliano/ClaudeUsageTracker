@@ -64,16 +64,13 @@ export interface Dashboard {
   interval_secs: number;
 }
 
-export interface ClaudeStats {
-  count: number;
-  rss_bytes: number;
-  cpu_pct: number | null;
-}
-
 export interface SystemStats {
   sampled_at: number;
+  /** Whole-machine CPU busy share, 0..100. */
+  cpu_pct: number;
+  mem_used_bytes: number;
   mem_total_bytes: number;
-  claude: ClaudeStats;
+  claude_count: number;
 }
 
 export interface SystemReport {

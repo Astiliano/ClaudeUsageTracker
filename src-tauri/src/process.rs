@@ -38,8 +38,6 @@ pub struct ProcView {
     pub start_time: u64,
     pub name: String,
     pub cmd: Vec<String>,
-    pub rss_bytes: u64,
-    pub cpu: f32,
 }
 
 impl From<&sysinfo::Process> for ProcView {
@@ -54,8 +52,6 @@ impl From<&sysinfo::Process> for ProcView {
                 .iter()
                 .map(|a| a.to_string_lossy().to_string())
                 .collect(),
-            rss_bytes: p.memory(),
-            cpu: p.cpu_usage(),
         }
     }
 }
@@ -212,8 +208,6 @@ mod tests {
             start_time,
             name: name.to_string(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
-            rss_bytes: 0,
-            cpu: 0.0,
         }
     }
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { errorMessage } from "../lib/errors";
-import { UNITS, WEEK_ALL, alignedSince } from "../lib/history";
+import { SPARK_PRESET, SPARK_UNIT, UNITS, WEEK_ALL, alignedSince } from "../lib/history";
 import type { Dashboard, HistoryPoint } from "../lib/types";
 
 const DEBOUNCE_MS = 250;
@@ -51,17 +51,17 @@ export function useDashboard(): UseDashboard {
     }
   }, []);
 
-  /** 7 days of hourly week-all maxima per account, for the row sparklines. */
+  /** 24 hours of 15-minute week-all maxima per account, for the row sparklines. */
   const loadHistoryFor = useCallback(async (accountIds: string[]): Promise<void> => {
     const now = Date.now();
-    const since = alignedSince(now, "7d", "1h");
+    const since = alignedSince(now, SPARK_PRESET, SPARK_UNIT);
     try {
       const entries = await Promise.all(
         accountIds.map(async (id) => {
           const points = await backend().invoke<HistoryPoint[]>("get_history", {
             accountId: id,
             since,
-            bucketMs: UNITS["1h"].ms,
+            bucketMs: UNITS[SPARK_UNIT].ms,
             metric: WEEK_ALL,
           });
           return [id, points] as const;

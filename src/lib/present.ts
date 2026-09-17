@@ -30,8 +30,16 @@ export function summarizeModels(models: readonly ModelWindow[]): ModelSummary | 
   };
 }
 
-export function weekNote(pct: number): { text: string; warn: boolean } {
-  return pct >= THRESHOLDS.crit ? { text: "at limit", warn: true } : { text: "all models", warn: false };
+/**
+ * The Week meter's note: the time until the weekly reset, exactly as the
+ * Session meter shows its own. "no reset" is a real reading whose line had
+ * no reset clause; "no data" is no reading at all.
+ */
+export function weekNote(week: Win | null, now: number): { text: string; warn: boolean } {
+  if (week === null) return { text: "no data", warn: false };
+  const warn = week.pct >= THRESHOLDS.crit;
+  if (week.resets_at === null) return { text: "no reset", warn };
+  return { text: formatLeft(week.resets_at, now), warn };
 }
 
 export function sessionNote(session: Win | null, now: number): string {

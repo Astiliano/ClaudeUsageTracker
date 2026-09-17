@@ -123,7 +123,7 @@
     week: {
       label: 'Week (all)', width: 'minmax(86px,1.5fr)', kind: 'meter',
       value: function (a) { return a.week; },
-      note: function (a) { return a.week >= THRESHOLDS.crit ? 'at limit' : 'all models'; },
+      note: function (a) { return a.week >= THRESHOLDS.crit ? 'at limit' : (a.resetDay ? '2d 3h left' : 'no reset'); },
       noteColor: function (a) { return a.week >= THRESHOLDS.crit ? THEME.metaWarn : THEME.meta; }
     },
     model: {

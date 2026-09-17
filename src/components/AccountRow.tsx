@@ -65,7 +65,7 @@ export function AccountRow(props: Props): JSX.Element {
           {pill.tone !== "success" && <StatusPill pill={pill} onShowFailure={onShowFailure} />}
         </div>);
       case "session": return <Meter pct={session?.pct ?? null} note={sessionNote(session, now)} />;
-      case "week": { const n = weekNote(weekPct); return <Meter pct={week?.pct ?? null} note={week === null ? "no data" : n.text} noteWarn={n.warn} />; }
+      case "week": { const n = weekNote(week, now); return <Meter pct={week?.pct ?? null} note={n.text} noteWarn={n.warn} />; }
       case "model": return models === null ? <Meter pct={null} note="no data" /> : <Meter pct={models.pct} note={models.note} title={models.title} />;
       case "spark": return (
         <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for history" aria-expanded={chartOpen} onClick={onToggleChart}>

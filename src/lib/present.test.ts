@@ -48,9 +48,15 @@ describe("summarizeModels", () => {
 });
 
 describe("notes and labels", () => {
-  it("weekNote flags the limit", () => {
-    expect(weekNote(95)).toEqual({ text: "at limit", warn: true });
-    expect(weekNote(94)).toEqual({ text: "all models", warn: false });
+  it("weekNote counts down to the reset, names a missing reset, and warns at the limit", () => {
+    const now = 1_000_000;
+    const DAY = 86_400_000;
+    const HOUR = 3_600_000;
+    expect(weekNote(null, now)).toEqual({ text: "no data", warn: false });
+    expect(weekNote({ pct: 96, resets_at: null }, now)).toEqual({ text: "no reset", warn: true });
+    expect(weekNote({ pct: 40, resets_at: null }, now)).toEqual({ text: "no reset", warn: false });
+    expect(weekNote({ pct: 40, resets_at: now + 2 * DAY + 3 * HOUR }, now)).toEqual({ text: "2d 3h left", warn: false });
+    expect(weekNote({ pct: 95, resets_at: now + HOUR }, now)).toEqual({ text: "1h 0m left", warn: true });
   });
   it("sessionNote covers missing, idle and counting-down sessions", () => {
     expect(sessionNote(null, 0)).toBe("no data");

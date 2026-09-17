@@ -6,9 +6,9 @@ import {
   type Metric, type PresetKey, type UnitKey,
   PRESETS, PRESET_KEYS, UNITS, UNIT_KEYS, WEEK_ALL,
   alignedSince, axisLabelsFor, bucketCount, bucketSeries, effectiveUnit,
-  metricFromKey, metricKey, metricLabel, missingLabel, nearestKnownSlot, showMissing, slotLabel, unitAllowed,
+  metricFromKey, metricKey, metricLabel, nearestKnownSlot, slotLabel, unitAllowed,
 } from "../lib/history";
-import { polylineRuns, seriesDots, seriesStats } from "../lib/series";
+import { seriesDots, seriesLine, seriesStats } from "../lib/series";
 import { metricColor } from "../lib/theme";
 import type { HistoryPoint, SnapshotDto } from "../lib/types";
 
@@ -30,7 +30,7 @@ const TIP_TRANSFORM: Record<Tip["edge"], string> = {
   left: "translate(0, calc(100% + 14px))",
   mid: "translate(-50%, calc(100% + 14px))",
 };
-/** Dots are decorative; above this many slots they are skipped (hover still works). */
+/** Dots are decorative; above this many known values they are skipped (hover still works). */
 const MAX_DOTS = 200;
 const AXIS_LABELS = 4;
 
@@ -102,13 +102,16 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
 
   // Derived once per result, not per mouse move (a 720-slot series would
   // otherwise be re-bucketed and re-stringified on every pointer event).
-  const { vals, stats, lines, dots, axis } = useMemo(() => {
+  const { vals, stats, line, dots, axis } = useMemo(() => {
     const v: Array<number | null> = result === null ? [] : bucketSeries(result.points, result.since, result.unit, result.count);
+    const known = seriesDots(v);
     return {
       vals: v,
       stats: seriesStats(v),
-      lines: polylineRuns(v, 100, 100),
-      dots: v.length <= MAX_DOTS ? seriesDots(v) : [],
+      line: seriesLine(v, 100, 100),
+      // Dots are decorative: skipped when there are many KNOWN values, so a
+      // sparse long range still shows its few points.
+      dots: known.length <= MAX_DOTS ? known : [],
       axis: result === null ? [] : axisLabelsFor(result.since, result.unit, result.count, AXIS_LABELS),
     };
   }, [result]);
@@ -146,7 +149,6 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
         <div className="drawer-stats">
           <span>peak {stats.peak}%</span>
           <span>avg {stats.avg}%</span>
-          {showMissing(shownUnit) && <span>missing {missingLabel(stats.missing, shownUnit)}</span>}
           <button type="button" className="btn-link" onClick={onCollapse}>collapse</button>
         </div>
       </div>
@@ -173,9 +175,9 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
       <div className="chart">
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricLabel(shownMetric)}, last ${PRESETS[shownPreset].label}`}>
           {[0, 50, 100].map((y) => <line key={y} x1={0} y1={y} x2={100} y2={y} stroke="#1e252a" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
-          {lines.map((points, i) => (
-            <polyline key={i} points={points} fill="none" stroke={stroke} strokeWidth={1.8} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
-          ))}
+          {line !== "" && (
+            <polyline points={line} fill="none" stroke={stroke} strokeWidth={1.8} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+          )}
         </svg>
         <div className="chart-dots" onMouseMove={onPlotMove} onMouseLeave={() => setTip(null)}>
           {dots.map((d) => (

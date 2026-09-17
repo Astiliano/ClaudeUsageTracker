@@ -3,33 +3,26 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /**
- * One `points` string per contiguous run of known values, so a gap in the
- * data breaks the line instead of connecting across missing slots. A run of
- * length 1 is emitted as a single point (harmless as a `<polyline>`; the
- * drawer draws a dot for it when dots are on).
+ * One SVG `points` string through every known value. Slot i sits at
+ * x = i/(n-1) * width (0 when n === 1); a null slot is skipped, so the line
+ * runs straight from the last known value to the next one. Empty buckets
+ * are gaps in sampling, not readings, so they are neither zeros nor breaks.
+ * "" when nothing is known.
  */
-export function polylineRuns(
+export function seriesLine(
   vals: readonly (number | null)[],
   width: number,
   height: number,
-): string[] {
+): string {
   const n = vals.length;
-  const point = (i: number, v: number): string => {
+  const points: string[] = [];
+  vals.forEach((v, i) => {
+    if (v === null) return;
     const x = n === 1 ? 0 : (i / (n - 1)) * width;
     const y = height - (clamp(v, 0, 100) / 100) * height;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  };
-  const runs: string[] = [];
-  let current: string[] = [];
-  vals.forEach((v, i) => {
-    if (v === null) {
-      if (current.length > 0) { runs.push(current.join(" ")); current = []; }
-      return;
-    }
-    current.push(point(i, v));
+    points.push(`${x.toFixed(2)},${y.toFixed(2)}`);
   });
-  if (current.length > 0) runs.push(current.join(" "));
-  return runs;
+  return points.join(" ");
 }
 
 export interface SeriesDot { index: number; value: number; leftPct: number }
