@@ -60,6 +60,10 @@ npm run tauri dev      # development
 npm run tauri build    # release bundle
 ```
 
+Release builds published under Releases are made with
+`RUSTFLAGS=--remap-path-prefix=<home dir>=C:uild` so the panic-location
+strings baked into the executable carry no local user path.
+
 `src-tauri/Cargo.toml` builds two binaries (`claude-usage-tracker`, the app,
 and `fake_claude`, a test double for the CLI). `default-run` picks
 `claude-usage-tracker` so `cargo run` and the Tauri dev/build commands are
