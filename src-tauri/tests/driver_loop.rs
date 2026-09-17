@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use cut_core::commands::{
     core_clear_halt, core_poll_now, core_set_settings, core_update_account, lock_binary,
-    lock_status, Core,
+    lock_status, Core, SystemSlot,
 };
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
 use cut_core::scheduler::machine::DriverStatus;
@@ -162,6 +162,7 @@ fn harness(running: bool) -> Harness {
         store,
         triggers: Arc::new(Triggers::new()),
         status: Arc::new(Mutex::new(DriverStatus::default())),
+        system: Arc::new(Mutex::new(SystemSlot::default())),
         binary: Arc::new(Mutex::new(None)),
         halt_latched: AtomicBool::new(false),
         close_to_tray: AtomicBool::new(true),

@@ -1092,6 +1092,7 @@ mod tests {
             store,
             triggers: Arc::new(crate::scheduler::triggers::Triggers::new()),
             status: Arc::new(Mutex::new(DriverStatus::default())),
+            system: Arc::new(Mutex::new(crate::commands::SystemSlot::default())),
             binary: Arc::new(Mutex::new(None)),
             halt_latched: std::sync::atomic::AtomicBool::new(false),
             close_to_tray: std::sync::atomic::AtomicBool::new(true),

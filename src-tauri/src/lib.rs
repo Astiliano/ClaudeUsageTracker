@@ -7,6 +7,7 @@ pub mod paths;
 pub mod process;
 pub mod scheduler;
 pub mod store;
+pub mod system;
 pub mod tray;
 pub mod usage;
 
@@ -18,7 +19,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::commands::{lock_binary, Core, SharedCore};
+use crate::commands::{lock_binary, Core, SharedCore, SystemSlot};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
@@ -125,6 +126,7 @@ pub fn run() {
                 // The driver owns the state machine and is the only writer of
                 // this snapshot (spec 5.1); everything else only reads it.
                 status: Arc::new(Mutex::new(DriverStatus::default())),
+                system: Arc::new(Mutex::new(SystemSlot::default())),
                 binary: Arc::new(Mutex::new(None)),
                 halt_latched: AtomicBool::new(false),
                 // Seeded here so the window-close handler never reads the

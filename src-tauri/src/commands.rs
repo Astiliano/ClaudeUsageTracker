@@ -25,6 +25,21 @@ pub fn lock_status(s: &Mutex<DriverStatus>) -> MutexGuard<'_, DriverStatus> {
     s.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The sampler's published state. `stopped` is set once, by the sampler's
+/// terminal break, so a slot that never received a sample is
+/// distinguishable from one that is still warming up.
+#[derive(Debug, Clone, Default)]
+pub struct SystemSlot {
+    pub stats: Option<crate::system::SystemStats>,
+    pub stopped: bool,
+}
+
+/// A poisoned system mutex means a sampler task panicked; the state itself
+/// is still coherent, so recover rather than propagate the panic.
+pub fn lock_system(slot: &Mutex<SystemSlot>) -> MutexGuard<'_, SystemSlot> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 pub fn lock_binary<'a>(
     b: &'a Mutex<Option<(String, &'static str)>>,
 ) -> MutexGuard<'a, Option<(String, &'static str)>> {
@@ -39,6 +54,9 @@ pub struct Core {
     pub store: Arc<Store>,
     pub triggers: Arc<Triggers>,
     pub status: Arc<Mutex<DriverStatus>>,
+    /// The sampler's published figures (spec §4.2). Written only by
+    /// `run_sampler`; every reader clones it.
+    pub system: Arc<Mutex<SystemSlot>>,
     pub binary: BinarySlot,
     /// In-memory mirror of the `polling_halted` flag, armed the instant the
     /// guard trips and *before* the store write is attempted. The store write
@@ -623,6 +641,7 @@ mod tests {
             store,
             triggers: Arc::new(Triggers::new()),
             status: Arc::new(std::sync::Mutex::new(DriverStatus::default())),
+            system: Arc::new(Mutex::new(SystemSlot::default())),
             binary: Arc::new(std::sync::Mutex::new(None)),
             halt_latched: AtomicBool::new(false),
             close_to_tray: AtomicBool::new(true),
