@@ -54,10 +54,14 @@ stat is removed.
   kind populates everything `Exclusion::counts` needs.
 - sysinfo 0.39.6, Windows: `refresh_cpu_usage()` opens a PDH query on first
   use (slow once), collects it, and sets `global_cpu_usage()` to
-  `100 - % Idle Time`. A rate counter needs two collections at least
-  `MINIMUM_CPU_UPDATE_INTERVAL` apart, so the first collection reads 0 and
-  the second is a true diff. It touches only the CPU counters, never the
-  per-process baselines. `refresh_memory()` is one `GlobalMemoryStatusEx`
+  `100 - % Idle Time`. `% Idle Time` is a rate counter: the very first
+  collection's `PdhGetFormattedCounterValue` fails, sysinfo's `Query::get`
+  falls back to `Some(0.)` idle, and `global_cpu_usage()` therefore reads
+  **100 % busy** after one collection. A second collection at least
+  `MINIMUM_CPU_UPDATE_INTERVAL` later succeeds and is a true interval
+  average. The priming step below discards the first read and publishes only
+  the second. It touches only the CPU counters, never the per-process
+  baselines. `refresh_memory()` is one `GlobalMemoryStatusEx`
   call; `used_memory()` is total minus available.
 - `SystemReport { stats: Option<SystemStats>, stopped }` (`commands.rs`) is
   a clone of `Core.system`; the frontend mirrors it in `types.ts`.
@@ -183,7 +187,8 @@ Pure, tested:
 - `presence_edge` and `after_panic` unchanged.
 
 `Sampler { system, self_pid, self_started_at, pid_slot, primed }` (no
-`cpus`, no cached `mem_total_bytes`). `PROCESS_REFRESH` becomes
+`cpus`, no cached `mem_total_bytes`). The inline `ProcessRefreshKind` in
+`refresh_processes` is replaced by a named `PROCESS_REFRESH` =
 `nothing().with_exe(OnlyIfNotSet).with_cmd(OnlyIfNotSet)` — the gate probe's
 kind; no CPU or memory per process.
 
@@ -192,7 +197,7 @@ unchanged):
 
 - First call only (`!primed`):
   1. `refresh_cpu_usage()` — opens the PDH query and takes the first
-     collection (reads 0; discarded).
+     collection (reads 100 % via the failed-counter fallback; discarded).
   2. `PROCESS_REFRESH`; read `self_started_at` from
      `process(self_pid).start_time()` (0 if absent, as today).
   3. `std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL)`; set `primed`.
@@ -402,6 +407,10 @@ TypeScript:
   titles (`cpu 12%`, `mem 41%`, the absolute figures, `mem —` for a 0
   total); `0 procs`, `1 proc`, `2 procs` under `showCount`; no count item
   without it; `isStale`, `clock`, `processCountSuffix`, `formatBytes` kept.
+  The existing "row 4: a zero count is one plain item" and "row 5: … a null
+  share is a dash" tests are deleted: a zero count no longer collapses the
+  line, and `cpu_pct` is no longer nullable (the non-finite case is
+  `cpu_share`'s Rust test).
 - `present.test.ts`: `weekNote` per §5; `chipFor` / `countPlacement` kept.
 - `columns.test.ts` (if it pins labels): "24 hours".
 
