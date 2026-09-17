@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
@@ -18,23 +18,16 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONSECUTIVE_PANICS: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ClaudeStats {
-    /// Claude Code processes other than the poll child and any child of this app.
-    pub count: u32,
-    /// Sum of their resident memory, bytes.
-    pub rss_bytes: u64,
-    /// Sum of their CPU usage as a share of the whole machine, 0..=100.
-    /// `None` only when the CPU count is unknown (0).
-    pub cpu_pct: Option<f32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SystemStats {
     /// Epoch milliseconds, so the UI can tell a live figure from a frozen one.
     pub sampled_at: i64,
-    /// Denominator for the memory ring only.
+    /// Whole-machine CPU busy share, 0..=100 (100 − PDH "% Idle Time").
+    pub cpu_pct: f32,
+    /// Whole-machine physical memory in use (total − available), bytes.
+    pub mem_used_bytes: u64,
     pub mem_total_bytes: u64,
-    pub claude: ClaudeStats,
+    /// Claude Code processes other than the poll child and any child of this app.
+    pub claude_count: u32,
 }
 
 /// One call's result. `did_prime` is true only on the call that ran the
@@ -47,25 +40,36 @@ pub struct Sampled {
     pub did_prime: bool,
 }
 
-/// Sums the Claude processes' memory and CPU. `cpu` is sysinfo's per-core
-/// percentage, so the machine share is the sum divided by the CPU count.
-pub fn aggregate(procs: &[ProcView], exclusion: &Exclusion, cpus: usize) -> ClaudeStats {
-    let mut count: u32 = 0;
-    let mut rss_bytes: u64 = 0;
-    let mut cpu: f32 = 0.0;
-    for view in procs {
-        if exclusion.counts(view) {
-            count = count.saturating_add(1);
-            rss_bytes = rss_bytes.saturating_add(view.rss_bytes);
-            cpu += view.cpu;
-        }
-    }
-    let cpu_pct = if cpus == 0 {
-        None
+/// How many of the views are Claude Code processes we count (spec §4.1 of
+/// the gate-and-system design: the exclusion drops the poll child and this
+/// app's own children).
+pub fn count_claude(procs: &[ProcView], exclusion: &Exclusion) -> u32 {
+    procs
+        .iter()
+        .filter(|view| exclusion.counts(view))
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+/// A publishable CPU share. PDH can hand back a non-finite value on a
+/// counter hiccup and `f32::clamp` would pass NaN through, so it is 0 here.
+pub fn cpu_share(raw: f32) -> f32 {
+    if raw.is_finite() {
+        raw.clamp(0.0, 100.0)
     } else {
-        Some((cpu / cpus as f32).clamp(0.0, 100.0))
-    };
-    ClaudeStats { count, rss_bytes, cpu_pct }
+        0.0
+    }
+}
+
+/// The gate probe's refresh kind: enough for name, parent, start time and
+/// command line, no per-process CPU or memory. (The spec calls this
+/// `PROCESS_REFRESH`; sysinfo's builder methods are not `const fn`, so it is
+/// a function.)
+fn process_refresh() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_exe(UpdateKind::OnlyIfNotSet)
+        .with_cmd(UpdateKind::OnlyIfNotSet)
 }
 
 /// The wake condition: Claude Code has just appeared.
@@ -87,8 +91,6 @@ pub struct Sampler {
     self_pid: u32,
     self_started_at: u64,
     pid_slot: Arc<AtomicU32>,
-    cpus: usize,
-    mem_total_bytes: u64,
     primed: bool,
 }
 
@@ -99,22 +101,13 @@ impl Sampler {
             self_pid: std::process::id(),
             self_started_at: 0,
             pid_slot,
-            cpus: 0,
-            mem_total_bytes: 0,
             primed: false,
         }
     }
 
     fn refresh_processes(&mut self) {
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_exe(UpdateKind::OnlyIfNotSet)
-                .with_cmd(UpdateKind::OnlyIfNotSet)
-                .with_cpu()
-                .with_memory(),
-        );
+        self.system
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh());
     }
 
     pub fn sample(&mut self, now_ms: i64) -> Sampled {
@@ -122,33 +115,25 @@ impl Sampler {
         let did_prime = !self.primed;
 
         if did_prime {
-            // 1. Initialise the CPU list without opening the PDH usage
-            //    query. sysinfo divides each process's share by
-            //    `cpus().len()`, so this MUST precede the first process
-            //    refresh or every `cpu_usage()` reads 0.
-            self.system
-                .refresh_cpu_specifics(CpuRefreshKind::nothing());
-            self.cpus = self.system.cpus().len();
-            // 2. Total memory is a constant; read it once.
-            self.system.refresh_memory();
-            self.mem_total_bytes = self.system.total_memory();
-            // 3. First priming refresh: stamps last_update, seeds nothing.
+            // 1. Open the PDH query and take its first collection.
+            //    "% Idle Time" is a rate counter: this first read fails
+            //    inside sysinfo and surfaces as 100 % busy, so it is never
+            //    published; the collection below is the first real one.
+            self.system.refresh_cpu_usage();
+            // 2. Our own start time, for the exclusion's recycled-pid clause.
             self.refresh_processes();
-            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-            // 4. Our own start time, for the exclusion's recycled-pid clause.
             self.self_started_at = self
                 .system
                 .process(Pid::from_u32(self.self_pid))
                 .map(|p| p.start_time())
                 .unwrap_or(0);
-            // 5. Second priming refresh: diffs against zero (a since-boot
-            //    average, discarded) and seeds the baseline. The common-path
-            //    refresh below is then the first true diff.
-            self.refresh_processes();
+            // 3. The second collection must be at least this far from the first.
             std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
             self.primed = true;
         }
 
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
         self.refresh_processes();
         let views: Vec<ProcView> = self
             .system
@@ -164,13 +149,14 @@ impl Sampler {
                 p => Some(p),
             },
         };
-        let claude = aggregate(&views, &exclusion, self.cpus);
 
         Sampled {
             stats: SystemStats {
                 sampled_at: now_ms,
-                mem_total_bytes: self.mem_total_bytes,
-                claude,
+                cpu_pct: cpu_share(self.system.global_cpu_usage()),
+                mem_used_bytes: self.system.used_memory(),
+                mem_total_bytes: self.system.total_memory(),
+                claude_count: count_claude(&views, &exclusion),
             },
             elapsed_ms: started.elapsed().as_millis() as u64,
             did_prime,
@@ -239,26 +225,22 @@ pub async fn run_sampler(
         }
 
         let Sampled { stats, elapsed_ms, did_prime } = sampled;
-        if presence_edge(prev_count, stats.claude.count) {
+        if presence_edge(prev_count, stats.claude_count) {
             info!("presence wake");
             core.triggers.presence();
         }
-        if prev_count != stats.claude.count {
-            info!(
-                count = stats.claude.count,
-                rss_bytes = stats.claude.rss_bytes,
-                "claude processes changed"
-            );
+        if prev_count != stats.claude_count {
+            info!(count = stats.claude_count, "claude processes changed");
         }
         debug!(
             elapsed_ms,
-            count = stats.claude.count,
-            rss_bytes = stats.claude.rss_bytes,
-            cpu_pct = ?stats.claude.cpu_pct,
+            count = stats.claude_count,
+            cpu_pct = stats.cpu_pct,
+            mem_used_bytes = stats.mem_used_bytes,
             did_prime,
             "system sample"
         );
-        prev_count = stats.claude.count;
+        prev_count = stats.claude_count;
         lock_system(&core.system).stats = Some(stats);
         events.system_sampled();
         wait = SAMPLE_INTERVAL;
@@ -270,15 +252,13 @@ mod tests {
     use super::*;
     use crate::process::{Exclusion, ProcView};
 
-    fn view(pid: u32, name: &str, rss_bytes: u64, cpu: f32) -> ProcView {
+    fn view(pid: u32, name: &str) -> ProcView {
         ProcView {
             pid,
             parent: Some(1),
             start_time: 9_000,
             name: name.to_string(),
             cmd: vec![name.to_string()],
-            rss_bytes,
-            cpu,
         }
     }
 
@@ -287,37 +267,23 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_sums_only_the_counted_processes() {
-        let procs = vec![
-            view(200, "claude.exe", 1_000, 10.0),
-            view(201, "claude.exe", 2_000, 30.0),
-            view(202, "code.exe", 9_999, 90.0),
-        ];
-        let stats = aggregate(&procs, &exclusion(), 4);
-        assert_eq!(stats.count, 2);
-        assert_eq!(stats.rss_bytes, 3_000);
-        assert_eq!(stats.cpu_pct, Some(10.0), "40 per-core percent over 4 cpus");
+    fn count_claude_counts_only_the_views_the_exclusion_accepts() {
+        let procs = vec![view(200, "claude.exe"), view(201, "claude.exe"), view(202, "code.exe")];
+        assert_eq!(count_claude(&procs, &exclusion()), 2);
     }
 
     #[test]
-    fn aggregate_clamps_at_a_hundred() {
-        let procs = vec![view(200, "claude.exe", 1, 800.0)];
-        let stats = aggregate(&procs, &exclusion(), 4);
-        assert_eq!(stats.cpu_pct, Some(100.0));
+    fn count_claude_of_nothing_is_zero() {
+        assert_eq!(count_claude(&[], &exclusion()), 0);
     }
 
     #[test]
-    fn aggregate_without_a_cpu_count_reports_no_share() {
-        let procs = vec![view(200, "claude.exe", 1, 50.0)];
-        assert_eq!(aggregate(&procs, &exclusion(), 0).cpu_pct, None);
-    }
-
-    #[test]
-    fn aggregate_of_nothing_is_zeros() {
-        let stats = aggregate(&[], &exclusion(), 4);
-        assert_eq!(stats.count, 0);
-        assert_eq!(stats.rss_bytes, 0);
-        assert_eq!(stats.cpu_pct, Some(0.0));
+    fn cpu_share_clamps_and_never_publishes_a_non_finite_value() {
+        assert_eq!(cpu_share(f32::NAN), 0.0, "a PDH hiccup must not become NaN on the wire");
+        assert_eq!(cpu_share(f32::INFINITY), 0.0);
+        assert_eq!(cpu_share(-1.0), 0.0);
+        assert_eq!(cpu_share(150.0), 100.0);
+        assert_eq!(cpu_share(12.3), 12.3);
     }
 
     #[test]
@@ -336,20 +302,20 @@ mod tests {
     }
 
     /// Smoke test against the real machine: it must return, prime on the
-    /// first call only, and produce a usable memory denominator. Not a
-    /// value assertion; the numbers depend on the host.
+    /// first call only, and produce usable machine figures. Not a value
+    /// assertion; the numbers depend on the host.
     #[test]
     fn sample_primes_once_and_returns_usable_figures() {
         let mut sampler = Sampler::new(Arc::new(AtomicU32::new(0)));
         let first = sampler.sample(1_700_000_000_000);
-        assert!(first.did_prime, "the first call runs the priming refreshes");
+        assert!(first.did_prime, "the first call runs the priming collection");
         assert!(first.stats.mem_total_bytes > 0);
-        assert!(
-            first.stats.claude.cpu_pct.is_some(),
-            "priming means the first published share is a real diff"
-        );
+        assert!(first.stats.mem_used_bytes <= first.stats.mem_total_bytes);
+        assert!(first.stats.cpu_pct.is_finite());
+        assert!((0.0..=100.0).contains(&first.stats.cpu_pct));
 
         let second = sampler.sample(1_700_000_005_000);
         assert!(!second.did_prime, "priming happens once per Sampler");
+        assert!((0.0..=100.0).contains(&second.stats.cpu_pct));
     }
 }
