@@ -209,15 +209,14 @@ button.pill { cursor: pointer; background: transparent; }
   background: var(--chart); padding: 14px 16px;
 }
 .chart svg { width: 100%; height: 100%; overflow: visible; }
-.chart-dots { position: absolute; inset: 14px 16px; pointer-events: none; }
+.chart-dots { position: absolute; inset: 14px 16px; pointer-events: auto; }
 .dot {
   position: absolute; width: 8px; height: 8px; border-radius: 50%;
   background: #e9eef3; border: 2px solid var(--chart);
   box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
   transform: translate(-50%, 50%);
-  pointer-events: auto;
+  pointer-events: none;
 }
-.dot:hover { transform: translate(-50%, 50%) scale(1.55); background: #fff; }
 .tip {
   position: absolute; z-index: 8; pointer-events: none; white-space: nowrap;
   font-family: var(--mono); font-size: 11px; color: #eef3f8; background: #1d2429;
@@ -228,6 +227,9 @@ button.pill { cursor: pointer; background: transparent; }
 .chart-y-top { top: 8px; }
 .chart-y-bottom { bottom: 6px; }
 .chart-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.drawer-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.drawer-group { display: flex; gap: 4px; }
+.drawer-metric { padding: 5px 8px; font-size: 11.5px; }
 
 /* ---- edit drawer ---- */
 .edit-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }

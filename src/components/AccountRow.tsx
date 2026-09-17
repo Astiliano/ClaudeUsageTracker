@@ -50,7 +50,7 @@ function StatusPill({ pill, onShowFailure }: { pill: Pill; onShowFailure: (id: n
 
 export function AccountRow(props: Props): JSX.Element {
   const {
-    row, index, total, points, now, columnOrder, gridCols, hotColumn, drag, rowH,
+    row, index, total, points, now, cycle, columnOrder, gridCols, hotColumn, drag, rowH,
     chartOpen, editing, onHandleDown, onToggleChart, onToggleEdit, onMove, onChanged, onError, onShowFailure,
   } = props;
 
@@ -114,7 +114,7 @@ export function AccountRow(props: Props): JSX.Element {
       </div>
       {chartOpen && (
         <div role="row"><div role="cell">
-          <HistoryDrawer points={points} now={now} stroke={stroke} onCollapse={onToggleChart} />
+          <HistoryDrawer accountId={row.account.id} latest={row.latest} cycle={cycle} onError={onError} onCollapse={onToggleChart} />
         </div></div>
       )}
       {editing && (

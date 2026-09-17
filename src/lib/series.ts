@@ -1,46 +1,12 @@
-import type { HistoryPoint } from "./types";
-
-/** Days of history the drawer requests and derives its sparkline from. */
-export const HISTORY_DAYS = 30;
-
-const DAY_MS = 86_400_000;
-
-function startOfLocalDay(t: number): number {
-  const d = new Date(t);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
 /**
- * Daily buckets of the max hourly reading, last `days` local calendar days,
- * newest last. Rounding the day distance absorbs 23/25-hour DST days.
- */
-export function dailyMax(
-  points: readonly HistoryPoint[],
-  days: number,
-  now: number,
-): Array<number | null> {
-  const today = startOfLocalDay(now);
-  const out: Array<number | null> = Array.from({ length: days }, () => null);
-  for (const p of points) {
-    const back = Math.round((today - startOfLocalDay(p.t)) / DAY_MS);
-    const idx = days - 1 - back;
-    if (idx < 0 || idx >= days) continue;
-    const cur = out[idx];
-    out[idx] = cur === null ? p.pct : Math.max(cur, p.pct);
-  }
-  return out;
-}
-
-/**
  * One `points` string per contiguous run of known values, so a gap in the
- * data breaks the line instead of connecting across missing days. A run of
+ * data breaks the line instead of connecting across missing slots. A run of
  * length 1 is emitted as a single point (harmless as a `<polyline>`; the
- * drawer already draws a dot for it).
+ * drawer draws a dot for it when dots are on).
  */
 export function polylineRuns(
   vals: readonly (number | null)[],
@@ -88,17 +54,4 @@ export function seriesStats(vals: readonly (number | null)[]): SeriesStats {
     avg: known.length ? Math.round(sum / known.length) : 0,
     missing: vals.length - known.length,
   };
-}
-
-export function dayLabel(index: number, total: number, now: number, locale?: string): string {
-  const d = new Date(now);
-  d.setDate(d.getDate() - (total - 1 - index));
-  return d.toLocaleDateString(locale, { month: "short", day: "numeric" });
-}
-
-export function axisLabels(total: number, count: number, now: number, locale?: string): string[] {
-  const c = Math.max(2, count);
-  return Array.from({ length: c }, (_, i) =>
-    dayLabel(Math.round((i * (total - 1)) / (c - 1)), total, now, locale),
-  );
 }
