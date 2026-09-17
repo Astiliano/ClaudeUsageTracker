@@ -3,7 +3,7 @@ import limits from "./historyLimits.json";
 import {
   MAX_BUCKETS, MAX_RANGE_MS, MIN_BUCKET_MS, PRESETS, PRESET_KEYS, UNITS, UNIT_KEYS, WEEK_ALL,
   alignedSince, axisLabelsFor, bucketCount, bucketSeries, effectiveUnit, metricFromKey, metricKey,
-  metricLabel, missingLabel, nearestKnownSlot, showMissing, slotLabel, unitAllowed,
+  metricLabel, nearestKnownSlot, slotLabel, unitAllowed,
 } from "./history";
 
 const MIN = 60_000;
@@ -158,16 +158,6 @@ describe("labels", () => {
   it("slot labels carry date and time for sub-day units and the date only for days", () => {
     expect(slotLabel(hour, "15m", 5, "en-US")).toBe("Sep 16 15:15");
     expect(slotLabel(midnight - 2 * DAY, "1d", 2, "en-US")).toBe("Sep 16");
-  });
-  it("missing label is unit aware and the stat is hidden at 1m", () => {
-    expect(missingLabel(3, "1m")).toBe("3 m");
-    expect(missingLabel(3, "5m")).toBe("15 m");
-    expect(missingLabel(2, "15m")).toBe("30 m");
-    expect(missingLabel(4, "1h")).toBe("4 h");
-    expect(missingLabel(2, "1d")).toBe("2 d");
-    expect(showMissing("1m")).toBe(false);
-    expect(showMissing("5m")).toBe(true);
-    expect(showMissing("1d")).toBe(true);
   });
 });
 

@@ -161,24 +161,8 @@ export function slotLabel(since: number, unit: UnitKey, index: number, locale?: 
   return unit === "1d" ? dateText(t, locale) : `${dateText(t, locale)} ${timeText(t, locale)}`;
 }
 
-/** "12 m" | "3 h" | "2 d" for the stats strip. */
-export function missingLabel(missing: number, unit: UnitKey): string {
-  switch (unit) {
-    case "1m": return `${missing} m`;
-    case "5m": return `${missing * 5} m`;
-    case "15m": return `${missing * 15} m`;
-    case "1h": return `${missing} h`;
-    case "1d": return `${missing} d`;
-  }
-}
-
-/** Poll density is one row per 1.7–3.4 min, so at 1m gaps are expected, not missing. */
-export function showMissing(unit: UnitKey): boolean {
-  return unit !== "1m";
-}
-
 /**
- * polylineRuns places slot i at x = i/(n-1), so the candidate is
+ * seriesLine places slot i at x = i/(n-1), so the candidate is
  * round(fraction * (n-1)); from there the nearest non-null slot wins, the
  * lower index on ties. Null when every slot is null.
  */
