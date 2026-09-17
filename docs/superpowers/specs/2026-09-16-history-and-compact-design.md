@@ -122,18 +122,27 @@ GROUP BY bucket ORDER BY bucket ASC;
 
 -- model
 SELECT ?2 + ((s.taken_at - ?2) / ?3) * ?3 AS bucket,
-       MAX(json_extract(m.value, '$.pct')) AS pct
-FROM snapshots AS s, json_each(s.week_models) AS m
+       MAX(json_extract(s.week_models, m.fullkey || '.pct')) AS pct
+FROM snapshots AS s,
+     json_each(CASE WHEN json_valid(s.week_models) AND json_type(s.week_models) = 'array'
+                    THEN s.week_models ELSE '[]' END) AS m
 WHERE s.account_id = ?1 AND s.taken_at >= ?2 AND s.outcome = 'ok'
-  AND s.week_models IS NOT NULL AND json_valid(s.week_models)
-  AND json_extract(m.value, '$.label') = ?4
+  AND s.week_models IS NOT NULL
+  AND json_extract(s.week_models, m.fullkey || '.label') = ?4
+  AND json_type(s.week_models, m.fullkey || '.pct') IN ('integer', 'real')
 GROUP BY bucket ORDER BY bucket ASC;
 ```
 
-`json_valid` mirrors `row_to_dto`'s tolerance of a malformed `week_models`
-(it falls back to an empty list rather than failing); without it one bad row
-would fail the whole query. The model `pct` is read as `f64` (JSON numbers
-may come back as REAL), rounded, then clamped to `u8` like the other two.
+This mirrors `row_to_dto`'s tolerance of a malformed `week_models` (it falls
+back to an empty list rather than failing). The guard has to sit **inside
+`json_each`'s argument**: the function raises on malformed input before any
+`WHERE` term can filter the row, so a `WHERE json_valid(...)` would not save
+the query. Element fields are read from the root document via `m.fullkey`
+rather than from `m.value`, so a scalar element (`[5, {...}]`) yields NULL
+instead of a "malformed JSON" error, and the `json_type … IN ('integer',
+'real')` predicate keeps a text `pct` out of `MAX`. The model `pct` is read
+as `f64` (JSON numbers may come back as REAL), rounded, then clamped to
+`u8` like the other two.
 
 **Why server-side `json_each` rather than client aggregation:** the
 alternative is shipping every raw row in range (up to ~25 000 per account
@@ -150,12 +159,14 @@ A second, read-only command supplies the picker:
 get_history_models { account_id: String } -> Vec<String>
 ```
 
-`SELECT DISTINCT json_extract(m.value,'$.label') AS label FROM snapshots s,
-json_each(s.week_models) m WHERE s.account_id = ?1 AND s.taken_at >= ?2 AND
-s.outcome = 'ok' AND s.week_models IS NOT NULL AND json_valid(s.week_models)
-AND typeof(label) = 'text'
+`SELECT DISTINCT json_extract(s.week_models, m.fullkey || '.label') AS label
+FROM snapshots s, json_each(CASE WHEN json_valid(s.week_models) AND
+json_type(s.week_models) = 'array' THEN s.week_models ELSE '[]' END) m
+WHERE s.account_id = ?1 AND s.taken_at >= ?2 AND s.outcome = 'ok' AND
+s.week_models IS NOT NULL AND typeof(label) = 'text'
 AND length(trim(label, char(32, 9, 10, 13))) >= 1 AND length(label) <= ?3
-ORDER BY 1`, with `since = now - RETENTION_MS` and `?3 = MAX_LABEL_LEN`.
+ORDER BY label ASC`, with `since = now - RETENTION_MS` and `?3 =
+MAX_LABEL_LEN` (same malformed-JSON guard as the model query above).
 SQLite's bare `trim()` strips only spaces, so the explicit character set
 (space, tab, LF, CR) is what makes this the same rule as the validation
 table — non-blank after trim, at most 64 characters — and the picker can
@@ -172,16 +183,18 @@ validation; `get_history` / `get_history_models` commands; register in
 `MAX_HISTORY_DAYS`, `DAY_MS` in `commands.rs`, are removed (nothing else
 uses them). Constants `MIN_BUCKET_MS`, `MAX_BUCKETS`, `MAX_RANGE_MS`,
 `RANGE_SLACK_MS`, `MAX_LABEL_LEN` live next to `RETENTION_MS` in
-`store/snapshots.rs`, each on its own line in the exact form
-`pub const NAME: i64 = <digits>;` (underscore separators allowed; a digit
-literal even where `= RETENTION_MS` would read better — `MAX_RANGE_MS` is
-written out as `2_592_000_000` with a comment). A Vitest test
-(`history.test.ts`) reads that file with `node:fs`, asserts that each of
-`MIN_BUCKET_MS`, `MAX_BUCKETS` and `MAX_RANGE_MS` matches **exactly once**
-(zero matches is a failure, not a pass), and compares the values with the
-TypeScript constants, so the two sides cannot drift silently.
-`RANGE_SLACK_MS` and `MAX_LABEL_LEN` have no TypeScript counterpart (the UI
-never computes them) and are not part of that test.
+`store/snapshots.rs`. The three limits the UI also needs are published in
+one shared file, `src/lib/historyLimits.json`
+(`{"minBucketMs": 60000, "maxBuckets": 1000, "maxRangeMs": 2592000000}`):
+`history.ts` imports it (`resolveJsonModule` is on) and derives its
+constants from it, so the TypeScript side cannot drift by construction; a
+Rust unit test in `snapshots.rs` reads the same file with `include_str!` and
+asserts each value equals the Rust constant (and that `MAX_RANGE_MS ==
+RETENTION_MS`), so the Rust side cannot drift without failing `cargo test`.
+(`node:fs` from a Vitest test was rejected: `@types/node` is not installed
+and test files are type-checked by the `tsc` build gate.) `RANGE_SLACK_MS`
+and `MAX_LABEL_LEN` have no TypeScript counterpart (the UI never computes
+them) and are not in the JSON.
 
 Label validation in Rust: `label.trim()` must be non-empty and
 `trim().chars().count() <= MAX_LABEL_LEN` (characters, matching SQLite's
@@ -588,10 +601,9 @@ Rust (`snapshots.rs`, `commands.rs`, `schema.rs`, `accounts.rs`):
 TypeScript (`history.test.ts`, `columns.test.ts`, `prefs.test.ts`,
 `layout.test.ts`, `gauge.test.ts`, `series.test.ts` trimmed):
 - preset table matches §3.2 exactly (auto unit and allowed set per preset).
-- the TypeScript limits (`MAX_BUCKETS`, min unit ms, max range ms) equal the
-  Rust constants, read from `src-tauri/src/store/snapshots.rs` with `node:fs`
-  and a regex on `pub const NAME: i64 = <digits>;`, each name asserted to
-  match exactly once.
+- the TypeScript limits come from `historyLimits.json` (asserted equal to
+  the imported values), and the Rust test in `snapshots.rs` asserts the same
+  file equals the Rust constants.
 - `alignedSince` lands on local boundaries (minute, quarter, hour, midnight)
   for 40 `now` values spread across a year (so any local DST transition is
   covered), never exceeds the preset range, and `bucketCount` never exceeds
