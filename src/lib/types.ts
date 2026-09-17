@@ -64,6 +64,23 @@ export interface Dashboard {
   interval_secs: number;
 }
 
+export interface ClaudeStats {
+  count: number;
+  rss_bytes: number;
+  cpu_pct: number | null;
+}
+
+export interface SystemStats {
+  sampled_at: number;
+  mem_total_bytes: number;
+  claude: ClaudeStats;
+}
+
+export interface SystemReport {
+  stats: SystemStats | null;
+  stopped: boolean;
+}
+
 export interface HistoryPoint {
   t: number;
   pct: number;
