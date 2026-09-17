@@ -190,7 +190,7 @@ local 1 s tick for "resets in" / "N s ago" text.
 ```rust
 pub struct Account { id: String /*uuid v4*/, label: String,
                      config_dir: PathBuf /*canonicalised*/, enabled: bool,
-                     disabled_reason: Option<DisabledReason>, is_default: bool,
+                     disabled_reason: Option<DisabledReason>, is_default: bool, // *(2026-09-16: `is_default` removed; V3 drops the column, `add_account` no longer takes it, ordering is `sort_order` then label.)*
                      created_at: i64 /*epoch ms*/ }
 pub enum DisabledReason { User, GuardTripped }
 
@@ -506,7 +506,7 @@ in `tauri::async_runtime::spawn_blocking` — the mutex is never held across an
 accounts(id TEXT PRIMARY KEY, label TEXT NOT NULL,
          config_dir TEXT NOT NULL UNIQUE,          -- canonicalised
          enabled INTEGER NOT NULL, disabled_reason TEXT,   -- NULL|user|guard_tripped
-         is_default INTEGER NOT NULL, created_at INTEGER NOT NULL,
+         is_default INTEGER NOT NULL, created_at INTEGER NOT NULL, -- *(2026-09-16: `is_default` removed; V3 drops the column, `add_account` no longer takes it, ordering is `sort_order` then label.)*
          sort_order INTEGER NOT NULL DEFAULT 0)    -- V2; manual order, D17
 settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 snapshots(id INTEGER PRIMARY KEY,
@@ -522,7 +522,7 @@ CREATE INDEX snapshots_time ON snapshots(taken_at);
 ```
 
 Queries: `list_accounts()`/`enabled_account_ids()` order
-`ORDER BY sort_order ASC, is_default DESC, lower(label) ASC, label ASC`
+`ORDER BY sort_order ASC, is_default DESC, lower(label) ASC, label ASC` *(2026-09-16: `is_default` removed; V3 drops the column, `add_account` no longer takes it, ordering is `sort_order` then label.)*
 (`sort_order` is authoritative; the rest is a tiebreak, relevant only while
 rows share a `sort_order`). `latest_per_account()` (max `taken_at`, tiebreak
 max `id`), `history(account_id, since)` → hourly buckets `[{t, pct}]` of
@@ -624,6 +624,7 @@ Single window, dark/light follows OS.
   breaks, never zeros) · last updated ("42 s ago", live) · status pill. Pill precedence: `disabled` (with reason
   tooltip) > `backing off (next in 4 min)` > latest outcome (`ok` / `no data
   — log in?` / `parse error` / `spawn error` / `timeout` / `guard tripped`).
+- (2026-09-16) The history drawer offers range presets 1h/6h/12h/24h/7d/30d, a granularity override within the limits above, and a metric picker. Columns other than Account can be hidden in Settings. Below 820 px (local) the table hides Updated and Per model; below 640 px it becomes one card per account with ring gauges; minimum window 360×240. "Keep window on top" is a per-device pref. The default-account flag (`is_default`) was removed end to end.
 - **Row actions**: a drag handle (`aria-label="Drag to reorder"`) at the row
   start for manual reordering (native HTML5 drag and drop; drop persists via
   `reorder_accounts`), plus Move up/Move down buttons as a keyboard/no-mouse
@@ -642,7 +643,8 @@ Single window, dark/light follows OS.
 | Command | Args → Result |
 |---|---|
 | `get_dashboard` | → `{ accounts: [{ account: Account, latest: SnapshotDto?, backoff_until: i64? }], gate, busy, halted: string?, stalled_at: i64?, binary: { path?, source? }, interval_secs }` — cheap; called on every `usage:updated` (debounced). `stalled_at` and `backoff_until` live in the shared `AppState` (`Arc<Mutex<DriverStatus>>`, written by the driver, read by commands), reset on restart; `stalled_at` is set by the watchdog arm and cleared on the next `cycle:finished`; `halted` comes from the store |
-| `get_history` | `{account_id, days?}` → `[{t, pct}]` hourly points for the last `days` days (1–30, default 7) — the UI asks for 30 once per cycle and derives the 7-day sparkline from the same points, called on `cycle:finished` and on mount, not per `usage:updated` |
+| `get_history` | `{account_id, since, bucket_ms, metric}` → `[{t, pct}]` buckets of max(metric) anchored at `since`; `metric` is `{kind:"week_all"}`, `{kind:"session"}` or `{kind:"model", label}`. Limits (2026-09-16): `bucket_ms ≥ 60 000`, `≤ 1 000` buckets, range `≤ 30 d` (+5 min slack), model label non-blank and `≤ 64` chars; violations are `out_of_range`. The sparkline asks for 7 d / 1 h week-all once per cycle; the drawer fetches on demand |
+| `get_history_models` | `{account_id}` → `[label]` distinct model labels seen in `ok` snapshots within retention (2026-09-16) |
 | `poll_now` | → `"started" \| "skipped:<reason>"` |
 | `add_account` | `{config_dir}` → Account. Canonicalises; rejects missing dir (`not_found`) or duplicate (`duplicate`) |
 | `update_account` | `{id, label?, enabled?}` → Account. `enabled: false` sets `disabled_reason = user`; `enabled: true` clears it and triggers `AccountChanged` |

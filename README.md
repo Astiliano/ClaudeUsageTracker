@@ -28,7 +28,8 @@ Accounts can be reordered by dragging rows with the grip handle, or with the
 Move up/Move down buttons inside a row's edit drawer. Column headers can also
 be dragged to reorder; column order, typeface and text size persist per
 machine in the webview's local storage. Click a row's sparkline to open the
-30-day history drawer. Removing an account (in a row's edit drawer) asks for
+history drawer, which offers range presets from 1 hour to 30 days, a
+granularity override and a metric picker. Removing an account (in a row's edit drawer) asks for
 a second click within 4 seconds before it deletes the account and its
 history.
 
