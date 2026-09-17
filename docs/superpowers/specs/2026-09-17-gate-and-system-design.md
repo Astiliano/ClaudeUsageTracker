@@ -530,7 +530,8 @@ clears it; every other event stays a no-op.
   after repeated panics`.
 - DEBUG: `system sample {elapsed_ms, count, rss_bytes, cpu_pct, did_prime}`;
   `presence skipped {reason}` for busy / already_active / check failed;
-  `trigger ignored: shutting down {trigger}`; the existing `decision skipped`
+  `trigger ignored: shutting down {trigger}`; `process check skipped:
+  shutting down`; the existing `decision skipped`
   line now also covers `already_active`.
 - The existing `process gate check` DEBUG line is unchanged; which trigger
   spent it is one line above in `decision skipped` / `gate changed`.
