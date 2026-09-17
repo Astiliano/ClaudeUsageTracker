@@ -3,6 +3,7 @@ name = "claude-usage-tracker"
 version = "0.1.0"
 description = "Task-manager style Claude subscription usage tracker"
 authors = ["Josh"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.96"
 default-run = "claude-usage-tracker"
