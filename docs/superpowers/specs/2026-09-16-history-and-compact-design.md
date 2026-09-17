@@ -53,8 +53,10 @@ handle to set failover priority · …") is removed outright (Josh,
   cycle; `AccountRow` filters to 7 days for the sparkline *(2026-09-17: the
   row sparkline requests 24 h at 15 m; see the charts-and-system design
   §6.)*; `HistoryDrawer` derives local-day maxima with `dailyMax`.
-- The chart is hand-rolled SVG: `polylineRuns` emits one `<polyline>` per
-  contiguous run of known values; `seriesDots` places hover targets;
+- The chart is hand-rolled SVG: `polylineRuns` *(2026-09-17: `polylineRuns`
+  was replaced by `seriesLine`, one continuous `<polyline>` through every
+  known slot; see `2026-09-17-charts-and-system-design.md` §3.1.)* emits one
+  `<polyline>` per contiguous run of known values; `seriesDots` places hover targets;
   `seriesStats` computes peak/avg/missing. No chart library; that stays.
 - View prefs live in `localStorage` under `usage-tracker.prefs.v1`
   (`parsePrefs` validates each field independently; `normalizeColumnOrder`
@@ -236,7 +238,7 @@ backstop, not the UX.
 
 Replaces the day-only helpers in `series.ts` (`HISTORY_DAYS`, `dailyMax`,
 `dayLabel`, `axisLabels` are deleted along with their tests;
-`polylineRuns`, `seriesDots`, `seriesStats` stay in `series.ts`).
+`polylineRuns` *(now `seriesLine`, 2026-09-17)*, `seriesDots`, `seriesStats` stay in `series.ts`).
 
 ```ts
 export type PresetKey = "1h" | "6h" | "12h" | "24h" | "7d" | "30d";
@@ -269,7 +271,7 @@ export function bucketCount(since: number, now: number, unit: UnitKey): number;
   // ceil((now - since) / ms), always >= 1 (the last slot is the current, partial unit)
 
 export function nearestKnownSlot(vals: readonly (number | null)[], fraction: number): number | null;
-  // fraction in [0,1] across the plot width. polylineRuns places slot i at
+  // fraction in [0,1] across the plot width. polylineRuns *(now `seriesLine`, 2026-09-17)* places slot i at
   // x = i/(n-1), so the candidate is round(fraction * (n-1)); from there the
   // nearest non-null slot wins (ties to the lower index); null when all null.
 
@@ -332,7 +334,7 @@ Effects:
   stays selected (its series may still exist in range) — no automatic reset.
 
 Rendering from `result`: `vals = bucketSeries(points, since, unit, count)`;
-`polylineRuns(vals, 100, 100)`; `seriesDots(vals)`; `seriesStats(vals)`.
+`polylineRuns` *(now `seriesLine`, 2026-09-17)* `(vals, 100, 100)`; `seriesDots(vals)`; `seriesStats(vals)`.
 `fetchNow` is the `Date.now()` captured when the request was built and
 `count = bucketCount(since, fetchNow, unit)` is fixed with it, so the slot
 grid does not drift while the response is in flight. Hover is one code path:

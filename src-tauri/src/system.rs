@@ -25,6 +25,7 @@ pub struct SystemStats {
     pub cpu_pct: f32,
     /// Whole-machine physical memory in use (total − available), bytes.
     pub mem_used_bytes: u64,
+    /// Whole-machine physical memory, bytes; the denominator for the memory ring.
     pub mem_total_bytes: u64,
     /// Claude Code processes other than the poll child and any child of this app.
     pub claude_count: u32,

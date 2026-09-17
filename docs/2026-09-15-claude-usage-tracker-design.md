@@ -745,7 +745,7 @@ Linux needs `libayatana-appindicator3-dev` for the tray.
 | process | `matches_claude` on synthetic (name, cmd) tuples: native, npm, unrelated node, excluded pid |
 | tray | `tray_state`: `Halted` beats everything; grey/green/amber/red thresholds, multi-account worst-of, per-model segments, `err` rendering |
 | commands | `add_account` rejects missing/duplicate; `set_settings` boundary values (10/3600, 5/120) accept, one-off values reject; `update_account` enable clears `disabled_reason`, disable sets `user`; `clear_halt` clears the flag, logs, and does not poll; **`core_reorder_accounts` persists the new order and rejects an unknown id** |
-| frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → separate sub-paths), status pill precedence; **`moveItem` pure helper (move down, move up, same-index no-op, out-of-range returns a copy unchanged)** |
+| frontend | Vitest: countdown formatter (incl. past `resets_at` → "resets now"), "N s ago" formatter, sparkline path builder (incl. gap → one continuous path, no zero emitted (2026-09-17)), status pill precedence; **`moveItem` pure helper (move down, move up, same-index no-op, out-of-range returns a copy unchanged)** |
 | scheduler/driver | Tokio-based: triggers during a cycle coalesce to one `Skip(Busy)` and never queue; two `AccountChanged` in quick succession poll both accounts; `clear_halt` does not start a poll; settings change moves the deadline without restarting the clock; watchdog aborts a deliberately hung cycle task and busy clears; shutdown kills a live fake child |
 | integration (manual, documented in README) | Real poll against `~/.claude3`; Git Bash hazard reproduction is **not** run (costs quota) |
 

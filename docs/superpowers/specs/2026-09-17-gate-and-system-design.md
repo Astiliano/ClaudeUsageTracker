@@ -192,6 +192,8 @@ pub struct SystemStats {
     /// Claude Code processes other than the poll child and any child of this app.
     pub claude_count: u32,
 }
+
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 ```
 
 `ClaudeStats` is deleted.
@@ -248,7 +250,9 @@ instead of two (the per-process CPU baseline that needed the second one is
 gone). Memory is re-read every sample because `used_memory` changes; the
 total is read with it for free. Cost per sample: one PDH collection, one
 `GlobalMemoryStatusEx`, one process walk without per-process CPU or memory
-reads — less than today.
+reads — less than today. The sampler has its **own** `System`; the gate’s
+`SysinfoProbe` is untouched, so the two never contend and a gate refresh
+cannot disturb the CPU counter’s baseline.
 
 `run_sampler` is unchanged except for the log fields (§7) and the field
 names (`stats.claude_count`).
@@ -308,10 +312,10 @@ loop {
     sampler = next;
     let Sampled { stats, elapsed_ms, did_prime } = sampled;
     if shutdown.is_cancelled() { break; }   // cancellation landed during the sample: publish nothing, wake nobody
-    if presence_edge(prev_count, stats.claude.count) { info!("presence wake"); core.triggers.presence(); }
-    if prev_count != stats.claude.count { info!(count = stats.claude.count, rss_bytes = stats.claude.rss_bytes, "claude processes changed") }
-    debug!(elapsed_ms, count = stats.claude.count, rss_bytes = stats.claude.rss_bytes, cpu_pct = ?stats.claude.cpu_pct, did_prime, "system sample");
-    prev_count = stats.claude.count;
+    if presence_edge(prev_count, stats.claude_count) { info!("presence wake"); core.triggers.presence(); }
+    if prev_count != stats.claude_count { info!(count = stats.claude_count, "claude processes changed") }
+    debug!(elapsed_ms, count = stats.claude_count, cpu_pct = stats.cpu_pct, mem_used_bytes = stats.mem_used_bytes, did_prime, "system sample");
+    prev_count = stats.claude_count;
     lock_system(&core.system).stats = Some(stats);
     events.system_sampled();
     wait = SAMPLE_INTERVAL;
@@ -631,7 +635,8 @@ a reload; Settings without the toggle. Then one `npm run tauri dev` run to
 confirm: chip shows active on the first cycle with a Claude session open,
 Refresh with Claude closed flips it to idle, opening Claude while idle flips
 it back within ~5 s and a `presence` cycle appears in the log, and the
-system line shows a plausible RSS for the open sessions.
+system line's cpu and mem percentages move between samples and are plausible
+against Task Manager.
 
 ## 9. Documentation
 

@@ -186,7 +186,7 @@ function seedAccounts(): MockAccount[] {
         taken_at: now - 59_000,
         outcome: "ok",
         session: { pct: 40, resets_at: now + 2 * 60 * 60 * 1000 + 3 * 60 * 1000 },
-        week_all: { pct: 46, resets_at: null },
+        week_all: { pct: 46, resets_at: now + 2 * 24 * 60 * 60 * 1000 + 3 * 60 * 60 * 1000 },
         week_models: [{ label: "Fable", pct: 47, resets_at: null }],
         error: null,
         duration_ms: 1_200,
@@ -216,7 +216,7 @@ function seedAccounts(): MockAccount[] {
         taken_at: now - 53_000,
         outcome: "timeout",
         session: { pct: 0, resets_at: null },
-        week_all: { pct: 98, resets_at: null },
+        week_all: { pct: 98, resets_at: now + 5 * 24 * 60 * 60 * 1000 + 14 * 60 * 60 * 1000 },
         week_models: [
           { label: "Fable", pct: 99, resets_at: null },
           { label: "Opus", pct: 12, resets_at: null },
