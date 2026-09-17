@@ -278,6 +278,12 @@ export function Settings({
           checked={settings.log_level === "debug"}
           onChange={(next) => void save({ ...settings, log_level: next ? "debug" : "info" })}
         />
+        <Toggle
+          label="Keep window on top"
+          hint="stay visible over other apps"
+          checked={prefs.alwaysOnTop}
+          onChange={(next) => onPrefs({ alwaysOnTop: next })}
+        />
       </div>
 
       <form

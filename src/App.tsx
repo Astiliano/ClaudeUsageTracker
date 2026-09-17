@@ -8,7 +8,9 @@ import { Settings } from "./components/Settings";
 import { useDashboard } from "./hooks/useDashboard";
 import { usePrefs } from "./hooks/usePrefs";
 import { useViewport } from "./hooks/useViewport";
+import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
+import { errorMessage } from "./lib/errors";
 import { autoHiddenColumns, layoutFor } from "./lib/layout";
 import { FONTS, SIZES } from "./lib/theme";
 import "./styles.css";
@@ -34,6 +36,19 @@ export default function App(): JSX.Element {
     toastTimer.current = window.setTimeout(() => setToast(null), 6000);
   }, []);
   useEffect(() => () => { if (toastTimer.current !== null) window.clearTimeout(toastTimer.current); }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const apply = async (): Promise<void> => {
+      try {
+        await backend().setAlwaysOnTop(prefs.alwaysOnTop);
+      } catch (e) {
+        if (!cancelled) showError(errorMessage(e));
+      }
+    };
+    void apply();
+    return () => { cancelled = true; };
+  }, [prefs.alwaysOnTop, showError]);
 
   const font = FONTS[prefs.font];
   // Custom properties are not in CSSProperties; this is the one typed seam.
