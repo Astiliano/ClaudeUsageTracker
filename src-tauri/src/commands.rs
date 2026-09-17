@@ -299,6 +299,17 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
     Ok(())
 }
 
+/// Which autostart call, if any, reconciles the plugin with the wanted
+/// state. `None` for "already there" and for "state unknown and we only
+/// want it off" (a blind disable fails on a missing registry value).
+pub fn autostart_change(currently_enabled: Option<bool>, wanted: bool) -> Option<bool> {
+    match (currently_enabled, wanted) {
+        (Some(current), wanted) if current == wanted => None,
+        (None, false) => None,
+        (_, wanted) => Some(wanted),
+    }
+}
+
 /// Clears the flag and logs the previous value at WARN. Does **not** poll:
 /// every quota-spending action stays a separate, explicit act.
 pub fn core_clear_halt(core: &Core) -> AppResult<()> {
@@ -453,29 +464,39 @@ pub async fn set_settings(
     core: State<'_, SharedCore>,
     settings: UserSettings,
 ) -> AppResult<()> {
+    validate_settings(&settings)?;
+
     let want_autostart = settings.launch_at_login;
+    let autostart_app = app.clone();
+    blocking(move || {
+        let current = match autostart_app.autolaunch().is_enabled() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!(error = %e, "could not read launch-at-login state");
+                None
+            }
+        };
+        match autostart_change(current, want_autostart) {
+            None => Ok(()),
+            Some(true) => autostart_app
+                .autolaunch()
+                .enable()
+                .map(|()| info!(want_autostart, "launch-at-login enabled")),
+            Some(false) => autostart_app
+                .autolaunch()
+                .disable()
+                .map(|()| info!(want_autostart, "launch-at-login disabled")),
+        }
+        .inspect_err(|e| warn!(error = %e, want_autostart, "could not update launch-at-login"))
+        .map_err(|e| AppError::Internal(format!("could not update launch at login: {e}")))
+    })
+    .await?;
+
     let core_ref = Arc::clone(&core);
     let tray_core = Arc::clone(&core);
     let to_save = settings.clone();
     blocking(move || core_set_settings(&core_ref, &to_save)).await?;
     crate::tray::apply_tray(&app, &tray_core).await;
-
-    // Written through to the plugin's live state; never stored in the table.
-    // Same reason as `get_settings`: this is a registry / plist write.
-    let autostart_app = app.clone();
-    let result = blocking(move || {
-        if want_autostart {
-            autostart_app.autolaunch().enable()
-        } else {
-            autostart_app.autolaunch().disable()
-        }
-        .map_err(|e| AppError::Internal(format!("could not update launch at login: {e}")))
-    })
-    .await;
-    if let Err(e) = result {
-        warn!(error = %e, want_autostart, "could not update launch-at-login");
-        return Err(e);
-    }
     Ok(())
 }
 
@@ -824,6 +845,37 @@ mod tests {
         next.close_to_tray = true;
         core_set_settings(&core, &next).expect("set");
         assert!(core.close_to_tray.load(Ordering::SeqCst));
+    }
+
+
+    #[test]
+    fn autostart_change_is_a_noop_when_already_off() {
+        assert_eq!(autostart_change(Some(false), false), None);
+    }
+
+    #[test]
+    fn autostart_change_is_a_noop_when_already_on() {
+        assert_eq!(autostart_change(Some(true), true), None);
+    }
+
+    #[test]
+    fn autostart_change_enables_when_currently_off() {
+        assert_eq!(autostart_change(Some(false), true), Some(true));
+    }
+
+    #[test]
+    fn autostart_change_disables_when_currently_on() {
+        assert_eq!(autostart_change(Some(true), false), Some(false));
+    }
+
+    #[test]
+    fn autostart_change_enables_when_state_is_unknown() {
+        assert_eq!(autostart_change(None, true), Some(true));
+    }
+
+    #[test]
+    fn autostart_change_skips_a_blind_disable_when_state_is_unknown() {
+        assert_eq!(autostart_change(None, false), None);
     }
 
     #[test]
