@@ -79,7 +79,6 @@ export function AccountRow(props: Props): JSX.Element {
         <div className="acct">
           <span className="acct-dot" style={{ background: accountDotColor(row, pill) }} />
           <span className={`acct-name${row.account.enabled ? "" : " acct-name-off"}`} title={row.account.config_dir}>{row.account.label}</span>
-          {row.account.is_default && <span className="tag">default</span>}
           {pill.tone !== "success" && <StatusPill pill={pill} onShowFailure={onShowFailure} />}
         </div>);
       case "session": return <Meter pct={session?.pct ?? null} note={sessionNote(session, now)} />;

@@ -137,14 +137,13 @@ function buildHistory(days: ReadonlyArray<number | null>): HistoryPoint[] {
   return points;
 }
 
-function makeAccount(id: string, isDefault: boolean, sortOrder: number, now: number): Account {
+function makeAccount(id: string, sortOrder: number, now: number): Account {
   return {
     id,
     label: id,
     config_dir: `C:\\Users\\josh\\.${id}`,
     enabled: true,
     disabled_reason: null,
-    is_default: isDefault,
     created_at: now - 30 * DAY_MS,
     sort_order: sortOrder,
   };
@@ -168,7 +167,7 @@ function seedAccounts(): MockAccount[] {
 
   return [
     {
-      account: makeAccount("claude3", true, 0, now),
+      account: makeAccount("claude3", 0, now),
       latest: {
         id: 1,
         account_id: "claude3",
@@ -183,7 +182,7 @@ function seedAccounts(): MockAccount[] {
       history: buildHistory(claude3Days),
     },
     {
-      account: makeAccount("claude", false, 1, now),
+      account: makeAccount("claude", 1, now),
       latest: {
         id: 2,
         account_id: "claude",
@@ -198,7 +197,7 @@ function seedAccounts(): MockAccount[] {
       history: buildHistory(claudeDays),
     },
     {
-      account: makeAccount("claude2", false, 2, now),
+      account: makeAccount("claude2", 2, now),
       latest: {
         id: 3,
         account_id: "claude2",
@@ -295,7 +294,6 @@ export function createMockBackend(): Backend {
         config_dir: configDir,
         enabled: false,
         disabled_reason: "user",
-        is_default: false,
         created_at: Date.now(),
         sort_order: accounts.length,
       };

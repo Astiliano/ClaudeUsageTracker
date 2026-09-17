@@ -63,7 +63,6 @@ export default function App(): JSX.Element {
           onError={showError}
           onShowFailure={(id) => setFailureId(id)}
         />
-        <p className="hint">drag a row handle to set failover priority · drag a column header to reorder columns</p>
         {showSettings && (
           <Settings
             binary={dashboard.binary}

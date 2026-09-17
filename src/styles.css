@@ -28,7 +28,6 @@
   --danger: #e58e84;
   --danger-border: #3a2a28;
   --danger-hover-bg: #241a19;
-  --tag-fg: #9fb6d3; --tag-border: #2c3a49; --tag-bg: #161d24;
   --ok: #7aa2f7; --warn: #d8a94f; --crit: #e0705f; --live: #5fb98a; --idle: #4b5359;
   --ui: ui-sans-serif, 'Segoe UI', Helvetica, Arial, sans-serif;
   --mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace;
@@ -150,11 +149,6 @@ input, select, button { font-family: inherit; }
 .acct-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .acct-name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct-name-off { color: var(--fg-dim); }
-.tag {
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--tag-fg); border: 1px solid var(--tag-border); background: var(--tag-bg);
-  border-radius: 4px; padding: 2px 5px; flex: none;
-}
 
 /* ---- status pill ---- */
 .pill { font-family: var(--mono); font-size: 10px; border-radius: 4px; padding: 2px 5px; border: 1px solid transparent; white-space: nowrap; flex: none; }
