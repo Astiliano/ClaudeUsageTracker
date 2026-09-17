@@ -265,7 +265,7 @@ Expected: FAIL — `buildSparklinePath` is not exported.
 
 - [ ] **Step 3: Implement**
 
-Replace everything in `src/lib/sparkline.ts` below the imports with:
+Replace everything in `src/lib/sparkline.ts` below the `import type { HistoryPoint }` line (including the old `HOUR` constant) with:
 
 ```ts
 function round(n: number): number {
@@ -312,8 +312,6 @@ export function buildSparklinePath(
   return `${start} ${rest}`;
 }
 ```
-
-Delete the now-unused `HOUR` constant.
 
 - [ ] **Step 4: Run green**
 
@@ -663,7 +661,7 @@ In `src-tauri/src/commands.rs` tests: change `use crate::system::{ClaudeStats, S
 - [ ] **Step 6: Rust gates**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
-Expected: all tests pass (including the `process.rs` exclusion tests and the smoke test), clippy clean. If clippy flags `try_into().unwrap_or` on a `usize`→`u32`, keep it (it is the honest saturating conversion) and use `u32::try_from(...).unwrap_or(u32::MAX)` instead.
+Expected: all tests pass (including the `process.rs` exclusion tests and the smoke test), clippy clean. If clippy objects to `.try_into().unwrap_or(u32::MAX)` on the `usize`, replace it with `u32::try_from(...).unwrap_or(u32::MAX)` (same saturating meaning).
 
 - [ ] **Step 7: Commit**
 
