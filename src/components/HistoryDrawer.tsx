@@ -21,8 +21,8 @@ interface Props {
   onCollapse: () => void;
 }
 
-/** One resolved request. The chart renders ONLY from this, never from the pickers. */
-interface Result { points: HistoryPoint[]; since: number; unit: UnitKey; count: number; fetchNow: number }
+/** One resolved request. The chart, header and stroke all render ONLY from this, never from the live pickers. */
+interface Result { points: HistoryPoint[]; since: number; unit: UnitKey; count: number; preset: PresetKey; metric: Metric }
 interface Tip { left: string; bottom: string; edge: "left" | "mid" | "right"; text: string }
 
 const TIP_TRANSFORM: Record<Tip["edge"], string> = {
@@ -73,24 +73,26 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
   const unit = effectiveUnit(preset, unitOverride);
 
   useEffect(() => {
+    let cancelled = false;
     const id = ++seq.current;
-    const fetchNow = Date.now();
-    const since = alignedSince(fetchNow, preset, unit);
-    const count = bucketCount(since, fetchNow, unit);
+    const now = Date.now();
+    const since = alignedSince(now, preset, unit);
+    const count = bucketCount(since, now, unit);
     setLoading(true);
     const load = async (): Promise<void> => {
       try {
         const points = await backend().invoke<HistoryPoint[]>("get_history", {
           accountId, since, bucketMs: UNITS[unit].ms, metric,
         });
-        if (id === seq.current) setResult({ points, since, unit, count, fetchNow });
+        if (!cancelled && id === seq.current) setResult({ points, since, unit, count, preset, metric });
       } catch (e) {
-        if (id === seq.current) onErrorRef.current(errorMessage(e));
+        if (!cancelled && id === seq.current) onErrorRef.current(errorMessage(e));
       } finally {
-        if (id === seq.current) setLoading(false);
+        if (!cancelled && id === seq.current) setLoading(false);
       }
     };
     void load();
+    return () => { cancelled = true; };
   }, [accountId, preset, unit, metric, cycle]);
 
   const choosePreset = (p: PresetKey): void => {
@@ -100,18 +102,22 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
 
   // Derived once per result, not per mouse move (a 720-slot series would
   // otherwise be re-bucketed and re-stringified on every pointer event).
-  const { vals, stats, lines, dots } = useMemo(() => {
+  const { vals, stats, lines, dots, axis } = useMemo(() => {
     const v: Array<number | null> = result === null ? [] : bucketSeries(result.points, result.since, result.unit, result.count);
     return {
       vals: v,
       stats: seriesStats(v),
       lines: polylineRuns(v, 100, 100),
       dots: v.length <= MAX_DOTS ? seriesDots(v) : [],
+      axis: result === null ? [] : axisLabelsFor(result.since, result.unit, result.count, AXIS_LABELS),
     };
   }, [result]);
-  const stroke = metricColor(latestValue(latest, metric));
+  // Everything above the plot describes the resolved `result`, not the live pickers,
+  // so a rejected/in-flight switch never mislabels the series still on screen.
+  const shownPreset = result?.preset ?? preset;
+  const shownMetric = result?.metric ?? metric;
   const shownUnit = result?.unit ?? unit;
-  const axis = result === null ? [] : axisLabelsFor(result.since, result.unit, result.count, AXIS_LABELS);
+  const stroke = metricColor(latestValue(latest, shownMetric));
   const selectedKey = metricKey(metric);
   const options = metric.kind === "model" && !models.includes(metric.label) ? [...models, metric.label] : models;
 
@@ -135,7 +141,7 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
     <div className="drawer">
       <div className="drawer-head">
         <span className="drawer-label">
-          Last {PRESETS[preset].label} · {metricLabel(metric)} · {shownUnit}{loading ? " · loading" : ""}
+          Last {PRESETS[shownPreset].label} · {metricLabel(shownMetric)} · {shownUnit}{loading ? " · loading" : ""}
         </span>
         <div className="drawer-stats">
           <span>peak {stats.peak}%</span>
@@ -147,13 +153,13 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
       <div className="drawer-controls">
         <div className="drawer-group" role="group" aria-label="Range">
           {PRESET_KEYS.map((p) => (
-            <button key={p} type="button" className={`btn btn-sm${p === preset ? " btn-edit-on" : ""}`} onClick={() => choosePreset(p)}>{p}</button>
+            <button key={p} type="button" aria-pressed={p === preset} className={`btn btn-sm${p === preset ? " btn-edit-on" : ""}`} onClick={() => choosePreset(p)}>{p}</button>
           ))}
         </div>
         <div className="drawer-group" role="group" aria-label="Granularity">
-          <button type="button" className={`btn btn-sm${unitOverride === null ? " btn-edit-on" : ""}`} onClick={() => setUnitOverride(null)}>auto</button>
+          <button type="button" aria-pressed={unitOverride === null} className={`btn btn-sm${unitOverride === null ? " btn-edit-on" : ""}`} onClick={() => setUnitOverride(null)}>auto</button>
           {UNIT_KEYS.map((u) => (
-            <button key={u} type="button" disabled={!unitAllowed(preset, u)}
+            <button key={u} type="button" disabled={!unitAllowed(preset, u)} aria-pressed={unitOverride === u}
               className={`btn btn-sm${unitOverride === u ? " btn-edit-on" : ""}`} onClick={() => setUnitOverride(u)}>{u}</button>
           ))}
         </div>
@@ -165,7 +171,7 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
         </select>
       </div>
       <div className="chart">
-        <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricLabel(metric)}, last ${PRESETS[preset].label}`}>
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricLabel(shownMetric)}, last ${PRESETS[shownPreset].label}`}>
           {[0, 50, 100].map((y) => <line key={y} x1={0} y1={y} x2={100} y2={y} stroke="#1e252a" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
           {lines.map((points, i) => (
             <polyline key={i} points={points} fill="none" stroke={stroke} strokeWidth={1.8} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
