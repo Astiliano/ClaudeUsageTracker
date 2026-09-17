@@ -407,7 +407,7 @@ export function systemLine(input: { report: SystemReport | null; error: string |
   // count 0 → the single item { key: "none", pct: null, text: "no Claude processes", title: "no Claude Code process is running" }
   //           in every layout (no rings for zeros)
   // cpu:   pct = cpu_pct,      text "cpu 3%"  / "cpu —" when null, title "Claude processes: 3% of the machine's CPU"
-  // mem:   pct = memPct,       text "mem 1.2 GB",             title "Claude processes: 1.2 GB of 32 GB (4%)"
+  // mem:   pct = memPct,       text "mem 1.2 GB",             title "Claude processes: 1.2 GB of 32.0 GB (4%)" (both through `formatBytes`)
   // count: pct = null, only when showCount: text "2 procs" / "1 proc", title "Claude Code processes running"
 export function processCountSuffix(count: number | null): string;
   // null or 0 → ""; 1 → " · 1 Claude process"; n → " · n Claude processes"
@@ -562,8 +562,9 @@ Rust:
   `a_timer_without_a_process_answer_skips_as_gate_idle` under its existing
   `cfg!(debug_assertions)` guard (the `debug_assert!` panics under
   `cargo test`);
-  `wire_forms_are_snake_case` extended with `presence` and `already_active`;
-  `the_gate_does_not_move_on_a_skipped_decision` extended to Presence.
+  `wire_forms_are_snake_case` extended with `presence` and `already_active`
+  (`presence_respects_backoff` already pins that a skipped Presence leaves
+  the gate unmoved).
 - `driver.rs`: `probe_if_free_spends_no_process_check_while_busy` (a
   counting `ProcessProbe`; with a `CycleToken` held the count stays 0 and the
   result is `None`; without, 1 and `Some`; `#[tokio::test]` since the probe
