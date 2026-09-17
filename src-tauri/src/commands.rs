@@ -200,7 +200,7 @@ pub fn core_poll_now(core: &Core) -> AppResult<String> {
 }
 
 pub fn core_add_account(core: &Core, config_dir: &Path, now: i64) -> AppResult<Account> {
-    let account = core.store.add_account(config_dir, true, None, false, now)?;
+    let account = core.store.add_account(config_dir, true, None, now)?;
     info!(account_id = %account.id, label = %account.label, "account added");
     core.triggers.account_changed(vec![account.id.clone()]);
     Ok(account)

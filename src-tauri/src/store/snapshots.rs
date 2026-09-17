@@ -201,7 +201,7 @@ mod tests {
         let dir = tmp.path().join(".claude3");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let a = store
-            .add_account(&dir, true, None, true, NOW)
+            .add_account(&dir, true, None, NOW)
             .expect("add account");
         (tmp, store, a.id)
     }
@@ -436,7 +436,7 @@ mod tests {
         for name in [".claude", ".claude3"] {
             let d = tmp.path().join(name);
             std::fs::create_dir_all(&d).expect("mkdir");
-            ids.push(store.add_account(&d, true, None, false, NOW).expect("add").id);
+            ids.push(store.add_account(&d, true, None, NOW).expect("add").id);
         }
         store
             .insert_snapshot(&ids[0], NOW, &ok_outcome(11, 11), None, 1)
