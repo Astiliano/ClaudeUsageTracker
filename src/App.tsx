@@ -6,12 +6,20 @@ import { Header } from "./components/Header";
 import { Settings } from "./components/Settings";
 import { useDashboard } from "./hooks/useDashboard";
 import { usePrefs } from "./hooks/usePrefs";
+import { useViewport } from "./hooks/useViewport";
+import { moveVisible, visibleColumns } from "./lib/columns";
+import { autoHiddenColumns, layoutFor } from "./lib/layout";
 import { FONTS, SIZES } from "./lib/theme";
 import "./styles.css";
 
 export default function App(): JSX.Element {
   const { dashboard, history, now, cycle, error, refetch } = useDashboard();
   const { prefs, update } = usePrefs();
+  const viewportWidth = useViewport();
+  const zoom = SIZES[prefs.size].zoom;
+  const layout = layoutFor(viewportWidth, zoom);
+  const effectiveHidden = [...prefs.hiddenColumns, ...autoHiddenColumns(layout)];
+  const visible = visibleColumns(prefs.columnOrder, effectiveHidden);
   const [showSettings, setShowSettings] = useState(false);
   const [failureId, setFailureId] = useState<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -31,7 +39,7 @@ export default function App(): JSX.Element {
   const shellStyle = {
     "--ui": font.ui,
     "--mono": font.mono,
-    zoom: SIZES[prefs.size].zoom,
+    zoom,
   } as CSSProperties;
 
   if (dashboard === null) {
@@ -57,9 +65,9 @@ export default function App(): JSX.Element {
           history={history}
           now={now}
           cycle={cycle}
-          zoom={SIZES[prefs.size].zoom}
-          columnOrder={prefs.columnOrder}
-          onColumnOrder={(columnOrder) => update({ columnOrder })}
+          zoom={zoom}
+          columnOrder={visible}
+          onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, effectiveHidden, from, to) })}
           onChanged={refetch}
           onError={showError}
           onShowFailure={(id) => setFailureId(id)}
@@ -68,6 +76,7 @@ export default function App(): JSX.Element {
           <Settings
             binary={dashboard.binary}
             prefs={prefs}
+            layout={layout}
             onPrefs={update}
             onClose={() => setShowSettings(false)}
             onChanged={refetch}

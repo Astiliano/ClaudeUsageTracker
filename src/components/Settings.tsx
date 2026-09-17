@@ -1,7 +1,9 @@
 import type { JSX, KeyboardEvent } from "react";
 import { useEffect, useState } from "react";
 import { backend } from "../lib/backend";
+import { ALWAYS_VISIBLE, COLUMNS, type ColumnKey, DEFAULT_ORDER } from "../lib/columns";
 import { errorMessage } from "../lib/errors";
+import { autoHiddenColumns, BREAKPOINTS, type Layout } from "../lib/layout";
 import type { Prefs } from "../lib/prefs";
 import { FONT_KEYS, FONTS, SIZE_KEYS, SIZES } from "../lib/theme";
 import type { BinaryInfo, UserSettings } from "../lib/types";
@@ -10,6 +12,7 @@ import { Toggle } from "./Toggle";
 interface Props {
   binary: BinaryInfo;
   prefs: Prefs;
+  layout: Layout;
   onPrefs: (patch: Partial<Prefs>) => void;
   onClose: () => void;
   onChanged: () => void;
@@ -19,6 +22,7 @@ interface Props {
 export function Settings({
   binary,
   prefs,
+  layout,
   onPrefs,
   onClose,
   onChanged,
@@ -161,6 +165,41 @@ export function Settings({
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="section">
+        <div className="section-label">Columns</div>
+        <div className="choices">
+          {DEFAULT_ORDER.map((key) => {
+            const pinned = ALWAYS_VISIBLE.includes(key);
+            const autoHidden = autoHiddenColumns(layout).includes(key);
+            const shown = !prefs.hiddenColumns.includes(key);
+            const toggle = (): void => {
+              const next: ColumnKey[] = shown
+                ? [...prefs.hiddenColumns, key]
+                : prefs.hiddenColumns.filter((k) => k !== key);
+              onPrefs({ hiddenColumns: next });
+            };
+            return (
+              <button
+                key={key}
+                type="button"
+                className={"choice choice-size" + (shown ? " choice-on" : "")}
+                disabled={pinned || autoHidden}
+                title={pinned ? "Account is always shown" : undefined}
+                aria-pressed={shown}
+                onClick={toggle}
+              >
+                {COLUMNS[key].label}
+              </button>
+            );
+          })}
+        </div>
+        {autoHiddenColumns(layout).length > 0 && (
+          <span className="hint">
+            {autoHiddenColumns(layout).map((k) => COLUMNS[k].label).join(" and ")} are hidden while the window is narrower than {BREAKPOINTS.narrow} px.
+          </span>
+        )}
       </div>
 
       <div className="divider" />
