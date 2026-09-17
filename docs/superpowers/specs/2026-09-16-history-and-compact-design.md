@@ -521,6 +521,9 @@ rings plus labels fit at 360 px minus padding; at 300 px they wrap to 2+1.
 
 ### 5.5 Always on top
 
+> 2026-09-17: the "Keep window on top" toggle moved from Settings to an
+> "on top" button in the header, present in every layout.
+
 `Prefs.alwaysOnTop: boolean` (default `false`; `parsePrefs` accepts only a
 boolean). `Backend` gains `setAlwaysOnTop(flag: boolean): Promise<void>`;
 real = `getCurrentWindow().setAlwaysOnTop(flag)` from

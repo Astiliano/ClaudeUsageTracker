@@ -8,6 +8,8 @@ import type {
   HistoryPoint,
   RawSnapshot,
   SnapshotDto,
+  SystemReport,
+  SystemStats,
   UserSettings,
 } from "./types";
 
@@ -284,6 +286,25 @@ export function createMockBackend(): Backend {
   };
   let nextAccountSeq = accounts.length + 1;
 
+  // The only URL-driven behaviour in the mock, so Playwright can reach the
+  // dimmed and unavailable states without a rebuild. The real backend never
+  // looks at the URL.
+  const mockSystem = new URLSearchParams(window.location.search).get("mockSystem");
+  const GIB = 1024 * 1024 * 1024;
+
+  const systemStats = (): SystemStats => {
+    const drift = 0.95 + Math.random() * 0.1;
+    return {
+      sampled_at: Date.now(),
+      mem_total_bytes: 32 * GIB,
+      claude: {
+        count: 2,
+        rss_bytes: Math.round(1.2 * GIB * drift),
+        cpu_pct: Math.round((1 + Math.random() * 7) * 10) / 10,
+      },
+    };
+  };
+
   const findAccount = (id: string): MockAccount => {
     const found = accounts.find((a) => a.account.id === id);
     if (found === undefined) {
@@ -413,6 +434,16 @@ export function createMockBackend(): Backend {
 
     get_settings: () => settings,
 
+    get_system: (): SystemReport => {
+      if (mockSystem === "error") {
+        throw {
+          code: "internal",
+          message: "mock: sampler unreachable",
+        } satisfies AppErrorShape;
+      }
+      return { stats: systemStats(), stopped: mockSystem === "stopped" };
+    },
+
     set_settings: (args) => {
       const next = args.settings;
       if (!isUserSettings(next)) {
@@ -469,7 +500,11 @@ export function createMockBackend(): Backend {
       // this cast is required to hand the caller back a `T`.
       return result as T;
     },
-    listen: () => Promise.resolve(() => undefined),
+    listen: (event: string, handler: () => void) => {
+      if (event !== "system:sampled") return Promise.resolve(() => undefined);
+      const timer = window.setInterval(handler, 5000);
+      return Promise.resolve(() => window.clearInterval(timer));
+    },
     setAlwaysOnTop: async (flag) => { console.info("mock: setAlwaysOnTop", flag); },
   };
 }

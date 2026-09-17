@@ -7,6 +7,7 @@ pub mod paths;
 pub mod process;
 pub mod scheduler;
 pub mod store;
+pub mod system;
 pub mod tray;
 pub mod usage;
 
@@ -18,7 +19,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::commands::{lock_binary, Core, SharedCore};
+use crate::commands::{lock_binary, Core, SharedCore, SystemSlot};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
@@ -59,6 +60,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
+            commands::get_system,
             commands::get_history,
             commands::get_history_models,
             commands::poll_now,
@@ -125,6 +127,7 @@ pub fn run() {
                 // The driver owns the state machine and is the only writer of
                 // this snapshot (spec 5.1); everything else only reads it.
                 status: Arc::new(Mutex::new(DriverStatus::default())),
+                system: Arc::new(Mutex::new(SystemSlot::default())),
                 binary: Arc::new(Mutex::new(None)),
                 halt_latched: AtomicBool::new(false),
                 // Seeded here so the window-close handler never reads the
@@ -227,14 +230,22 @@ pub fn run() {
                 Arc::new(TauriEvents::new(handle.clone(), Arc::clone(&core)));
             let process: Arc<dyn ProcessProbe> = Arc::new(SysinfoProbe::new()?);
             let binary: Arc<dyn BinaryProbe> = Arc::new(RealBinaryProbe);
+            let pid_slot = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let driver = Driver::new(
                 Arc::clone(&core),
-                events,
+                Arc::clone(&events),
                 process,
                 binary,
                 shutdown.clone(),
+                Arc::clone(&pid_slot),
             );
             tauri::async_runtime::spawn(driver.run());
+            tauri::async_runtime::spawn(system::run_sampler(
+                Arc::clone(&core),
+                events,
+                pid_slot,
+                shutdown.clone(),
+            ));
 
             Ok(())
         })
