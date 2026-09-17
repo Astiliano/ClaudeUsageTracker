@@ -18,6 +18,7 @@ interface Props {
   total: number;
   points: HistoryPoint[];
   now: number;
+  cycle: number;
   columnOrder: readonly ColumnKey[];
   gridCols: string;
   hotColumn: number | null;
@@ -32,12 +33,6 @@ interface Props {
   onChanged: () => void;
   onError: (m: string) => void;
   onShowFailure: (id: number) => void;
-}
-
-/** t >= now - 7 days; trivial enough not to need its own test. */
-function last7(points: HistoryPoint[], now: number): HistoryPoint[] {
-  const cutoff = now - 7 * 86_400_000;
-  return points.filter((p) => p.t >= cutoff);
 }
 
 function StatusPill({ pill, onShowFailure }: { pill: Pill; onShowFailure: (id: number) => void }): JSX.Element {
@@ -86,7 +81,7 @@ export function AccountRow(props: Props): JSX.Element {
       case "model": return models === null ? <Meter pct={null} note="no data" /> : <Meter pct={models.pct} note={models.note} title={models.title} />;
       case "spark": return (
         <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for 30 days" aria-expanded={chartOpen} onClick={onToggleChart}>
-          <Sparkline points={last7(points, now)} stroke={stroke} />
+          <Sparkline points={points} stroke={stroke} />
         </button>);
       case "updated": return <span className="updated">{formatAgo(row.latest?.taken_at ?? null, now)}</span>;
     }

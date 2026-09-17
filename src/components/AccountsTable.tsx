@@ -15,6 +15,7 @@ interface Props {
   rows: AccountRowData[];
   history: Record<string, HistoryPoint[]>;
   now: number;
+  cycle: number;
   zoom: number;
   columnOrder: ColumnKey[];
   onColumnOrder: (order: ColumnKey[]) => void;
@@ -38,7 +39,7 @@ function endBodyDrag(): void {
   document.body.style.userSelect = "";
 }
 
-export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnOrder, onChanged, onError, onShowFailure }: Props): JSX.Element {
+export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, onColumnOrder, onChanged, onError, onShowFailure }: Props): JSX.Element {
   const [order, setOrder] = useState<AccountRowData[]>(rows);
   const [drag, setDrag] = useState<RowDragState | null>(null);
   const [colDrag, setColDrag] = useState<ColDragState | null>(null);
@@ -240,7 +241,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
         )}
         {order.map((row, idx) => (
           <AccountRow key={row.account.id} row={row} index={idx} total={order.length}
-            points={history[row.account.id] ?? []} now={now} columnOrder={columnOrder} gridCols={gridCols}
+            points={history[row.account.id] ?? []} now={now} cycle={cycle} columnOrder={columnOrder} gridCols={gridCols}
             hotColumn={colDrag?.index ?? null} drag={drag} rowH={rowH.current}
             chartOpen={chartId === row.account.id} editing={editingId === row.account.id}
             onHandleDown={(e) => startRowDrag(e, idx)}

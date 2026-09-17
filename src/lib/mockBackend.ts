@@ -1,4 +1,6 @@
 import type { Backend } from "./backend";
+import type { Metric } from "./history";
+import limits from "./historyLimits.json";
 import type {
   Account,
   AppErrorShape,
@@ -10,12 +12,12 @@ import type {
 } from "./types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_HISTORY_DAYS = 30;
-const DEFAULT_HISTORY_DAYS = 7;
 const MIN_INTERVAL_SECS = 10;
 const MAX_INTERVAL_SECS = 3600;
 const MIN_TIMEOUT_SECS = 5;
 const MAX_TIMEOUT_SECS = 120;
+const RANGE_SLACK_MS = 300_000;
+const MAX_LABEL_LEN = 64;
 
 /** Commands that mutate the mock's in-memory state; every one is logged. */
 const MUTATING_COMMANDS = new Set([
@@ -28,10 +30,13 @@ const MUTATING_COMMANDS = new Set([
   "clear_halt",
 ]);
 
+/** One poll, as the real `snapshots` row stores it (minus the noise). */
+interface Sample { t: number; session: number; week_all: number; models: Array<{ label: string; pct: number }> }
+
 interface MockAccount {
   account: Account;
   latest: SnapshotDto | null;
-  history: HistoryPoint[];
+  samples: Sample[];
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -63,11 +68,6 @@ function optionalStringArg(args: Record<string, unknown>, key: string): string |
   return typeof v === "string" ? v : undefined;
 }
 
-function optionalNumberArg(args: Record<string, unknown>, key: string): number | undefined {
-  const v = args[key];
-  return typeof v === "number" ? v : undefined;
-}
-
 function optionalBooleanArg(args: Record<string, unknown>, key: string): boolean | undefined {
   const v = args[key];
   return typeof v === "boolean" ? v : undefined;
@@ -96,45 +96,55 @@ function stringArrayArg(args: Record<string, unknown>, key: string): string[] {
   return out;
 }
 
-function clampDays(requested: number | undefined): number {
-  const days = requested ?? DEFAULT_HISTORY_DAYS;
-  return Math.min(MAX_HISTORY_DAYS, Math.max(1, Math.trunc(days)));
-}
-
 const HISTORY_START_HOUR = 9;
 const HISTORY_PEAK_HOUR = 14;
 const HISTORY_END_HOUR = 18;
+const SAMPLE_GAP_MS = 2 * 60_000;
+
+function clampPct(v: number): number {
+  return Math.max(0, Math.min(100, Math.round(v)));
+}
 
 /**
- * Day index `29` is today. Each non-null day value seeds one hourly sample
- * per hour from 09:00 to 18:00 local, so the sparkline renders as a
- * connected run the way real hourly polling does. The value rises from
- * `v-8` at 09:00 to `v` at 14:00, then eases (quadratic ease-in) down to
- * `v-3` at 18:00, clamped to >= 0.
+ * Day index `29` is today. Each non-null day value seeds one sample every
+ * two minutes from 09:00 to 18:00 local (roughly real poll density), so
+ * every preset/unit combination has something to show. Week-all rises from
+ * `v-8` at 09:00 to `v` at 14:00 then eases down to `v-3`; session is a
+ * half-sine over the working day; each model sits at `v + offset`.
  */
-function buildHistory(days: ReadonlyArray<number | null>): HistoryPoint[] {
+function buildSamples(days: ReadonlyArray<number | null>, models: ReadonlyArray<{ label: string; offset: number }>): Sample[] {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const points: HistoryPoint[] = [];
+  const out: Sample[] = [];
   days.forEach((v, i) => {
     if (v === null) return;
     const date = new Date(today);
     date.setDate(date.getDate() - (days.length - 1 - i));
-    for (let hour = HISTORY_START_HOUR; hour <= HISTORY_END_HOUR; hour++) {
+    const start = new Date(date);
+    start.setHours(HISTORY_START_HOUR, 0, 0, 0);
+    const end = new Date(date);
+    end.setHours(HISTORY_END_HOUR, 0, 0, 0);
+    const peak = new Date(date);
+    peak.setHours(HISTORY_PEAK_HOUR, 0, 0, 0);
+    for (let t = start.getTime(); t <= end.getTime(); t += SAMPLE_GAP_MS) {
       let delta: number;
-      if (hour <= HISTORY_PEAK_HOUR) {
-        const t = (hour - HISTORY_START_HOUR) / (HISTORY_PEAK_HOUR - HISTORY_START_HOUR);
-        delta = -8 + 8 * t;
+      if (t <= peak.getTime()) {
+        const f = (t - start.getTime()) / (peak.getTime() - start.getTime());
+        delta = -8 + 8 * f;
       } else {
-        const t = (hour - HISTORY_PEAK_HOUR) / (HISTORY_END_HOUR - HISTORY_PEAK_HOUR);
-        delta = -3 * t * t;
+        const f = (t - peak.getTime()) / (end.getTime() - peak.getTime());
+        delta = -3 * f * f;
       }
-      const at = new Date(date);
-      at.setHours(hour, 0, 0, 0);
-      points.push({ t: at.getTime(), pct: Math.max(0, v + delta) });
+      const dayFraction = (t - start.getTime()) / (end.getTime() - start.getTime());
+      out.push({
+        t,
+        week_all: clampPct(v + delta),
+        session: clampPct(70 * Math.sin(Math.PI * dayFraction)),
+        models: models.map((m) => ({ label: m.label, pct: clampPct(v + delta + m.offset) })),
+      });
     }
   });
-  return points;
+  return out;
 }
 
 function makeAccount(id: string, sortOrder: number, now: number): Account {
@@ -179,7 +189,7 @@ function seedAccounts(): MockAccount[] {
         error: null,
         duration_ms: 1_200,
       },
-      history: buildHistory(claude3Days),
+      samples: buildSamples(claude3Days, [{ label: "Fable", offset: 1 }, { label: "Opus", offset: -20 }]),
     },
     {
       account: makeAccount("claude", 1, now),
@@ -194,7 +204,7 @@ function seedAccounts(): MockAccount[] {
         error: null,
         duration_ms: 1_400,
       },
-      history: buildHistory(claudeDays),
+      samples: buildSamples(claudeDays, [{ label: "Fable", offset: -30 }]),
     },
     {
       account: makeAccount("claude2", 2, now),
@@ -212,9 +222,49 @@ function seedAccounts(): MockAccount[] {
         error: "claude exited after 30 s",
         duration_ms: 30_000,
       },
-      history: buildHistory(claude2Days),
+      samples: buildSamples(claude2Days, [{ label: "Fable", offset: 1 }, { label: "Sonnet", offset: -40 }]),
     },
   ];
+}
+
+function isMetric(v: unknown): v is Metric {
+  if (!isRecord(v)) return false;
+  if (v.kind === "week_all" || v.kind === "session") return true;
+  return v.kind === "model" && typeof v.label === "string";
+}
+
+function metricArg(args: Record<string, unknown>): Metric {
+  const v = args.metric;
+  if (!isMetric(v)) {
+    throw { code: "internal", message: "mock: metric must be a HistoryMetric" } satisfies AppErrorShape;
+  }
+  return v;
+}
+
+function outOfRange(message: string): AppErrorShape {
+  return { code: "out_of_range", message };
+}
+
+/** Mirrors commands::validate_history_request so the UI's error path is exercisable in a browser. */
+function validateHistory(now: number, since: number, bucketMs: number, metric: Metric): void {
+  if (bucketMs < limits.minBucketMs) throw outOfRange(`bucket_ms must be >= ${limits.minBucketMs}, got ${bucketMs}`);
+  if (since > now) throw outOfRange("since must not be in the future");
+  const range = now - since;
+  if (range > limits.maxRangeMs + RANGE_SLACK_MS) throw outOfRange(`range must be <= ${limits.maxRangeMs} ms`);
+  if (Math.ceil(range / bucketMs) > limits.maxBuckets) throw outOfRange(`request spans more than ${limits.maxBuckets} buckets`);
+  if (metric.kind === "model") {
+    const trimmed = metric.label.trim();
+    if (trimmed.length === 0) throw outOfRange("model label must not be blank");
+    if ([...trimmed].length > MAX_LABEL_LEN) throw outOfRange(`model label must be <= ${MAX_LABEL_LEN} characters`);
+  }
+}
+
+function sampleValue(s: Sample, metric: Metric): number | null {
+  switch (metric.kind) {
+    case "week_all": return s.week_all;
+    case "session": return s.session;
+    case "model": return s.models.find((m) => m.label === metric.label)?.pct ?? null;
+  }
 }
 
 /**
@@ -261,9 +311,28 @@ export function createMockBackend(): Backend {
 
     get_history: (args) => {
       const accountId = stringArg(args, "accountId");
-      const days = clampDays(optionalNumberArg(args, "days"));
-      const since = Date.now() - days * DAY_MS;
-      return findAccount(accountId).history.filter((p) => p.t >= since);
+      const since = numberArg(args, "since");
+      const bucketMs = numberArg(args, "bucketMs");
+      const metric = metricArg(args);
+      validateHistory(Date.now(), since, bucketMs, metric);
+      const buckets = new Map<number, number>();
+      for (const s of findAccount(accountId).samples) {
+        if (s.t < since) continue;
+        const v = sampleValue(s, metric);
+        if (v === null) continue;
+        const b = since + Math.floor((s.t - since) / bucketMs) * bucketMs;
+        buckets.set(b, Math.max(buckets.get(b) ?? 0, v));
+      }
+      return [...buckets.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([t, pct]): HistoryPoint => ({ t, pct }));
+    },
+
+    get_history_models: (args) => {
+      const accountId = stringArg(args, "accountId");
+      const labels = new Set<string>();
+      for (const s of findAccount(accountId).samples) for (const m of s.models) labels.add(m.label);
+      return [...labels].sort();
     },
 
     poll_now: () => {
@@ -297,7 +366,7 @@ export function createMockBackend(): Backend {
         created_at: Date.now(),
         sort_order: accounts.length,
       };
-      accounts.push({ account, latest: null, history: [] });
+      accounts.push({ account, latest: null, samples: [] });
       return account;
     },
 
@@ -401,5 +470,6 @@ export function createMockBackend(): Backend {
       return result as T;
     },
     listen: () => Promise.resolve(() => undefined),
+    setAlwaysOnTop: async (flag) => { console.info("mock: setAlwaysOnTop", flag); },
   };
 }

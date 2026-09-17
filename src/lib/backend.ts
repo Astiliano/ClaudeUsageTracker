@@ -1,10 +1,12 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-/** The two backend primitives the UI uses. Swappable for a browser mock. */
+/** The backend primitives the UI uses. Swappable for a browser mock. */
 export interface Backend {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen(event: string, handler: () => void): Promise<() => void>;
+  setAlwaysOnTop(flag: boolean): Promise<void>;
 }
 
 const real: Backend = {
@@ -14,6 +16,7 @@ const real: Backend = {
     const off = await tauriListen(event, () => handler());
     return () => off();
   },
+  setAlwaysOnTop: (flag) => getCurrentWindow().setAlwaysOnTop(flag),
 };
 
 let current: Backend = real;

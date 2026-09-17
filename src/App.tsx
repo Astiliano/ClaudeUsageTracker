@@ -10,7 +10,7 @@ import { FONTS, SIZES } from "./lib/theme";
 import "./styles.css";
 
 export default function App(): JSX.Element {
-  const { dashboard, history, now, error, refetch } = useDashboard();
+  const { dashboard, history, now, cycle, error, refetch } = useDashboard();
   const { prefs, update } = usePrefs();
   const [showSettings, setShowSettings] = useState(false);
   const [failureId, setFailureId] = useState<number | null>(null);
@@ -56,6 +56,7 @@ export default function App(): JSX.Element {
           rows={dashboard.accounts}
           history={history}
           now={now}
+          cycle={cycle}
           zoom={SIZES[prefs.size].zoom}
           columnOrder={prefs.columnOrder}
           onColumnOrder={(columnOrder) => update({ columnOrder })}
