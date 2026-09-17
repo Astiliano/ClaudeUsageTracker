@@ -2,7 +2,7 @@ import type { CSSProperties, JSX, KeyboardEvent as ReactKeyboardEvent, PointerEv
 import { type ColumnKey } from "../lib/columns";
 import { rowShift } from "../lib/drag";
 import { formatAgo } from "../lib/format";
-import { type Pill, statusPill } from "../lib/pill";
+import { statusPill } from "../lib/pill";
 import { accountDotColor, sessionNote, summarizeModels, weekNote } from "../lib/present";
 import { metricColor } from "../lib/theme";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
@@ -11,6 +11,7 @@ import { EditDrawer } from "./EditDrawer";
 import { HistoryDrawer } from "./HistoryDrawer";
 import { Meter } from "./Meter";
 import { Sparkline } from "./Sparkline";
+import { StatusPill } from "./StatusPill";
 
 interface Props {
   row: AccountRowData;
@@ -33,19 +34,6 @@ interface Props {
   onChanged: () => void;
   onError: (m: string) => void;
   onShowFailure: (id: number) => void;
-}
-
-function StatusPill({ pill, onShowFailure }: { pill: Pill; onShowFailure: (id: number) => void }): JSX.Element {
-  const cls = `pill pill-${pill.kind} pill-tone-${pill.tone}`;
-  const id = pill.snapshotId;
-  if (id !== undefined && pill.outcome !== "ok") {
-    return (
-      <button type="button" className={cls} title={pill.tooltip} onClick={() => onShowFailure(id)}>
-        {pill.label}
-      </button>
-    );
-  }
-  return <span className={cls} title={pill.tooltip}>{pill.label}</span>;
 }
 
 export function AccountRow(props: Props): JSX.Element {

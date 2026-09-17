@@ -39,11 +39,11 @@ describe("summarizeModels", () => {
     expect(summarizeModels([])).toBeNull();
   });
   it("shows the highest model and counts the rest", () => {
-    expect(summarizeModels([{ label: "Fable", pct: 47, resets_at: null }])).toEqual({ pct: 47, note: "Fable", title: "Fable 47%" });
+    expect(summarizeModels([{ label: "Fable", pct: 47, resets_at: null }])).toEqual({ pct: 47, label: "Fable", note: "Fable", title: "Fable 47%" });
     expect(summarizeModels([
       { label: "Opus", pct: 12, resets_at: null },
       { label: "Fable", pct: 47, resets_at: null },
-    ])).toEqual({ pct: 47, note: "Fable · +1", title: "Opus 12% · Fable 47%" });
+    ])).toEqual({ pct: 47, label: "Fable", note: "Fable · +1", title: "Opus 12% · Fable 47%" });
   });
 });
 

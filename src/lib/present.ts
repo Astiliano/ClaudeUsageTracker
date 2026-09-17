@@ -13,7 +13,7 @@ export function accountDotColor(row: AccountRow, pill: Pill): string {
   return week >= THRESHOLDS.crit ? THEME.crit : THEME.live;
 }
 
-export interface ModelSummary { pct: number; note: string; title: string }
+export interface ModelSummary { pct: number; label: string; note: string; title: string }
 
 export function summarizeModels(models: readonly ModelWindow[]): ModelSummary | null {
   if (models.length === 0) return null;
@@ -22,6 +22,7 @@ export function summarizeModels(models: readonly ModelWindow[]): ModelSummary | 
   const rest = models.length - 1;
   return {
     pct: top.pct,
+    label: top.label,
     note: rest > 0 ? `${top.label} · +${rest}` : top.label,
     title: models.map((m) => `${m.label} ${m.pct}%`).join(" · "),
   };

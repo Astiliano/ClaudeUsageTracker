@@ -1,5 +1,6 @@
 import type { CSSProperties, JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AccountCard } from "./components/AccountCard";
 import { AccountsTable } from "./components/AccountsTable";
 import { FailureDetail } from "./components/FailureDetail";
 import { Header } from "./components/Header";
@@ -56,22 +57,31 @@ export default function App(): JSX.Element {
         <Header
           dashboard={dashboard}
           settingsOpen={showSettings}
+          compact={layout === "cards"}
           onToggleSettings={() => setShowSettings((v) => !v)}
           onChanged={refetch}
           onError={showError}
         />
-        <AccountsTable
-          rows={dashboard.accounts}
-          history={history}
-          now={now}
-          cycle={cycle}
-          zoom={zoom}
-          columnOrder={visible}
-          onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, effectiveHidden, from, to) })}
-          onChanged={refetch}
-          onError={showError}
-          onShowFailure={(id) => setFailureId(id)}
-        />
+        {layout === "cards" ? (
+          <div className="cards" role="list" aria-label="Accounts">
+            {dashboard.accounts.map((row) => (
+              <AccountCard key={row.account.id} row={row} now={now} onShowFailure={(id) => setFailureId(id)} />
+            ))}
+          </div>
+        ) : (
+          <AccountsTable
+            rows={dashboard.accounts}
+            history={history}
+            now={now}
+            cycle={cycle}
+            zoom={zoom}
+            columnOrder={visible}
+            onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, effectiveHidden, from, to) })}
+            onChanged={refetch}
+            onError={showError}
+            onShowFailure={(id) => setFailureId(id)}
+          />
+        )}
         {showSettings && (
           <Settings
             binary={dashboard.binary}
