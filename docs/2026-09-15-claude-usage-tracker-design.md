@@ -259,7 +259,7 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
 
 ### 6.2 `process.rs`
 
-- `is_claude_running(sys: &mut System, exclude_pid: Option<Pid>) -> bool`.
+- `is_claude_running(sys: &mut System, exclusion: &Exclusion) -> bool` (signature updated 2026-09-17; `Exclusion` is described below).
   Refresh with
   `sys.refresh_processes_specifics(ProcessesToUpdate::All, true,
    ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet)
@@ -702,7 +702,7 @@ Single window, dark/light follows OS.
 | `clear_halt` | → () — clears `polling_halted` and logs WARN with the previous value. **Does not poll**: every quota-spending action stays a separate, explicit act (the user presses Refresh) |
 | `open_login` | `{id}` → () |
 | `open_log_dir` | → () via opener plugin |
-| `get_system` | → `{ stats: SystemStats \| null, stopped: bool }` — the sampler's latest figures. No store access. |
+| `get_system` | → `{ stats: Option<SystemStats>, stopped: bool }` — the sampler's latest figures. No store access. |
 | `get_snapshot_raw` | `{snapshot_id}` → `{raw?, error?}` |
 
 All commands are `async fn … -> Result<T, AppError>`; `AppError` serialises to
