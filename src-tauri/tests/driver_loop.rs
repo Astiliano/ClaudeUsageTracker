@@ -83,6 +83,7 @@ impl EventSink for Recorder {
         self.stalls.fetch_add(1, Ordering::SeqCst);
     }
     fn refresh_tray(&self) {}
+    fn system_sampled(&self) {}
 }
 
 /// Records every exclusion it is handed, so a test can assert what the
@@ -195,6 +196,7 @@ fn driver_for(h: &Harness, binary: Arc<dyn BinaryProbe>) -> Driver {
         Arc::clone(&h.process) as Arc<dyn ProcessProbe>,
         binary,
         h.shutdown.clone(),
+        Arc::new(std::sync::atomic::AtomicU32::new(0)),
     )
 }
 

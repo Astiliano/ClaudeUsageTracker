@@ -315,6 +315,9 @@ impl EventSink for TauriEvents {
             apply_tray(&app, &core).await;
         });
     }
+    fn system_sampled(&self) {
+        let _ = self.app.emit("system:sampled", ());
+    }
 }
 
 #[cfg(test)]

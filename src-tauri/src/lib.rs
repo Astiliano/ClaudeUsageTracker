@@ -227,12 +227,14 @@ pub fn run() {
                 Arc::new(TauriEvents::new(handle.clone(), Arc::clone(&core)));
             let process: Arc<dyn ProcessProbe> = Arc::new(SysinfoProbe::new()?);
             let binary: Arc<dyn BinaryProbe> = Arc::new(RealBinaryProbe);
+            let pid_slot = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let driver = Driver::new(
                 Arc::clone(&core),
-                events,
+                Arc::clone(&events),
                 process,
                 binary,
                 shutdown.clone(),
+                Arc::clone(&pid_slot),
             );
             tauri::async_runtime::spawn(driver.run());
 

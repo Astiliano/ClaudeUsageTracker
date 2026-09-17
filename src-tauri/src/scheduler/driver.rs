@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::AppResult;
 use crate::scheduler::machine::{
-    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Machine, Recorded,
+    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Gate, Machine, Recorded,
     SharedMachine, Trigger,
 };
 use crate::store::settings::UserSettings;
@@ -31,6 +31,8 @@ pub trait EventSink: Send + Sync {
     fn gate_changed(&self, gate: &str);
     fn poller_stalled(&self, at: i64, cycle_age_ms: u64);
     fn refresh_tray(&self);
+    /// The sampler published a fresh `SystemStats` (spec §4.2).
+    fn system_sampled(&self);
 }
 
 /// The process gate, abstracted for the same reason.
@@ -55,12 +57,19 @@ impl BinaryProbe for RealBinaryProbe {
 
 pub struct SysinfoProbe {
     system: Mutex<sysinfo::System>,
+    self_pid: u32,
+    /// Cached on first use: the app's own start time, so the exclusion can
+    /// tell our poll child from a real session whose dead parent's pid the
+    /// OS later handed to us.
+    self_started_at: OnceLock<u64>,
 }
 
 impl SysinfoProbe {
     pub fn new() -> AppResult<SysinfoProbe> {
         Ok(SysinfoProbe {
             system: Mutex::new(crate::process::new_system()?),
+            self_pid: std::process::id(),
+            self_started_at: OnceLock::new(),
         })
     }
 }
@@ -68,9 +77,19 @@ impl SysinfoProbe {
 impl ProcessProbe for SysinfoProbe {
     fn claude_running(&self, exclude_pid: Option<u32>) -> bool {
         let mut sys = self.system.lock().unwrap_or_else(PoisonError::into_inner);
+        let started_at = *self.self_started_at.get_or_init(|| {
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            sys.process(sysinfo::Pid::from_u32(self.self_pid))
+                .map(|p| p.start_time())
+                .unwrap_or(0)
+        });
         let exclusion = crate::process::Exclusion {
-            self_pid: std::process::id(),
-            self_started_at: 0,
+            self_pid: self.self_pid,
+            self_started_at: started_at,
             poll_child: exclude_pid,
         };
         crate::process::is_claude_running(&mut sys, &exclusion)
@@ -134,6 +153,16 @@ fn flush_deferred_changes(core: &Core, deferred: &mut bool) {
     if *deferred {
         *deferred = false;
         core.triggers.account_changed(Vec::new());
+    }
+}
+
+/// Re-arms a presence wake that was consumed while a cycle was running.
+/// The wake is edge-triggered and the process count stays non-zero
+/// afterwards, so without this the gate would wait for the next Timer.
+fn flush_deferred_presence(core: &Core, deferred: &mut bool) {
+    if *deferred {
+        *deferred = false;
+        core.triggers.presence();
     }
 }
 
@@ -417,6 +446,7 @@ impl Driver {
         process: Arc<dyn ProcessProbe>,
         binary: Arc<dyn BinaryProbe>,
         shutdown: CancellationToken,
+        pid_slot: Arc<AtomicU32>,
     ) -> Driver {
         Driver {
             core,
@@ -424,7 +454,7 @@ impl Driver {
             process,
             binary,
             shutdown,
-            pid_slot: Arc::new(AtomicU32::new(0)),
+            pid_slot,
             cycle_generation: AtomicU64::new(0),
             machine: Arc::new(Mutex::new(Machine::new())),
         }
@@ -434,6 +464,46 @@ impl Driver {
         match self.pid_slot.load(Ordering::SeqCst) {
             0 => None,
             p => Some(p),
+        }
+    }
+
+    /// The process answer for a decision, or `None` when there is none to
+    /// be had: the app is shutting down, a cycle is running, or the hop
+    /// failed. Busy is checked before the walk so the app's own poll child
+    /// can never latch the gate, and the walk itself goes through the
+    /// `blocking` hop
+    /// because `AccountChanged` fires on every add, enable, disable and
+    /// rescan.
+    ///
+    /// The extra await is safe: this task is the only caller of `decide`
+    /// and `begin_cycle`, a chosen `select!` arm runs to completion before
+    /// another is polled, and the only thing that can change busy during
+    /// the await is a cycle *ending*, which only makes the answer more
+    /// current. A failed hop yields `None`, never a guessed `false`: no
+    /// answer leaves the gate alone, whereas a wrong `false` would close it.
+    async fn probe_if_free(&self) -> Option<bool> {
+        // Every reason for `None` is named here, once, so a caller never has
+        // to guess which one it got. Nothing may spend a process walk once
+        // the app is closing: the answer could only feed a decision
+        // `decide_and_maybe_run` is about to refuse anyway, and a hop the
+        // runtime tears down mid-flight would log the WARN below for a
+        // failure that is not one.
+        if self.shutdown.is_cancelled() {
+            debug!(reason = "shutting down", "process check skipped");
+            return None;
+        }
+        if lock_machine(&self.machine).is_busy() {
+            debug!(reason = "busy", "process check skipped");
+            return None;
+        }
+        let process = Arc::clone(&self.process);
+        let pid = self.current_pid();
+        match blocking(move || Ok(process.claude_running(pid))).await {
+            Ok(running) => Some(running),
+            Err(e) => {
+                warn!(error = %e, "process check failed; gate left unchanged");
+                None
+            }
         }
     }
 
@@ -582,8 +652,9 @@ impl Driver {
             return None;
         }
         let restore = ids.clone();
+        let answer = self.probe_if_free().await;
         match self
-            .decide_and_maybe_run(Trigger::AccountChanged(ids), None, settings, done_tx)
+            .decide_and_maybe_run(Trigger::AccountChanged(ids), answer, settings, done_tx)
             .await
         {
             Some(cycle) => Some(cycle),
@@ -596,6 +667,41 @@ impl Driver {
         }
     }
 
+    /// One presence wake.
+    ///
+    /// Three outcomes, in this order. The gate is already open: nothing to
+    /// do, and no process check is spent. A cycle is running: the wake is
+    /// deferred, because it is edge-triggered and the process count stays
+    /// non-zero afterwards, so dropping it would leave the gate shut until
+    /// the next Timer. Otherwise probe and decide; a failed probe is a skip,
+    /// not a deferral, since the next Timer reconciles the gate anyway.
+    async fn handle_presence(
+        &self,
+        settings: &UserSettings,
+        done_tx: &UnboundedSender<u64>,
+        deferred: &mut bool,
+    ) -> Option<LiveCycle> {
+        if lock_machine(&self.machine).gate() == Gate::Active {
+            debug!(reason = "already_active", "presence skipped");
+            return None;
+        }
+        if lock_machine(&self.machine).is_busy() {
+            debug!(reason = "busy", "presence skipped");
+            *deferred = true;
+            return None;
+        }
+        let running = match self.probe_if_free().await {
+            Some(r) => r,
+            None => {
+                // probe_if_free has already logged which reason.
+                debug!(reason = "no process answer", "presence skipped");
+                return None;
+            }
+        };
+        self.decide_and_maybe_run(Trigger::Presence, Some(running), settings, done_tx)
+            .await
+    }
+
     /// Runs one decision and, on `Run`, starts the cycle. Async because the
     /// enabled list and the halt flag both come from the store.
     async fn decide_and_maybe_run(
@@ -605,6 +711,10 @@ impl Driver {
         settings: &UserSettings,
         done_tx: &UnboundedSender<u64>,
     ) -> Option<LiveCycle> {
+        if self.shutdown.is_cancelled() {
+            debug!(trigger = trigger.as_str(), "trigger ignored: shutting down");
+            return None;
+        }
         // A stat, not a database call, so it stays on this thread.
         let binary_path = self.refresh_binary(settings);
         let enabled = self.enabled().await;
@@ -627,7 +737,8 @@ impl Driver {
             Decision::Skip(reason) => {
                 match reason {
                     crate::scheduler::machine::SkipReason::GateIdle
-                    | crate::scheduler::machine::SkipReason::Busy => {
+                    | crate::scheduler::machine::SkipReason::Busy
+                    | crate::scheduler::machine::SkipReason::AlreadyActive => {
                         debug!(reason = reason.as_str(), "decision skipped")
                     }
                     _ => warn!(reason = reason.as_str(), "decision skipped"),
@@ -640,7 +751,7 @@ impl Driver {
                 gate_transition,
             } => {
                 if let Some(gate) = gate_transition {
-                    info!(gate = gate.as_str(), "gate changed");
+                    info!(gate = gate.as_str(), trigger = reason.as_str(), "gate changed");
                     self.events.gate_changed(gate.as_str());
                 }
                 let binary = binary_path?;
@@ -669,10 +780,12 @@ impl Driver {
         // when the cycle ends. Manual clicks are deliberately coalesced away
         // instead, but a newly enabled account must still get polled.
         let mut changed_deferred = false;
+        let mut presence_deferred = false;
 
         // Startup: decide, run, then enter the loop.
+        let startup_answer = self.probe_if_free().await;
         if let Some(cycle) = self
-            .decide_and_maybe_run(Trigger::Startup, None, &settings, &done_tx)
+            .decide_and_maybe_run(Trigger::Startup, startup_answer, &settings, &done_tx)
             .await
         {
             live = Some(cycle);
@@ -713,6 +826,7 @@ impl Driver {
                 // The token has dropped, so busy is false again.
                 self.publish();
                 flush_deferred_changes(&self.core, &mut changed_deferred);
+                flush_deferred_presence(&self.core, &mut presence_deferred);
             }
 
             let deadline_ms = deadline_for(last_cycle_end, settings.interval_secs);
@@ -727,14 +841,16 @@ impl Driver {
 
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {
-                    // Busy is checked before spending a process check, so the
-                    // app's own child can never latch the gate.
-                    if lock_machine(&self.machine).is_busy() {
-                        debug!("timer skipped: a cycle is already running");
+                    // Busy is checked inside the helper before a process
+                    // check is spent, so the app's own child can never
+                    // latch the gate. A failed check lands here too, and
+                    // the Timer never hands `None` to `decide`.
+                    let Some(running) = self.probe_if_free().await else {
+                        // probe_if_free has already logged which reason.
+                        debug!("timer skipped: no process answer");
                         last_cycle_end = chrono::Utc::now().timestamp_millis();
                         continue;
-                    }
-                    let running = self.process.claude_running(self.current_pid());
+                    };
                     if let Some(cycle) = self
                         .decide_and_maybe_run(Trigger::Timer, Some(running), &settings, &done_tx)
                         .await
@@ -761,16 +877,26 @@ impl Driver {
                     }
                 }
                 _ = self.core.triggers.notified_manual() => {
+                    let answer = self.probe_if_free().await;
                     if let Some(cycle) = self
-                        .decide_and_maybe_run(Trigger::Manual, None, &settings, &done_tx)
+                        .decide_and_maybe_run(Trigger::Manual, answer, &settings, &done_tx)
                         .await
                     {
                         live = Some(cycle);
                     }
                 }
                 _ = self.core.triggers.notified_startup() => {
+                    let answer = self.probe_if_free().await;
                     if let Some(cycle) = self
-                        .decide_and_maybe_run(Trigger::Startup, None, &settings, &done_tx)
+                        .decide_and_maybe_run(Trigger::Startup, answer, &settings, &done_tx)
+                        .await
+                    {
+                        live = Some(cycle);
+                    }
+                }
+                _ = self.core.triggers.notified_presence() => {
+                    if let Some(cycle) = self
+                        .handle_presence(&settings, &done_tx, &mut presence_deferred)
                         .await
                     {
                         live = Some(cycle);
@@ -794,6 +920,7 @@ impl Driver {
                         lock_status(&self.core.status).stalled_at = None;
                         self.publish();
                         flush_deferred_changes(&self.core, &mut changed_deferred);
+                        flush_deferred_presence(&self.core, &mut presence_deferred);
                     }
                 }
                 _ = watchdog.tick(), if cycle_running => {
@@ -856,6 +983,10 @@ impl Driver {
                                     &self.core,
                                     &mut changed_deferred,
                                 );
+                                flush_deferred_presence(
+                                    &self.core,
+                                    &mut presence_deferred,
+                                );
                             }
                         }
                     }
@@ -903,12 +1034,25 @@ mod tests {
         fn gate_changed(&self, _gate: &str) {}
         fn poller_stalled(&self, _at: i64, _cycle_age_ms: u64) {}
         fn refresh_tray(&self) {}
+        fn system_sampled(&self) {}
     }
 
     struct IdleProcess;
     impl ProcessProbe for IdleProcess {
         fn claude_running(&self, _exclude_pid: Option<u32>) -> bool {
             false
+        }
+    }
+
+    /// Counts how many process checks were actually spent.
+    struct CountingProcess {
+        running: bool,
+        calls: Arc<AtomicU64>,
+    }
+    impl ProcessProbe for CountingProcess {
+        fn claude_running(&self, _exclude_pid: Option<u32>) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.running
         }
     }
 
@@ -967,7 +1111,233 @@ mod tests {
             Arc::new(IdleProcess),
             Arc::new(FakeBinary(tmp.join("claude.exe"))),
             CancellationToken::new(),
+            Arc::new(AtomicU32::new(0)),
         )
+    }
+
+    #[tokio::test]
+    async fn probe_if_free_spends_no_process_check_while_busy() {
+        let (tmp, core, _id) = test_core();
+        let calls = Arc::new(AtomicU64::new(0));
+        let driver = Driver::new(
+            Arc::clone(&core),
+            Arc::new(SilentEvents),
+            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
+            CancellationToken::new(),
+            Arc::new(AtomicU32::new(0)),
+        );
+
+        {
+            let _token = begin_cycle(&driver.machine, 1);
+            assert_eq!(driver.probe_if_free().await, None, "busy must short-circuit");
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "no check may be spent while busy");
+        }
+
+        assert_eq!(driver.probe_if_free().await, Some(true));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn probe_if_free_spends_no_process_check_once_shutting_down() {
+        let (tmp, core, _id) = test_core();
+        let calls = Arc::new(AtomicU64::new(0));
+        let shutdown = CancellationToken::new();
+        let driver = Driver::new(
+            Arc::clone(&core),
+            Arc::new(SilentEvents),
+            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
+            shutdown.clone(),
+            Arc::new(AtomicU32::new(0)),
+        );
+
+        shutdown.cancel();
+        assert_eq!(driver.probe_if_free().await, None);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no walk may be spent in the exit window"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_with_claude_running_publishes_active() {
+        let (tmp, core, _id) = test_core();
+        let driver = Driver::new(
+            Arc::clone(&core),
+            Arc::new(SilentEvents),
+            Arc::new(IdleProcess),
+            Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
+            CancellationToken::new(),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+
+        let cycle = driver
+            .decide_and_maybe_run(Trigger::Startup, Some(true), &test_settings(), &done_tx)
+            .await
+            .expect("startup runs");
+        assert_eq!(
+            lock_status(&core.status).gate,
+            Gate::Active,
+            "the chip must be right before the cycle even finishes"
+        );
+        cycle.cancel.cancel();
+        cycle.handle.abort();
+        let _ = cycle.handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_presence_decision_is_skipped_at_debug_when_already_active() {
+        let (tmp, core, _id) = test_core();
+        let driver = test_driver(Arc::clone(&core), tmp.path());
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+
+        let cycle = driver
+            .decide_and_maybe_run(Trigger::Timer, Some(true), &test_settings(), &done_tx)
+            .await
+            .expect("timer opens the gate");
+        cycle.cancel.cancel();
+        cycle.handle.abort();
+        let _ = cycle.handle.await;
+
+        assert!(
+            driver
+                .decide_and_maybe_run(Trigger::Presence, Some(true), &test_settings(), &done_tx)
+                .await
+                .is_none(),
+            "the gate is already open, so a presence wake polls nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trigger_after_shutdown_starts_no_cycle() {
+        let (tmp, core, _id) = test_core();
+        let shutdown = CancellationToken::new();
+        let driver = Driver::new(
+            Arc::clone(&core),
+            Arc::new(SilentEvents),
+            Arc::new(IdleProcess),
+            Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
+            shutdown.clone(),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+
+        // A value only a publish would destroy. `publish_status` recomputes
+        // `busy` from the machine, which has no cycle, so a `busy: true`
+        // planted here survives exactly as long as nothing publishes.
+        // `stalled_at` would NOT work: `publish_status` deliberately carries
+        // it across from the slot, so it survives a publish too.
+        {
+            let mut status = lock_status(&core.status);
+            status.busy = true;
+            status.stalled_at = Some(1);
+        }
+        let before = lock_status(&core.status).clone();
+
+        shutdown.cancel();
+        assert!(
+            driver
+                .decide_and_maybe_run(Trigger::Manual, Some(true), &test_settings(), &done_tx)
+                .await
+                .is_none(),
+            "a wake landing in the exit window must not start a cycle"
+        );
+        assert_eq!(
+            *lock_status(&core.status),
+            before,
+            "the guard returns before `decide`, so no snapshot is published"
+        );
+        assert!(
+            lock_status(&core.status).busy,
+            "the planted value is what proves it: a publish would have cleared it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_presence_wake_skipped_while_busy_is_refired_when_the_cycle_ends() {
+        let (tmp, core, _id) = test_core();
+        let calls = Arc::new(AtomicU64::new(0));
+        let driver = Driver::new(
+            Arc::clone(&core),
+            Arc::new(SilentEvents),
+            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
+            CancellationToken::new(),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let mut presence_deferred = false;
+
+        // A cycle is in flight, so the wake cannot be decided now. The arm
+        // itself must set the flag: nothing here sets it by hand.
+        {
+            let _token = begin_cycle(&driver.machine, 1);
+            assert!(
+                driver
+                    .handle_presence(&test_settings(), &done_tx, &mut presence_deferred)
+                    .await
+                    .is_none(),
+                "busy, so nothing runs"
+            );
+            assert!(presence_deferred, "a wake consumed while busy must be deferred");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "no process check may be spent on a wake that cannot be decided"
+            );
+        }
+
+        // The cycle has ended; the flush point must re-arm the wake.
+        flush_deferred_presence(&core, &mut presence_deferred);
+        assert!(!presence_deferred, "the flag is cleared once the wake is re-armed");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                core.triggers.notified_presence()
+            )
+            .await
+            .is_ok(),
+            "the deferred wake must be pending again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_presence_wake_spends_no_probe_when_the_gate_is_already_open() {
+        let (tmp, core, _id) = test_core();
+        let calls = Arc::new(AtomicU64::new(0));
+        let driver = Driver::new(
+            Arc::clone(&core),
+            Arc::new(SilentEvents),
+            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
+            CancellationToken::new(),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+
+        let cycle = driver
+            .decide_and_maybe_run(Trigger::Timer, Some(true), &test_settings(), &done_tx)
+            .await
+            .expect("timer opens the gate");
+        cycle.cancel.cancel();
+        cycle.handle.abort();
+        let _ = cycle.handle.await;
+        let spent = calls.load(Ordering::SeqCst);
+
+        let mut presence_deferred = false;
+        assert!(driver
+            .handle_presence(&test_settings(), &done_tx, &mut presence_deferred)
+            .await
+            .is_none());
+        assert!(!presence_deferred, "an already-open gate is not a deferral");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            spent,
+            "the gate is already open, so no check is spent"
+        );
     }
 
     /// A sink whose very first step fails, like a store that cannot be
