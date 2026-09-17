@@ -20,7 +20,7 @@ export function Sparkline({ points, stroke }: Props): JSX.Element {
       viewBox="0 0 100 24"
       preserveAspectRatio="none"
       role="img"
-      aria-label="weekly usage, last 7 days"
+      aria-label="weekly limit, last 24 hours"
     >
       <path
         d={d}

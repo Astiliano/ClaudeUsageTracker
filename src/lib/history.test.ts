@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import limits from "./historyLimits.json";
 import {
-  MAX_BUCKETS, MAX_RANGE_MS, MIN_BUCKET_MS, PRESETS, PRESET_KEYS, UNITS, UNIT_KEYS, WEEK_ALL,
-  alignedSince, axisLabelsFor, bucketCount, bucketSeries, effectiveUnit, metricFromKey, metricKey,
+  MAX_BUCKETS, MAX_RANGE_MS, MIN_BUCKET_MS, PRESETS, PRESET_KEYS, SPARK_PRESET, SPARK_UNIT, UNITS, UNIT_KEYS,
+  WEEK_ALL, alignedSince, axisLabelsFor, bucketCount, bucketSeries, effectiveUnit, metricFromKey, metricKey,
   metricLabel, nearestKnownSlot, slotLabel, unitAllowed,
 } from "./history";
 
@@ -172,5 +172,18 @@ describe("nearestKnownSlot", () => {
     expect(nearestKnownSlot([], 0.3)).toBeNull();
     expect(nearestKnownSlot([1, 2, 3], 1.7)).toBe(2);
     expect(nearestKnownSlot([1, 2, 3], -3)).toBe(0);
+  });
+});
+
+describe("row sparkline window", () => {
+  it("is 24 hours at 15-minute buckets, an allowed pair of at most 97 slots", () => {
+    expect(SPARK_PRESET).toBe("24h");
+    expect(SPARK_UNIT).toBe("15m");
+    expect(unitAllowed(SPARK_PRESET, SPARK_UNIT)).toBe(true);
+    for (const now of [NOW, NOW + 7 * MIN + 1, NOW + 14 * MIN + 59_999, NOW + 3 * HOUR]) {
+      const since = alignedSince(now, SPARK_PRESET, SPARK_UNIT);
+      expect(now - since).toBeLessThanOrEqual(PRESETS["24h"].rangeMs);
+      expect(bucketCount(since, now, SPARK_UNIT)).toBeLessThanOrEqual(97);
+    }
   });
 });

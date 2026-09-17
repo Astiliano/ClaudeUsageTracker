@@ -10,7 +10,7 @@ export const COLUMNS: Record<ColumnKey, ColumnDef> = {
   session: { label: "Session", width: "minmax(86px,1.5fr)" },
   week: { label: "Week (all)", width: "minmax(86px,1.5fr)" },
   model: { label: "Per model", width: "minmax(86px,1.5fr)" },
-  spark: { label: "7 days", width: "76px" },
+  spark: { label: "24 hours", width: "76px" },
   updated: { label: "Updated", width: "82px" },
 };
 

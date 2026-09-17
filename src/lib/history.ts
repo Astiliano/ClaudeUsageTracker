@@ -43,6 +43,10 @@ export type Metric =
 
 export const WEEK_ALL: Metric = { kind: "week_all" };
 
+/** The row sparkline's window: the last 24 hours at the 24h preset's own unit. */
+export const SPARK_PRESET: PresetKey = "24h";
+export const SPARK_UNIT: UnitKey = "15m";
+
 export function metricLabel(m: Metric): string {
   switch (m.kind) {
     case "week_all": return "weekly limit";
