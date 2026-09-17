@@ -101,6 +101,8 @@ Full table (gate, answer → candidates, transition), Skips omitted:
 ### 3.2 `driver.rs`
 
 - New helper `async fn probe_if_free(&self) -> Option<bool>`: `None` when
+  `self.shutdown.is_cancelled()` (DEBUG "process check skipped: shutting
+  down", so no walk is spent during the exit window) or when
   `is_busy()`, otherwise `blocking(move || Ok(process.claude_running(pid))).await`
   with `process = Arc::clone(&self.process)` and `pid = self.current_pid()`
   (`blocking` takes an `FnOnce() -> AppResult<T>`). An `Err` from the hop
