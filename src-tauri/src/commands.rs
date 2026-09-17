@@ -478,12 +478,16 @@ pub async fn set_settings(
         };
         match autostart_change(current, want_autostart) {
             None => Ok(()),
-            Some(true) => autostart_app.autolaunch().enable(),
-            Some(false) => autostart_app.autolaunch().disable(),
+            Some(true) => autostart_app
+                .autolaunch()
+                .enable()
+                .map(|()| info!(want_autostart, "launch-at-login enabled")),
+            Some(false) => autostart_app
+                .autolaunch()
+                .disable()
+                .map(|()| info!(want_autostart, "launch-at-login disabled")),
         }
-        .map(|()| {
-            info!(want_autostart, "launch-at-login updated");
-        })
+        .inspect_err(|e| warn!(error = %e, want_autostart, "could not update launch-at-login"))
         .map_err(|e| AppError::Internal(format!("could not update launch at login: {e}")))
     })
     .await?;
