@@ -13,6 +13,8 @@ interface Props {
   system: SystemReport | null;
   systemError: string | null;
   now: number;
+  stayOnTop: boolean;
+  onToggleStayOnTop: () => void;
   onToggleSettings: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
@@ -25,6 +27,8 @@ export function Header({
   system,
   systemError,
   now,
+  stayOnTop,
+  onToggleStayOnTop,
   onToggleSettings,
   onChanged,
   onError,
@@ -59,6 +63,15 @@ export function Header({
           </div>
           <button type="button" className="btn" onClick={() => void run("poll_now")} disabled={dashboard.busy}>
             {dashboard.busy ? "refreshing…" : "refresh"}
+          </button>
+          <button
+            type="button"
+            className={"btn" + (stayOnTop ? " btn-edit-on" : "")}
+            aria-pressed={stayOnTop}
+            title="Stay on top of other windows"
+            onClick={onToggleStayOnTop}
+          >
+            on top
           </button>
           <button type="button" className={`btn${settingsOpen ? " btn-edit-on" : ""}`} onClick={onToggleSettings}>
             settings

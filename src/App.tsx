@@ -78,6 +78,8 @@ export default function App(): JSX.Element {
           system={system}
           systemError={systemError}
           now={now}
+          stayOnTop={prefs.alwaysOnTop}
+          onToggleStayOnTop={() => update({ alwaysOnTop: !prefs.alwaysOnTop })}
           onToggleSettings={() => setShowSettings((v) => !v)}
           onChanged={refetch}
           onError={showError}
