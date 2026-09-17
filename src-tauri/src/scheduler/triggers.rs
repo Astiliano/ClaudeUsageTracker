@@ -10,6 +10,7 @@ use tokio::sync::Notify;
 pub struct Triggers {
     manual: Notify,
     startup: Notify,
+    presence: Notify,
     changed: Notify,
     changed_ids: Mutex<HashSet<String>>,
 }
@@ -25,6 +26,12 @@ impl Triggers {
 
     pub fn startup(&self) {
         self.startup.notify_one();
+    }
+
+    /// Fired by the sampler on the zero-to-non-zero Claude process edge
+    /// (spec §4.3). The sampler is the only caller.
+    pub fn presence(&self) {
+        self.presence.notify_one();
     }
 
     pub fn account_changed(&self, ids: Vec<String>) {
@@ -56,6 +63,10 @@ impl Triggers {
 
     pub async fn notified_startup(&self) {
         self.startup.notified().await;
+    }
+
+    pub async fn notified_presence(&self) {
+        self.presence.notified().await;
     }
 
     pub async fn notified_changed(&self) {
@@ -139,5 +150,30 @@ mod tests {
             .expect("startup notification");
         let manual = tokio::time::timeout(Duration::from_millis(200), t.notified_manual()).await;
         assert!(manual.is_err(), "startup must not fire the manual channel");
+    }
+
+    #[tokio::test]
+    async fn presence_coalesces_like_manual() {
+        let t = Arc::new(Triggers::new());
+        t.presence();
+        t.presence();
+
+        tokio::time::timeout(Duration::from_millis(200), t.notified_presence())
+            .await
+            .expect("first notification");
+
+        let second = tokio::time::timeout(Duration::from_millis(200), t.notified_presence()).await;
+        assert!(second.is_err(), "presence wakes must coalesce, not queue");
+    }
+
+    #[tokio::test]
+    async fn presence_is_its_own_channel() {
+        let t = Arc::new(Triggers::new());
+        t.presence();
+        tokio::time::timeout(Duration::from_millis(200), t.notified_presence())
+            .await
+            .expect("presence notification");
+        let manual = tokio::time::timeout(Duration::from_millis(200), t.notified_manual()).await;
+        assert!(manual.is_err(), "presence must not fire the manual channel");
     }
 }
