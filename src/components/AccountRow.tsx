@@ -68,7 +68,7 @@ export function AccountRow(props: Props): JSX.Element {
       case "week": { const n = weekNote(weekPct); return <Meter pct={week?.pct ?? null} note={week === null ? "no data" : n.text} noteWarn={n.warn} />; }
       case "model": return models === null ? <Meter pct={null} note="no data" /> : <Meter pct={models.pct} note={models.note} title={models.title} />;
       case "spark": return (
-        <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for 30 days" aria-expanded={chartOpen} onClick={onToggleChart}>
+        <button type="button" className={`spark${chartOpen ? " spark-open" : ""}`} title="Click for history" aria-expanded={chartOpen} onClick={onToggleChart}>
           <Sparkline points={points} stroke={stroke} />
         </button>);
       case "updated": return <span className="updated">{formatAgo(row.latest?.taken_at ?? null, now)}</span>;

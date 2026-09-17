@@ -195,10 +195,16 @@ export function Settings({
             );
           })}
         </div>
-        {autoHiddenColumns(layout).length > 0 && (
+        {layout === "cards" ? (
           <span className="hint">
-            {autoHiddenColumns(layout).map((k) => COLUMNS[k].label).join(" and ")} are hidden while the window is narrower than {BREAKPOINTS.narrow} px.
+            Columns apply to the table; widen the window past {BREAKPOINTS.cards} px to see it.
           </span>
+        ) : (
+          autoHiddenColumns(layout).length > 0 && (
+            <span className="hint">
+              {autoHiddenColumns(layout).map((k) => COLUMNS[k].label).join(" and ")} are hidden while the window is narrower than {BREAKPOINTS.narrow} px.
+            </span>
+          )
         )}
       </div>
 

@@ -234,6 +234,7 @@ button.pill { cursor: pointer; background: transparent; }
   border: 1px solid #333d45; border-radius: 7px; padding: 5px 8px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
 }
+.chart-empty { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--mono); font-size: 11px; color: var(--muted); pointer-events: none; }
 .chart-y { position: absolute; font-family: var(--mono); font-size: 10px; color: var(--muted); left: -4px; }
 .chart-y-top { top: 8px; }
 .chart-y-bottom { bottom: 6px; }

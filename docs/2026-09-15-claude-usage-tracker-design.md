@@ -525,10 +525,13 @@ Queries: `list_accounts()`/`enabled_account_ids()` order
 `ORDER BY sort_order ASC, is_default DESC, lower(label) ASC, label ASC` *(2026-09-16: `is_default` removed; V3 drops the column, `add_account` no longer takes it, ordering is `sort_order` then label.)*
 (`sort_order` is authoritative; the rest is a tiebreak, relevant only while
 rows share a `sort_order`). `latest_per_account()` (max `taken_at`, tiebreak
-max `id`), `history(account_id, since)` → hourly buckets `[{t, pct}]` of
-`max(week_all_pct)` over `ok` rows, **only for hours that have at least one
-row** (no zero-filling — the process gate guarantees overnight gaps, which
-must render as breaks, not crashes), `prune(now)` deletes rows with
+max `id`), `history(account_id, since, bucket_ms, metric)` *(2026-09-16)* →
+buckets `[{t, pct}]` of `MAX(metric)` over `ok` rows, anchored at `since`
+(`bucket = since + floor((taken_at − since)/bucket_ms)·bucket_ms`); `metric`
+is week-all, session, or a model label read via `json_each`. Empty buckets
+are absent (no zero-filling — the process gate guarantees overnight gaps,
+which must render as breaks, not crashes); limits are enforced in
+`commands::core_get_history` (§8 table). `prune(now)` deletes rows with
 `taken_at < now − 30 d`, logs the count at WARN if > 0, then runs
 `PRAGMA incremental_vacuum` (D10). `record` in the machine resets an
 account's backoff on `ok`; `reset_all_backoff()` exists for the settings

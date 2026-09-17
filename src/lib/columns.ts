@@ -103,6 +103,7 @@ export function normalizeHiddenColumns(v: unknown): ColumnKey[] | null {
 
 /** Minimum px the grid needs: every track's px floor plus the gaps between tracks. */
 export function gridMinWidth(order: readonly ColumnKey[]): number {
+  // Takes the first px value in the track string; a column width must put its px floor first (e.g. "minmax(150px,1fr)").
   const px = (width: string): number => {
     const m = /(\d+(?:\.\d+)?)px/.exec(width);
     return m === null ? 0 : Number(m[1]);

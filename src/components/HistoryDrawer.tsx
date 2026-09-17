@@ -185,6 +185,9 @@ export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }:
             <div className="tip" style={{ left: tip.left, bottom: tip.bottom, transform: TIP_TRANSFORM[tip.edge] }}>{tip.text}</div>
           )}
         </div>
+        {!loading && result !== null && stats.missing === vals.length && vals.length > 0 && (
+          <span className="chart-empty">no data in this range</span>
+        )}
         <span className="chart-y chart-y-top">100%</span>
         <span className="chart-y chart-y-bottom">0%</span>
       </div>
