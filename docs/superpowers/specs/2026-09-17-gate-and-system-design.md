@@ -171,33 +171,36 @@ The sampler (§4.3) is the only caller of `presence()`.
 
 ## 4. Changes 2 and 3 — Claude process usage and count
 
+> **Revised 2026-09-17 (charts-and-system).** The system line now shows
+> whole-machine CPU and memory shares; the Claude processes' RSS and CPU
+> share were removed and only the count remains. §4.1, §4.4–§4.6, §7, §8 and
+> §10 below describe the revised state; §4.2 and §4.3 are unchanged. The
+> original per-process design is in git history (PR #4).
+
 ### 4.1 Data (`src-tauri/src/system.rs`, new module)
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ClaudeStats {
-    /// Claude Code processes other than the poll child and any child of this app.
-    pub count: u32,
-    /// Sum of their resident memory, bytes.
-    pub rss_bytes: u64,
-    /// Sum of their CPU usage as a share of the whole machine, 0..=100.
-    /// `None` only when the CPU count is unknown (0); see §4.1 on sampling.
-    pub cpu_pct: Option<f32>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SystemStats {
-    pub sampled_at: i64,          // epoch ms
-    pub mem_total_bytes: u64,     // denominator for the memory ring only
-    pub claude: ClaudeStats,
+    /// Epoch milliseconds, so the UI can tell a live figure from a frozen one.
+    pub sampled_at: i64,
+    /// Whole-machine CPU busy share, 0..=100 (100 − PDH "% Idle Time").
+    pub cpu_pct: f32,
+    /// Whole-machine physical memory in use (total − available), bytes.
+    pub mem_used_bytes: u64,
+    pub mem_total_bytes: u64,
+    /// Claude Code processes other than the poll child and any child of this app.
+    pub claude_count: u32,
 }
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 ```
+
+`ClaudeStats` is deleted.
 
 Pure, unit-tested pieces:
 
 - In `process.rs`, shared by the gate and the sampler (the gate never
   depends on `system.rs`):
-  `ProcView { pid: u32, parent: Option<u32>, start_time: u64, name: String, cmd: Vec<String>, rss_bytes: u64, cpu: f32 }`
+  `ProcView { pid: u32, parent: Option<u32>, start_time: u64, name: String, cmd: Vec<String> }`
   — the slice of `sysinfo::Process` both readers build (`start_time` is
   sysinfo's seconds-since-epoch process start), with
   `ProcView::from(&sysinfo::Process)`; and
@@ -212,54 +215,43 @@ Pure, unit-tested pieces:
   `is_claude_running` is rewritten on top of `Exclusion::counts` (its
   `exclude_pid` argument becomes the `Exclusion`), and its existing tests
   keep passing with `self_pid = 0, self_started_at = 0`.
-- `aggregate(procs: &[ProcView], exclusion: &Exclusion, cpus: usize) -> ClaudeStats`:
-  sums `rss_bytes` and `cpu` over `exclusion.counts(view)`. `cpu_pct` is
-  `Some(sum(cpu) / cpus as f32)` clamped to 0..=100; `None` when `cpus == 0`
-  (never expected; defensive).
-- `presence_edge(prev_count: u32, next_count: u32) -> bool` = `prev == 0 && next > 0`.
+- `count_claude(procs: &[ProcView], exclusion: &Exclusion) -> u32` replaces
+  `aggregate`: the number of views for which `exclusion.counts(view)`.
+- `cpu_share(raw: f32) -> f32`: `0.0` when `!raw.is_finite()`, else
+  `raw.clamp(0.0, 100.0)`. PDH can hand back a NaN on a counter hiccup;
+  `f32::clamp` would pass it through.
+- `presence_edge` and `after_panic` unchanged.
 
-`Sampler { system: System, self_pid: u32, self_started_at: u64, pid_slot: Arc<AtomicU32>, cpus: usize, mem_total_bytes: u64, primed: bool }`
-with `sample(&mut self, now_ms) -> Sampled` where
-`Sampled { stats: SystemStats, elapsed_ms: u64, did_prime: bool }` (`did_prime`
-is true only on the call that ran the priming steps, unlike the sticky
-`Sampler.primed` field; `elapsed_ms` is the
-wall time of the whole call, so the log shows the priming cost once):
+`Sampler { system, self_pid, self_started_at, pid_slot, primed }` (no
+`cpus`, no cached `mem_total_bytes`). The inline `ProcessRefreshKind` in
+`refresh_processes` is replaced by a named `process_refresh()` =
+`nothing().with_exe(OnlyIfNotSet).with_cmd(OnlyIfNotSet)` — the gate probe's
+kind; no CPU or memory per process.
 
-Let `PROCESS_REFRESH` = `refresh_processes_specifics(All, true, nothing().with_exe(OnlyIfNotSet).with_cmd(OnlyIfNotSet).with_cpu().with_memory())`.
+`sample(&mut self, now_ms) -> Sampled` (`Sampled { stats, elapsed_ms, did_prime }`
+unchanged):
 
-- First call only (`!primed`), in this order:
-  1. `refresh_cpu_specifics(CpuRefreshKind::nothing())` — initialises the
-     CPU list without opening the PDH usage query, which `refresh_cpu_usage()`
-     would do on every call; the per-process CPU share is divided by
-     `cpus().len()` inside sysinfo, so **this must precede the first
-     process refresh** or every `cpu_usage()` reads 0. Cache
-     `cpus = cpus().len()`.
-  2. `refresh_memory()` once; cache `total_memory()` (a constant).
-  3. `PROCESS_REFRESH`, then `std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL)`.
-  4. Read `self_started_at` from `system.process(self_pid).start_time()`
-     (0 if absent, which disables the start-time clause and falls back to
-     the plain parent check).
-  5. `PROCESS_REFRESH` again, then sleep again. Set `primed`.
+- First call only (`!primed`):
+  1. `refresh_cpu_usage()` — opens the PDH query and takes the first
+     collection (reads 100 % via the failed-counter fallback; discarded).
+  2. `process_refresh()`; read `self_started_at` from
+     `process(self_pid).start_time()` (0 if absent, as today).
+  3. `std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL)`; set `primed`.
+- Every call: `refresh_cpu_usage()`, `refresh_memory()`, `process_refresh()`;
+  then `SystemStats { sampled_at: now_ms, cpu_pct: cpu_share(global_cpu_usage()),
+  mem_used_bytes: used_memory(), mem_total_bytes: total_memory(),
+  claude_count: count_claude(&views, &exclusion) }`.
 
-  Steps 3 and 5 are priming rounds: sysinfo's Windows `compute_cpu_usage`
-  stamps `last_update` on every call but only seeds the `old_*` baseline
-  once the interval has elapsed, so the first refresh seeds nothing, the
-  second diffs against zero (a since-boot average) and seeds, and only the
-  third — the common-path refresh below — is a true diff. About 400 ms
-  once, on the blocking pool.
-- Every call: `PROCESS_REFRESH`, build `ProcView`s,
-  `aggregate(&views, &Exclusion { self_pid, self_started_at, poll_child: pid_slot (0 → None) }, cpus)`.
+The first published CPU figure is the second PDH collection, 200 ms after
+the first, so it is a true interval average, and the priming costs one sleep
+instead of two (the per-process CPU baseline that needed the second one is
+gone). Memory is re-read every sample because `used_memory` changes; the
+total is read with it for free. Cost per sample: one PDH collection, one
+`GlobalMemoryStatusEx`, one process walk without per-process CPU or memory
+reads — less than today.
 
-A Claude process that appears mid-run reads 0 CPU in the sample it first
-appears in and a since-boot average in the next; a true share arrives on its
-third sample (about 10 s), for the same seeding reason. Documented, accepted: the memory and count are
-exact from the first sample and are what the line is for.
-
-The sampler has its **own** `System`; the gate's `SysinfoProbe` is untouched,
-so the two never contend and a gate refresh cannot disturb the CPU diff
-baseline. Cost: one process walk per 5 s (tens of ms on a blocking thread;
-the first call about 400 ms more for the two priming sleeps); the CLI is never
-spawned for this.
+`run_sampler` is unchanged except for the log fields (§7) and the field
+names (`stats.claude_count`).
 
 ### 4.2 Publishing
 
@@ -347,8 +339,9 @@ cause a `gate_idle` skip, never an unwanted poll.
 
 ### 4.4 Frontend data
 
-`types.ts`: `ClaudeStats`, `SystemStats` mirroring §4.1 (`cpu_pct: number | null`)
-and `SystemReport { stats: SystemStats | null; stopped: boolean }` mirroring §4.2.
+`types.ts`: `SystemStats { sampled_at: number; cpu_pct: number; mem_used_bytes:
+number; mem_total_bytes: number; claude_count: number }`; `ClaudeStats` is
+deleted; `SystemReport` unchanged.
 
 `src/hooks/useSystem.ts` → `{ report: SystemReport | null; error: string | null }`
 (`report` is `null` until the first response):
@@ -362,33 +355,43 @@ are torn down on unmount. `App` owns the hook (as it owns `useDashboard`)
 and passes `report`, `systemError` and the existing `now` tick to `Header`
 as three new props (`system: SystemReport | null; systemError: string | null; now: number`).
 `Header` renders `SystemLine` and derives the count for `chipFor` as
-`system?.stats?.claude.count ?? null` (never a non-null assertion).
+`system?.stats?.claude_count ?? null` (never a non-null assertion).
 
 All rendering decisions are made by the pure `systemLine` (below), which
 returns the items **and** whether the line is dimmed, so every state is
 unit-tested; the component only maps the result to markup:
 
-Rows 1–5 are exclusive and evaluated top to bottom (first match wins);
-rows 6–8 are dim modifiers applied, in that order, only to a row 4 or 5
-match, the first true one supplying the reason. `stats = report?.stats ?? null`,
-`stopped = report?.stopped ?? false`:
+The `none` key is gone: a zero count no longer replaces the machine figures.
+State table (rows 1–3 exclusive, first match wins; row 4 otherwise; rows 5–7
+dim modifiers on row 4, first true one supplies the reason appended to every
+item title as today):
 
-| # | condition | items | dimmed | reason (appended to every item `title`) |
-|---|---|---|---|---|
-| 1 | `stats === null && error !== null` | "system usage unavailable" | no | the error |
-| 2 | `stats === null && stopped` | "system usage unavailable" | no | "sampler stopped, see log" |
-| 3 | `stats === null` (no report yet, or a report without stats) | "waiting for first sample" | no | — |
-| 4 | `stats.claude.count === 0` | "no Claude processes" | rows 6–8 | rows 6–8 |
-| 5 | `stats.claude.count > 0` | cpu, mem, [count when `showCount`] | rows 6–8 | rows 6–8 |
-| 6 | (with 4 or 5) `error !== null` | as above | **yes** | the error |
-| 7 | (with 4 or 5) `stopped` | as above | **yes** | "sampler stopped, see log" |
-| 8 | (with 4 or 5) `isStale(stats, now)` (`now - sampled_at > 3 × 5 s`) | as above | **yes** | "last sample HH:MM:SS" |
+| # | condition | items | dimmed |
+|---|---|---|---|
+| 1 | `stats === null && error !== null` | unavailable (title = error) | no |
+| 2 | `stats === null && stopped` | unavailable (title "sampler stopped, see log") | no |
+| 3 | `stats === null` | waiting | no |
+| 4 | stats present | cpu, mem, [count when `showCount`] | rows 5–7 |
+| 5 | `error !== null` | as 4 | yes, the error |
+| 6 | `stopped` | as 4 | yes, "sampler stopped, see log" |
+| 7 | `isStale(stats, now)` | as 4 | yes, "last sample HH:MM:SS" |
 
 An error outranks a null-stats report (row 1 before 3), and stopped stats
-dim at once (row 7) rather than 15 s later when they turn stale.
+dim at once (row 6) rather than 15 s later when they turn stale.
 
 `sampled_at` is therefore read, and a dead sampler cannot show a plausible
 frozen figure for the rest of the run.
+
+Items:
+
+- cpu: `pct = cpu_pct`, text `cpu 12%` (rounded), title
+  `machine CPU: 12% busy`.
+- mem: `pct = memPct`, text `mem 41%`, title
+  `machine memory: 13.1 GB of 32.0 GB used (41%)` (both through
+  `formatBytes`); when `memPct` is null: text `mem —`, title
+  `machine memory: total unknown`.
+- count (only when `showCount`): `pct = null`, text `2 procs` / `1 proc` /
+  `0 procs`, title `Claude Code processes running`.
 
 `src/lib/system.ts` (pure, tested):
 
@@ -396,21 +399,20 @@ frozen figure for the rest of the run.
 export function formatBytes(bytes: number): string;
   // < 1 GiB → "840 MB" (MiB, no decimals); ≥ 1 GiB → "1.2 GB" (GiB, one decimal); 0 → "0 MB"
 export function memPct(stats: SystemStats): number | null;
-  // rss/total*100 clamped 0..100; null when total is 0
+  // mem_used_bytes / mem_total_bytes * 100 clamped 0..100; null when total is 0
 export const SAMPLE_INTERVAL_MS = 5000;
 export const STALE_AFTER_MS = 3 * SAMPLE_INTERVAL_MS;
 export function isStale(stats: SystemStats, now: number): boolean;   // now - sampled_at > STALE_AFTER_MS
-export interface SysItem { key: "cpu" | "mem" | "count" | "none" | "waiting" | "unavailable"; pct: number | null; text: string; title: string }
+export interface SysItem { key: "cpu" | "mem" | "count" | "waiting" | "unavailable"; pct: number | null; text: string; title: string }
 export interface SysLine { items: SysItem[]; dimmed: boolean }
 export function systemLine(input: { report: SystemReport | null; error: string | null; showCount: boolean; now: number }): SysLine;
   // states per the table above; the reason for a dim goes into every item's title, after the item's own title
   // waiting:     { key: "waiting",     pct: null, text: "waiting for first sample", title: "the first figures arrive within a second of launch" }
   // unavailable: { key: "unavailable", pct: null, text: "system usage unavailable", title: error ?? "sampler stopped, see log" }
-  // count 0 → the single item { key: "none", pct: null, text: "no Claude processes", title: "no Claude Code process is running" }
-  //           in every layout (no rings for zeros)
-  // cpu:   pct = cpu_pct,      text "cpu 3%"  / "cpu —" when null, title "Claude processes: 3% of the machine's CPU"
-  // mem:   pct = memPct,       text "mem 1.2 GB",             title "Claude processes: 1.2 GB of 32.0 GB (4%)" (both through `formatBytes`)
-  // count: pct = null, only when showCount: text "2 procs" / "1 proc", title "Claude Code processes running"
+  // cpu:   pct = cpu_pct,  text "cpu 12%" (rounded), title "machine CPU: 12% busy"
+  // mem:   pct = memPct,   text "mem 41%", title "machine memory: 13.1 GB of 32.0 GB used (41%)"
+  //        (both through `formatBytes`); when memPct is null: text "mem —", title "machine memory: total unknown"
+  // count: pct = null, only when showCount: text "2 procs" / "1 proc" / "0 procs", title "Claude Code processes running"
 export function processCountSuffix(count: number | null): string;
   // null or 0 → ""; 1 → " · 1 Claude process"; n → " · n Claude processes"
 ```
@@ -448,7 +450,7 @@ and memory share are rings; the count is a plain figure, never a ring.
 - `src/components/SystemLine.tsx`, props
   `{ system: SystemReport | null; error: string | null; showCount: boolean; now: number }`:
   calls `systemLine` and renders
-  `<div className={"sysline" + (dimmed ? " sysline-stale" : "")} role="group" aria-label="Claude process usage">`
+  `<div className={"sysline" + (dimmed ? " sysline-stale" : "")} role="group" aria-label="system usage">`
   with each `SysItem` as `<span className="sysline-item" title>`, a `sm`
   ring for `cpu` and `mem` only, and the text in `.sysline-text` (mono
   12 px, `#adb6bd`, the chip's text ink; text never wears the ring colour).
@@ -465,21 +467,22 @@ Header at full width:
 
 ```
 Usage Tracker  3 accounts        ● polling every 300 s · 2 Claude processes  [refresh] [on top] [settings]
-◔ cpu 3%   ◑ mem 1.2 GB
+◔ cpu 12%   ◑ mem 41%
 ```
 
 cards:
 
 ```
 ● idle · waits for Claude Code   [refresh] [on top] [settings]
-◔ cpu 3%   ◑ mem 1.2 GB   2 procs
+◔ cpu 12%   ◑ mem 41%   2 procs
 ```
 
 ### 4.6 Mock backend
 
 `get_system` returns `{ stats, stopped }` with `sampled_at: Date.now()` on
 every call (so `isStale` never trips against the mock) and stats that drift
-a little per call (count 2, rss ≈ 1.2 GB ± 5 %, cpu 1–8 %). `stopped` is
+a little per call (`cpu_pct` 5–30, `mem_used_bytes` ≈ 13 GiB ± 3 %,
+`mem_total_bytes` 32 GiB, `claude_count` 2). `stopped` is
 `false` unless the page URL carries `?mockSystem=stopped` (`createMockBackend`
 reads `window.location.search` once at creation; the real backend never
 looks at the URL), in which case the
@@ -523,12 +526,12 @@ clears it; every other event stays a no-op.
 ## 7. Logging
 
 - INFO: `gate changed {gate, trigger}` (now fires for every trigger that
-  moves it); `claude processes changed {count, rss_bytes}`; `presence wake`
-  when the sampler fires the trigger.
+  moves it); `claude processes changed {count}` (no `rss_bytes`); `presence
+  wake` when the sampler fires the trigger.
 - WARN: `process check failed; gate left unchanged {error}`.
 - ERROR: `system sample panicked {error, attempt}`; `system sampler stopped
   after repeated panics`.
-- DEBUG: `system sample {elapsed_ms, count, rss_bytes, cpu_pct, did_prime}`;
+- DEBUG: `system sample {elapsed_ms, count, cpu_pct, mem_used_bytes, did_prime}`;
   `presence skipped {reason}` for busy / already_active / no process
   answer; `trigger ignored: shutting down {trigger}`; `process check
   skipped {reason}` with reasons `shutting down` and `busy` (only
@@ -591,29 +594,28 @@ Rust:
   `self_started_at` (recycled pid); `self_started_at == 0` falls back to the
   plain parent check. The existing `is_claude_running` matcher tests are
   kept and rewritten to build an `Exclusion`.
-- `system.rs`: `aggregate` — sums `rss_bytes` over counted processes only;
-  `cpu_pct` is `sum / cpus`; clamps at 100; `cpus == 0` → `None`; empty
-  input → zeros. `presence_edge` at (0,0), (0,1), (1,2), (2,0).
-  The sampler loop's panic handling is tested through a `SampleFn`-style
-  seam only if the implementation splits the loop from the blocking call;
-  otherwise the counter and the `wait` reset are covered by a pure
-  `after_panic(panics) -> Option<Duration>` helper (None = stop) and its test.
-  `Sampler::sample` is exercised once against the real `System` under
-  `#[test]` to pin that it returns without panicking, that
-  `stats.mem_total_bytes > 0`, that `stats.claude.cpu_pct.is_some()` and
-  `did_prime` is true on the first call and false on the second (a smoke
-  test, not a value assertion).
+- `system.rs`: `count_claude` counts only the views the exclusion accepts and
+  is 0 for empty input; `cpu_share` at NaN, −1, 150, 12.3; `presence_edge`
+  tests kept. The sampler loop's panic handling is tested through a
+  `SampleFn`-style seam only if the implementation splits the loop from the
+  blocking call; otherwise the counter and the `wait` reset are covered by a
+  pure `after_panic(panics) -> Option<Duration>` helper (None = stop) and its
+  test. Smoke test `sample_primes_once_and_returns_usable_figures` asserts
+  `did_prime` true then false, `mem_total_bytes > 0`, `mem_used_bytes <=
+  mem_total_bytes`, and `cpu_pct` finite within 0..=100 on both calls.
 - `commands.rs`: `core_get_system_reports_no_stats_before_the_first_sample_then_the_sample_then_stopped`.
 
 TypeScript (`system.test.ts`, `present.test.ts`, `gauge.test.ts`):
 
-- `formatBytes`: 0, 512 MiB, 1 GiB, 1.25 GiB, 20 GiB; `memPct` clamps and
-  handles a 0 total; `systemLine` — one test per row of the §4.4 state
-  table (items, `dimmed`, the reason appended to titles); `count == 0`
-  yields the single `none` item whatever `showCount` is; `isStale` at
-  exactly 15 s (false) and 15 s + 1 ms (true); `systemLine` item order,
-  texts and titles with and without `showCount`, singular "1 proc",
-  "cpu —" when `cpu_pct` is null; `processCountSuffix` at null/0/1/2.
+- `system.test.ts`: `memPct` on used/total (0 total → null, over-total →
+  100); `systemLine` one test per row of the §4.4 table; item texts and
+  titles (`cpu 12%`, `mem 41%`, the absolute figures, `mem —` for a 0
+  total); `0 procs`, `1 proc`, `2 procs` under `showCount`; no count item
+  without it; `isStale`, `clock`, `processCountSuffix`, `formatBytes` kept.
+  The existing "row 4: a zero count is one plain item" and "row 5: … a null
+  share is a dash" tests are deleted: a zero count no longer collapses the
+  line, and `cpu_pct` is no longer nullable (the non-finite case is
+  `cpu_share`'s Rust test).
 - `chipFor` with a count appends to active and idle only; with `null` the
   texts are unchanged; halted/stalled/no-binary/no-accounts never get a suffix.
   `countPlacement`: `"chip"` for active/idle when not compact; `"line"` for
@@ -645,7 +647,7 @@ system line shows a plausible RSS for the open sessions.
 
 ## 10. Out of scope
 
-- Whole-machine CPU and memory figures (decided against 2026-09-17).
+- Per-process CPU or memory figures (removed 2026-09-17; the count remains).
 - Per-process breakdown or a history of process usage.
 - Pausing the sampler while the window is hidden.
 - Sleep/wake handling for the sampler (a late sample is harmless).
