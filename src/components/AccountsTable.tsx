@@ -15,9 +15,10 @@ interface Props {
   rows: AccountRowData[];
   history: Record<string, HistoryPoint[]>;
   now: number;
+  cycle: number;
   zoom: number;
   columnOrder: ColumnKey[];
-  onColumnOrder: (order: ColumnKey[]) => void;
+  onColumnMove: (from: number, to: number) => void;
   onChanged: () => void;
   onError: (message: string) => void;
   onShowFailure: (snapshotId: number) => void;
@@ -38,7 +39,7 @@ function endBodyDrag(): void {
   document.body.style.userSelect = "";
 }
 
-export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnOrder, onChanged, onError, onShowFailure }: Props): JSX.Element {
+export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, onColumnMove, onChanged, onError, onShowFailure }: Props): JSX.Element {
   const [order, setOrder] = useState<AccountRowData[]>(rows);
   const [drag, setDrag] = useState<RowDragState | null>(null);
   const [colDrag, setColDrag] = useState<ColDragState | null>(null);
@@ -47,13 +48,12 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
 
   // Refs mirror the values the stable window handlers need to read.
   const orderRef = useRef(order);
-  const columnOrderRef = useRef(columnOrder);
   const dragRef = useRef<RowDragState | null>(null);
   const colDragRef = useRef<ColDragState | null>(null);
   const rowH = useRef(DEFAULT_ROW_H);
   const colRects = useRef<Rect[]>([]);
   const wrapLeft = useRef(0);
-  const onColumnOrderRef = useRef(onColumnOrder);
+  const onColumnMoveRef = useRef(onColumnMove);
   const zoomRef = useRef(zoom);
   // Rows that arrived mid-drag: applying them immediately would resync
   // `order` under the drag's stale index, so they wait until the drag ends
@@ -72,8 +72,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
     }
   }, [rows]);
   useEffect(() => { orderRef.current = order; }, [order]);
-  useEffect(() => { columnOrderRef.current = columnOrder; }, [columnOrder]);
-  useEffect(() => { onColumnOrderRef.current = onColumnOrder; }, [onColumnOrder]);
+  useEffect(() => { onColumnMoveRef.current = onColumnMove; }, [onColumnMove]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
   /**
@@ -148,7 +147,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
       colDragRef.current = null;
       setColDrag(null);
       if (c !== null && c.target !== c.index) {
-        onColumnOrderRef.current(moveItem(columnOrderRef.current, c.index, c.target));
+        onColumnMoveRef.current(c.index, c.target);
       }
       // A column reorder only writes local prefs, never a rows refetch,
       // so a stashed rows update is normally applied here. But if a row
@@ -240,7 +239,7 @@ export function AccountsTable({ rows, history, now, zoom, columnOrder, onColumnO
         )}
         {order.map((row, idx) => (
           <AccountRow key={row.account.id} row={row} index={idx} total={order.length}
-            points={history[row.account.id] ?? []} now={now} columnOrder={columnOrder} gridCols={gridCols}
+            points={history[row.account.id] ?? []} now={now} cycle={cycle} columnOrder={columnOrder} gridCols={gridCols}
             hotColumn={colDrag?.index ?? null} drag={drag} rowH={rowH.current}
             chartOpen={chartId === row.account.id} editing={editingId === row.account.id}
             onHandleDown={(e) => startRowDrag(e, idx)}

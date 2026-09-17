@@ -7,12 +7,11 @@ use crate::error::{AppError, AppResult};
 use crate::store::Store;
 use crate::usage::{Account, DisabledReason};
 
-/// D17 (revised 2026-09-16): `sort_order` is authoritative; `is_default`
-/// and label remain a tiebreak (relevant only while rows share a
-/// `sort_order`, which normal use never produces once every row has gone
-/// through an insert or `reorder_accounts`).
-const ORDER_ACCOUNTS: &str =
-    "ORDER BY sort_order ASC, is_default DESC, lower(label) ASC, label ASC";
+/// D17 (revised 2026-09-16): `sort_order` is authoritative; label is the
+/// only tiebreak (relevant only while rows share a `sort_order`, which
+/// normal use never produces once every row has gone through an insert or
+/// `reorder_accounts`).
+const ORDER_ACCOUNTS: &str = "ORDER BY sort_order ASC, lower(label) ASC, label ASC";
 
 fn row_to_account(row: &Row<'_>) -> Result<Account, rusqlite::Error> {
     let reason: Option<String> = row.get("disabled_reason")?;
@@ -22,7 +21,6 @@ fn row_to_account(row: &Row<'_>) -> Result<Account, rusqlite::Error> {
         config_dir: PathBuf::from(row.get::<_, String>("config_dir")?),
         enabled: row.get::<_, i64>("enabled")? != 0,
         disabled_reason: reason.as_deref().and_then(DisabledReason::from_wire),
-        is_default: row.get::<_, i64>("is_default")? != 0,
         created_at: row.get("created_at")?,
         sort_order: row.get("sort_order")?,
     })
@@ -36,7 +34,7 @@ fn label_for(dir: &Path) -> String {
 }
 
 const SELECT_COLS: &str =
-    "id, label, config_dir, enabled, disabled_reason, is_default, created_at, sort_order";
+    "id, label, config_dir, enabled, disabled_reason, created_at, sort_order";
 
 /// True for a UNIQUE or PRIMARY KEY constraint violation, which is the
 /// signature of a raced insert against the `accounts.config_dir` UNIQUE
@@ -78,7 +76,6 @@ fn build_account(
     config_dir: &Path,
     enabled: bool,
     disabled_reason: Option<DisabledReason>,
-    is_default: bool,
     sort_order: i64,
     now: i64,
 ) -> AppResult<(Account, String)> {
@@ -97,7 +94,6 @@ fn build_account(
         config_dir: canonical,
         enabled,
         disabled_reason,
-        is_default,
         created_at: now,
         sort_order,
     };
@@ -134,15 +130,14 @@ fn insert_account(conn: &rusqlite::Connection, account: &Account, canonical_str:
         )));
     }
     conn.execute(
-        "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at, sort_order)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, created_at, sort_order)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             account.id,
             account.label,
             canonical_str,
             i64::from(account.enabled),
             account.disabled_reason.map(|r| r.as_str()),
-            i64::from(account.is_default),
             account.created_at,
             account.sort_order
         ],
@@ -194,13 +189,12 @@ impl Store {
         config_dir: &Path,
         enabled: bool,
         disabled_reason: Option<DisabledReason>,
-        is_default: bool,
         now: i64,
     ) -> AppResult<Account> {
         self.with_conn(|c| {
             let sort_order = next_sort_order(c)?;
             let (account, canonical_str) =
-                build_account(config_dir, enabled, disabled_reason, is_default, sort_order, now)?;
+                build_account(config_dir, enabled, disabled_reason, sort_order, now)?;
             insert_account(c, &account, &canonical_str)?;
             Ok(account)
         })
@@ -261,19 +255,12 @@ impl Store {
         Ok(())
     }
 
-    /// Spec 6.1: first start seeds every candidate **enabled**. The
-    /// emptiness check and every insert run inside one `with_conn` closure
-    /// (one `Mutex<Connection>` hold) so a concurrent `add_account` or
-    /// `seed_accounts_if_empty` call can't interleave and double-seed.
-    pub fn seed_accounts_if_empty(
-        &self,
-        candidates: &[Candidate],
-        default_dir: &Path,
-        now: i64,
-    ) -> AppResult<usize> {
-        let default_canonical =
-            dunce::canonicalize(default_dir).unwrap_or_else(|_| default_dir.to_path_buf());
-
+    /// Spec 6.1: first start seeds every candidate **enabled**, in
+    /// case-insensitive label order. The emptiness check and every insert
+    /// run inside one `with_conn` closure (one `Mutex<Connection>` hold) so
+    /// a concurrent `add_account` or `seed_accounts_if_empty` call can't
+    /// interleave and double-seed.
+    pub fn seed_accounts_if_empty(&self, candidates: &[Candidate], now: i64) -> AppResult<usize> {
         self.with_conn(|c| {
             let existing: i64 =
                 c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
@@ -281,22 +268,14 @@ impl Store {
                 return Ok(0);
             }
 
-            // Resolve `is_default` for every candidate first, then sort to
-            // D17 order (default first, then case-insensitive label) before
-            // handing out `sort_order` 0..n-1, so a fresh seed's manual
-            // order matches the order it always displayed in (spec D17,
-            // revised 2026-09-16).
             let mut built: Vec<(Account, String)> = Vec::with_capacity(candidates.len());
             for cand in candidates {
-                let (mut account, canonical_str) =
-                    build_account(&cand.config_dir, true, None, false, 0, now)?;
-                account.is_default = account.config_dir == default_canonical;
-                built.push((account, canonical_str));
+                built.push(build_account(&cand.config_dir, true, None, 0, now)?);
             }
             built.sort_by(|(a, _), (b, _)| {
-                b.is_default
-                    .cmp(&a.is_default)
-                    .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+                a.label
+                    .to_lowercase()
+                    .cmp(&b.label.to_lowercase())
                     .then_with(|| a.label.cmp(&b.label))
             });
 
@@ -330,13 +309,7 @@ impl Store {
             if known.iter().any(|k| k == &c.config_dir) {
                 continue;
             }
-            match self.add_account(
-                &c.config_dir,
-                false,
-                Some(DisabledReason::User),
-                false,
-                now,
-            ) {
+            match self.add_account(&c.config_dir, false, Some(DisabledReason::User), now) {
                 Ok(a) => added.push(a),
                 Err(AppError::Duplicate(_)) => {}
                 Err(e) => return Err(e),
@@ -439,13 +412,10 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         let dir = make_dir(tmp.path(), ".claude3");
 
-        let a = store
-            .add_account(&dir, true, None, false, NOW)
-            .expect("add");
+        let a = store.add_account(&dir, true, None, NOW).expect("add");
         assert_eq!(a.label, "claude3");
         assert!(a.enabled);
         assert_eq!(a.disabled_reason, None);
-        assert!(!a.is_default);
         assert_eq!(a.created_at, NOW);
         assert_eq!(a.config_dir, dir);
         assert_eq!(a.id.len(), 36, "uuid v4 hyphenated");
@@ -455,13 +425,7 @@ mod tests {
     fn add_account_rejects_a_missing_directory() {
         let store = Store::open_in_memory().expect("open");
         let err = store
-            .add_account(
-                &PathBuf::from("/definitely/not/here/.claude9"),
-                true,
-                None,
-                false,
-                NOW,
-            )
+            .add_account(&PathBuf::from("/definitely/not/here/.claude9"), true, None, NOW)
             .expect_err("must reject");
         assert_eq!(err.code(), "not_found");
     }
@@ -471,9 +435,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let dir = make_dir(tmp.path(), ".claude3");
-        store.add_account(&dir, true, None, false, NOW).expect("add");
+        store.add_account(&dir, true, None, NOW).expect("add");
         let err = store
-            .add_account(&dir, true, None, false, NOW)
+            .add_account(&dir, true, None, NOW)
             .expect_err("must reject");
         assert_eq!(err.code(), "duplicate");
     }
@@ -509,20 +473,19 @@ mod tests {
     }
 
     #[test]
-    fn add_account_appends_in_call_order_regardless_of_label_or_default() {
+    fn add_account_appends_in_call_order_regardless_of_label() {
         // D17 revised 2026-09-16: sort_order is authoritative once accounts
-        // exist, so add_account (which only ever appends) no longer
-        // resorts by label or is_default -- that would silently fight any
-        // manual order the user has set via reorder_accounts.
+        // exist, so add_account (which only ever appends) never resorts by
+        // label -- that would silently fight any manual order the user set.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let zed = make_dir(tmp.path(), ".claudeZed");
         let alpha = make_dir(tmp.path(), ".claudealpha");
-        let def = make_dir(tmp.path(), ".claudeMain");
+        let main = make_dir(tmp.path(), ".claudeMain");
 
-        store.add_account(&zed, true, None, false, NOW).expect("a");
-        store.add_account(&alpha, true, None, false, NOW).expect("b");
-        store.add_account(&def, true, None, true, NOW).expect("c");
+        store.add_account(&zed, true, None, NOW).expect("a");
+        store.add_account(&alpha, true, None, NOW).expect("b");
+        store.add_account(&main, true, None, NOW).expect("c");
 
         let labels: Vec<String> = store
             .list_accounts()
@@ -534,27 +497,23 @@ mod tests {
     }
 
     #[test]
-    fn seeding_orders_the_default_first_even_when_its_label_sorts_last() {
-        // The D17 tiebreak (default first, then label) still governs a
-        // fresh seed, which has no manual order yet to respect.
+    fn seeding_orders_candidates_by_case_insensitive_label() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
-        let zzz = make_dir(tmp.path(), ".claudeZzzDefault");
-        let aaa = make_dir(tmp.path(), ".claudeAaa");
+        let zzz = make_dir(tmp.path(), ".claudeZzz");
+        let aaa = make_dir(tmp.path(), ".claudeaaa");
 
         store
             .seed_accounts_if_empty(
-                &[candidate(&aaa, "claudeAaa"), candidate(&zzz, "claudeZzzDefault")],
-                &zzz,
+                &[candidate(&zzz, "claudeZzz"), candidate(&aaa, "claudeaaa")],
                 NOW,
             )
             .expect("seed");
 
         let accounts = store.list_accounts().expect("list");
-        assert_eq!(accounts[0].label, "claudeZzzDefault");
-        assert!(accounts[0].is_default);
+        assert_eq!(accounts[0].label, "claudeaaa");
         assert_eq!(accounts[0].sort_order, 0);
-        assert_eq!(accounts[1].label, "claudeAaa");
+        assert_eq!(accounts[1].label, "claudeZzz");
         assert_eq!(accounts[1].sort_order, 1);
     }
 
@@ -563,7 +522,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let dir = make_dir(tmp.path(), ".claude3");
-        let a = store.add_account(&dir, true, None, false, NOW).expect("add");
+        let a = store.add_account(&dir, true, None, NOW).expect("add");
 
         let off = store.update_account(&a.id, None, Some(false)).expect("off");
         assert!(!off.enabled);
@@ -579,7 +538,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let dir = make_dir(tmp.path(), ".claude3");
-        let a = store.add_account(&dir, true, None, false, NOW).expect("add");
+        let a = store.add_account(&dir, true, None, NOW).expect("add");
 
         let renamed = store
             .update_account(&a.id, Some("Work account"), None)
@@ -603,7 +562,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let dir = make_dir(tmp.path(), ".claude3");
-        let a = store.add_account(&dir, true, None, false, NOW).expect("add");
+        let a = store.add_account(&dir, true, None, NOW).expect("add");
 
         store.mark_guard_tripped(&a.id).expect("mark");
         let back = store
@@ -621,9 +580,9 @@ mod tests {
         let def = make_dir(tmp.path(), ".claudeMain");
         let a = make_dir(tmp.path(), ".claudeA");
         let b = make_dir(tmp.path(), ".claudeB");
-        let d = store.add_account(&def, true, None, true, NOW).expect("d");
-        let ea = store.add_account(&a, true, None, false, NOW).expect("a");
-        let eb = store.add_account(&b, true, None, false, NOW).expect("b");
+        let d = store.add_account(&def, true, None, NOW).expect("d");
+        let ea = store.add_account(&a, true, None, NOW).expect("a");
+        let eb = store.add_account(&b, true, None, NOW).expect("b");
         store
             .update_account(&eb.id, None, Some(false))
             .expect("disable b");
@@ -635,18 +594,14 @@ mod tests {
     }
 
     #[test]
-    fn seeding_an_empty_store_enables_every_candidate_and_flags_the_default() {
+    fn seeding_an_empty_store_enables_every_candidate() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let one = make_dir(tmp.path(), ".claude");
         let two = make_dir(tmp.path(), ".claude3");
 
         let n = store
-            .seed_accounts_if_empty(
-                &[candidate(&one, "claude"), candidate(&two, "claude3")],
-                &one,
-                NOW,
-            )
+            .seed_accounts_if_empty(&[candidate(&one, "claude"), candidate(&two, "claude3")], NOW)
             .expect("seed");
         assert_eq!(n, 2);
 
@@ -655,8 +610,6 @@ mod tests {
         assert!(all.iter().all(|a| a.enabled));
         assert!(all.iter().all(|a| a.disabled_reason.is_none()));
         assert_eq!(all[0].label, "claude");
-        assert!(all[0].is_default);
-        assert!(!all[1].is_default);
     }
 
     #[test]
@@ -665,14 +618,10 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         let one = make_dir(tmp.path(), ".claude");
         let two = make_dir(tmp.path(), ".claude3");
-        store.add_account(&one, true, None, true, NOW).expect("add");
+        store.add_account(&one, true, None, NOW).expect("add");
 
         let n = store
-            .seed_accounts_if_empty(
-                &[candidate(&one, "claude"), candidate(&two, "claude3")],
-                &one,
-                NOW,
-            )
+            .seed_accounts_if_empty(&[candidate(&one, "claude"), candidate(&two, "claude3")], NOW)
             .expect("seed");
         assert_eq!(n, 0);
         assert_eq!(store.list_accounts().expect("list").len(), 1);
@@ -684,7 +633,7 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         let one = make_dir(tmp.path(), ".claude");
         let two = make_dir(tmp.path(), ".claude3");
-        store.add_account(&one, true, None, true, NOW).expect("add");
+        store.add_account(&one, true, None, NOW).expect("add");
 
         let added = store
             .rescan_accounts(
@@ -712,7 +661,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
         let dir = make_dir(tmp.path(), ".claude3");
-        let a = store.add_account(&dir, true, None, false, NOW).expect("add");
+        let a = store.add_account(&dir, true, None, NOW).expect("add");
         store.remove_account(&a.id).expect("remove");
         assert!(store.account_by_id(&a.id).expect("read").is_none());
     }
@@ -728,9 +677,9 @@ mod tests {
         let a = make_dir(tmp, ".claudeA");
         let b = make_dir(tmp, ".claudeB");
         let c = make_dir(tmp, ".claudeC");
-        let a = store.add_account(&a, true, None, false, NOW).expect("a").id;
-        let b = store.add_account(&b, true, None, false, NOW).expect("b").id;
-        let c = store.add_account(&c, true, None, false, NOW).expect("c").id;
+        let a = store.add_account(&a, true, None, NOW).expect("a").id;
+        let b = store.add_account(&b, true, None, NOW).expect("b").id;
+        let c = store.add_account(&c, true, None, NOW).expect("c").id;
         (a, b, c)
     }
 

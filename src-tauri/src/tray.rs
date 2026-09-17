@@ -329,7 +329,6 @@ mod tests {
             config_dir: std::path::PathBuf::from(format!("/home/josh/.{label}")),
             enabled,
             disabled_reason: None,
-            is_default: false,
             created_at: 0,
             sort_order: 0,
         }

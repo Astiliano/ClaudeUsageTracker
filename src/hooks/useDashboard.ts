@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { errorMessage } from "../lib/errors";
-import { HISTORY_DAYS } from "../lib/series";
+import { UNITS, WEEK_ALL, alignedSince } from "../lib/history";
 import type { Dashboard, HistoryPoint } from "../lib/types";
 
 const DEBOUNCE_MS = 250;
@@ -11,6 +11,7 @@ interface UseDashboard {
   dashboard: Dashboard | null;
   history: Record<string, HistoryPoint[]>;
   now: number;
+  cycle: number;
   error: string | null;
   refetch: () => void;
 }
@@ -25,6 +26,7 @@ export function useDashboard(): UseDashboard {
   const [history, setHistory] = useState<Record<string, HistoryPoint[]>>({});
   const [now, setNow] = useState<number>(() => Date.now());
   const [error, setError] = useState<string | null>(null);
+  const [cycle, setCycle] = useState(0);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Guards against two in-flight get_dashboard calls resolving out of
   // order (a debounced refetch racing a cycle:finished load, say): only
@@ -49,13 +51,18 @@ export function useDashboard(): UseDashboard {
     }
   }, []);
 
+  /** 7 days of hourly week-all maxima per account, for the row sparklines. */
   const loadHistoryFor = useCallback(async (accountIds: string[]): Promise<void> => {
+    const now = Date.now();
+    const since = alignedSince(now, "7d", "1h");
     try {
       const entries = await Promise.all(
         accountIds.map(async (id) => {
           const points = await backend().invoke<HistoryPoint[]>("get_history", {
             accountId: id,
-            days: HISTORY_DAYS,
+            since,
+            bucketMs: UNITS["1h"].ms,
+            metric: WEEK_ALL,
           });
           return [id, points] as const;
         }),
@@ -66,9 +73,11 @@ export function useDashboard(): UseDashboard {
     }
   }, []);
 
+  /** Runs on mount and on every cycle:finished; `cycle` tells open drawers to refetch. */
   const loadWithHistory = useCallback(async (): Promise<void> => {
     const d = await load();
     if (d !== null) await loadHistoryFor(d.accounts.map((r) => r.account.id));
+    setCycle((c) => c + 1);
   }, [load, loadHistoryFor]);
 
   const refetch = useCallback((): void => {
@@ -129,5 +138,5 @@ export function useDashboard(): UseDashboard {
     };
   }, [refetch, loadWithHistory]);
 
-  return { dashboard, history, now, error, refetch };
+  return { dashboard, history, now, cycle, error, refetch };
 }

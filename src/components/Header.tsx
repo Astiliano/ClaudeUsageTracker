@@ -8,12 +8,13 @@ import type { Dashboard } from "../lib/types";
 interface Props {
   dashboard: Dashboard;
   settingsOpen: boolean;
+  compact: boolean;
   onToggleSettings: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
 }
 
-export function Header({ dashboard, settingsOpen, onToggleSettings, onChanged, onError }: Props): JSX.Element {
+export function Header({ dashboard, settingsOpen, compact, onToggleSettings, onChanged, onError }: Props): JSX.Element {
   const banner = bannerFor(dashboard);
   const chip = chipFor(dashboard);
 
@@ -29,10 +30,12 @@ export function Header({ dashboard, settingsOpen, onToggleSettings, onChanged, o
   return (
     <header className="header">
       <div className="topbar">
-        <div className="topbar-left">
-          <h1 className="topbar-title">Usage Tracker</h1>
-          <span className="topbar-count">{accountCountLabel(dashboard.accounts.length)}</span>
-        </div>
+        {!compact && (
+          <div className="topbar-left">
+            <h1 className="topbar-title">Usage Tracker</h1>
+            <span className="topbar-count">{accountCountLabel(dashboard.accounts.length)}</span>
+          </div>
+        )}
         <div className="topbar-actions">
           <div className="chip" title={banner?.text}>
             <span className={`chip-dot chip-dot-${chip.dot}`} />

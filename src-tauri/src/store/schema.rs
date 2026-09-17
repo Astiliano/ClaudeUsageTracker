@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::AppResult;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Spec 6.6. `auto_vacuum` is set first because SQLite only honours a change
 /// while the database is still empty.
@@ -62,6 +62,10 @@ WITH ordered AS (
 UPDATE accounts SET sort_order = (SELECT rn FROM ordered WHERE ordered.id = accounts.id);
 "#;
 
+/// V3 (2026-09-16): the default-account flag is gone. `sort_order` has been
+/// authoritative since V2 and nothing read `is_default` any more.
+const V3_DROP: &str = "ALTER TABLE accounts DROP COLUMN is_default;";
+
 /// Migrate forward using `PRAGMA user_version`. Idempotent. Each step's DDL
 /// (and any backfill) is wrapped with its `user_version` bump in one
 /// transaction, so a crash or a failed step can never leave the database
@@ -80,7 +84,17 @@ pub fn migrate(conn: &mut Connection) -> AppResult<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V2_ALTER)?;
         tx.execute_batch(V2_BACKFILL)?;
-        tx.execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;
+        // Each step bumps to its OWN literal version. Bumping to
+        // SCHEMA_VERSION here would skip every later step on a fresh DB.
+        tx.execute_batch("PRAGMA user_version=2;")?;
+        tx.commit()?;
+    }
+
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current < 3 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V3_DROP)?;
+        tx.execute_batch("PRAGMA user_version=3;")?;
         tx.commit()?;
     }
 
@@ -281,5 +295,132 @@ mod tests {
             })
             .expect("read back");
         assert_eq!(v, "yes");
+    }
+
+    fn column_names(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(accounts)").expect("prepare");
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<String>, rusqlite::Error>>()
+            .expect("collect")
+    }
+
+    #[test]
+    fn a_fresh_database_has_no_is_default_column_and_can_insert_an_account() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in_memory().expect("open");
+        let names = store.with_conn(|c| Ok(column_names(c))).expect("table_info");
+        assert!(!names.iter().any(|n| n == "is_default"), "V3 must drop is_default: {names:?}");
+        assert!(names.iter().any(|n| n == "sort_order"));
+
+        let dir = tmp.path().join(".claude3");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        store.add_account(&dir, true, None, 1).expect("insert must work without is_default");
+    }
+
+    #[test]
+    fn migrating_from_v1_drops_is_default_and_keeps_rows_and_sort_order() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        apply_pragmas(&conn).expect("pragmas");
+        conn.execute_batch(V1).expect("create v1 schema by hand");
+        conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+        conn.execute(
+            "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+             VALUES ('bravo', 'Bravo', '/bravo', 1, NULL, 0, 100)",
+            [],
+        )
+        .expect("insert bravo");
+        conn.execute(
+            "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+             VALUES ('alpha', 'Alpha', '/alpha', 1, NULL, 1, 50)",
+            [],
+        )
+        .expect("insert alpha");
+
+        migrate(&mut conn).expect("migrate v1 -> v3");
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).expect("version");
+        assert_eq!(version, 3);
+        assert!(!column_names(&conn).iter().any(|n| n == "is_default"));
+
+        let ordered: Vec<(String, i64)> = conn
+            .prepare("SELECT id, sort_order FROM accounts ORDER BY sort_order ASC")
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<(String, i64)>, rusqlite::Error>>()
+            .expect("collect");
+        // The V2 backfill ran while is_default still existed, so alpha (the
+        // old default) keeps sort_order 0 after V3 drops the column.
+        assert_eq!(ordered, vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]);
+    }
+
+    #[test]
+    fn migrating_a_file_backed_v1_database_with_rows_reaches_v3_and_keeps_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("usage.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open");
+            apply_pragmas(&conn).expect("pragmas");
+            conn.execute_batch(V1).expect("create v1 schema by hand");
+            conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+            conn.execute(
+                "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+                 VALUES ('bravo', 'Bravo', '/bravo', 1, NULL, 0, 100)",
+                [],
+            )
+            .expect("insert bravo");
+            conn.execute(
+                "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
+                 VALUES ('alpha', 'Alpha', '/alpha', 1, NULL, 1, 50)",
+                [],
+            )
+            .expect("insert alpha (default)");
+            // conn drops here, releasing the file before Store::open reopens it.
+        }
+
+        let store = Store::open(&path).expect("open must migrate a v1 file to v3");
+
+        let version: i64 = store
+            .with_conn(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+            .expect("read user_version");
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let names = store.with_conn(|c| Ok(column_names(c))).expect("table_info");
+        assert!(!names.iter().any(|n| n == "is_default"), "V3 must drop is_default: {names:?}");
+
+        let mode: String = store
+            .with_conn(|c| Ok(c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?))
+            .expect("read pragma");
+        assert_eq!(mode.to_lowercase(), "wal");
+
+        let ordered: Vec<(String, i64)> = store
+            .with_conn(|c| {
+                let mut stmt = c.prepare("SELECT id, sort_order FROM accounts ORDER BY sort_order ASC")?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<Vec<(String, i64)>, rusqlite::Error>>()?;
+                Ok(rows)
+            })
+            .expect("query rows");
+        // 'alpha' is the default account, so the V2 backfill's D17 order puts it first.
+        assert_eq!(ordered, vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]);
+    }
+
+    #[test]
+    fn each_migration_step_bumps_to_its_own_literal_version() {
+        // A fresh DB must pass through 1, 2 and 3 in turn; if V2 jumped straight
+        // to SCHEMA_VERSION the V3 step would be skipped (the bug the spec §6 names).
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        apply_pragmas(&conn).expect("pragmas");
+        conn.execute_batch(V1).expect("v1");
+        conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+        conn.execute_batch(V2_ALTER).expect("v2 alter");
+        conn.execute_batch(V2_BACKFILL).expect("v2 backfill");
+        conn.execute_batch("PRAGMA user_version=2;").expect("set v2");
+        migrate(&mut conn).expect("migrate v2 -> v3");
+        assert!(!column_names(&conn).iter().any(|n| n == "is_default"));
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).expect("version");
+        assert_eq!(version, 3);
     }
 }

@@ -1,3 +1,5 @@
+import { moveItem } from "./reorder";
+
 /** Column registry from docs/design/usage-tracker-kit.js (COLUMNS). Cell
  *  rendering lives in AccountRow.tsx, keyed on ColumnKey. */
 export type ColumnKey = "account" | "session" | "week" | "model" | "spark" | "updated";
@@ -53,4 +55,59 @@ export function normalizeColumnOrder(v: unknown): ColumnKey[] | null {
     if (!seen.has(key)) known.push(key);
   }
   return known;
+}
+
+/** Columns that can never be hidden. */
+export const ALWAYS_VISIBLE: readonly ColumnKey[] = ["account"];
+
+/** `.row-grid` / `.thead` gap in styles.css; gridMinWidth depends on it. */
+export const GRID_GAP = 10;
+
+export function visibleColumns(order: readonly ColumnKey[], hidden: readonly ColumnKey[]): ColumnKey[] {
+  return order.filter((k) => ALWAYS_VISIBLE.includes(k) || !hidden.includes(k));
+}
+
+/**
+ * `from`/`to` index the VISIBLE list. Only the dragged key moves, to the
+ * full-order position of the key currently at visible index `to`; hidden
+ * keys stay exactly where they are, so a drag made while columns are hidden
+ * never rearranges columns the user could not see. With nothing hidden this
+ * is `moveItem`. Out-of-range indices return a copy of `order`.
+ */
+export function moveVisible(
+  order: readonly ColumnKey[],
+  hidden: readonly ColumnKey[],
+  from: number,
+  to: number,
+): ColumnKey[] {
+  const visible = visibleColumns(order, hidden);
+  const fromKey = visible[from];
+  const toKey = visible[to];
+  if (fromKey === undefined || toKey === undefined) return [...order];
+  return moveItem(order, order.indexOf(fromKey), order.indexOf(toKey));
+}
+
+/**
+ * Known keys minus `account`, de-duplicated, in the stored order. Null when
+ * `v` is not an array of strings at all (the caller warns and defaults).
+ */
+export function normalizeHiddenColumns(v: unknown): ColumnKey[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: ColumnKey[] = [];
+  for (const item of v) {
+    if (typeof item !== "string") return null;
+    if (isColumnKey(item) && !ALWAYS_VISIBLE.includes(item) && !out.includes(item)) out.push(item);
+  }
+  return out;
+}
+
+/** Minimum px the grid needs: every track's px floor plus the gaps between tracks. */
+export function gridMinWidth(order: readonly ColumnKey[]): number {
+  // Takes the first px value in the track string; a column width must put its px floor first (e.g. "minmax(150px,1fr)").
+  const px = (width: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(width);
+    return m === null ? 0 : Number(m[1]);
+  };
+  const tracks = [LEAD_WIDTH, ...order.map((k) => COLUMNS[k].width), TRAIL_WIDTH];
+  return tracks.reduce((sum, w) => sum + px(w), 0) + GRID_GAP * (tracks.length - 1);
 }

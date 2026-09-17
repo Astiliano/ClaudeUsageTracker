@@ -18,12 +18,12 @@ describe("parsePrefs", () => {
   });
   it("keeps valid fields and defaults invalid ones independently", () => {
     const parsed = parsePrefs(JSON.stringify({ font: "plex", size: "huge", columnOrder: ["account"] }));
-    expect(parsed).toEqual({ font: "plex", size: "md", columnOrder: [...DEFAULT_ORDER] });
+    expect(parsed).toEqual({ font: "plex", size: "md", columnOrder: [...DEFAULT_ORDER], hiddenColumns: [], alwaysOnTop: false });
   });
   it("accepts a full valid record", () => {
     const order = [...DEFAULT_ORDER].reverse();
-    expect(parsePrefs(JSON.stringify({ font: "jetbrains", size: "xl", columnOrder: order })))
-      .toEqual({ font: "jetbrains", size: "xl", columnOrder: order });
+    const raw = JSON.stringify({ font: "jetbrains", size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
+    expect(parsePrefs(raw)).toEqual({ font: "jetbrains", size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
   });
   it("never aliases the default column order array", () => {
     const a = parsePrefs(null);
@@ -44,12 +44,31 @@ describe("parsePrefs", () => {
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
+  it("defaults hiddenColumns and alwaysOnTop independently of each other", () => {
+    const a = parsePrefs(JSON.stringify({ hiddenColumns: ["model", "account", "nope"], alwaysOnTop: "yes" }));
+    expect(a.hiddenColumns).toEqual(["model"]);
+    expect(a.alwaysOnTop).toBe(false);
+    const b = parsePrefs(JSON.stringify({ hiddenColumns: "model", alwaysOnTop: true }));
+    expect(b.hiddenColumns).toEqual([]);
+    expect(b.alwaysOnTop).toBe(true);
+  });
+  it("warns when a stored hiddenColumns value is unusable", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    parsePrefs(JSON.stringify({ hiddenColumns: 42 }));
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+  it("never aliases the default hiddenColumns array", () => {
+    const a = parsePrefs(null);
+    a.hiddenColumns.push("session");
+    expect(parsePrefs(null).hiddenColumns).toEqual([]);
+  });
 });
 
 describe("loadPrefs / savePrefs", () => {
   it("round-trips through a store under the versioned key", () => {
     const store = new MemoryStore();
-    const prefs = { font: "plex" as const, size: "lg" as const, columnOrder: [...DEFAULT_ORDER] };
+    const prefs = { font: "plex" as const, size: "lg" as const, columnOrder: [...DEFAULT_ORDER], hiddenColumns: ["updated" as const], alwaysOnTop: true };
     savePrefs(store, prefs);
     expect(store.data.has(PREFS_KEY)).toBe(true);
     expect(loadPrefs(store)).toEqual(prefs);

@@ -60,6 +60,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
             commands::get_history,
+            commands::get_history_models,
             commands::poll_now,
             commands::add_account,
             commands::update_account,
@@ -101,13 +102,8 @@ pub fn run() {
             // Seed accounts on first start (spec 6.1).
             let home = paths::home_dir()?;
             let candidates = discovery::enumerate_profiles(&home);
-            let default_dir = paths::default_config_dir(
-                std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-                &home,
-            );
             let seeded = store.seed_accounts_if_empty(
                 &candidates,
-                &default_dir,
                 chrono::Utc::now().timestamp_millis(),
             )?;
             info!(seeded, discovered = candidates.len(), "accounts loaded");

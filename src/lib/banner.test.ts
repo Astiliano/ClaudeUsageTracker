@@ -9,7 +9,6 @@ function account(over: Partial<Account> = {}): Account {
     config_dir: "/home/josh/.claude3",
     enabled: true,
     disabled_reason: null,
-    is_default: false,
     created_at: 0,
     sort_order: 0,
     ...over,
