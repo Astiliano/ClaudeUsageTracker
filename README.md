@@ -4,6 +4,13 @@ A task-manager-style desktop app for Claude subscription usage: the 5-hour
 session window, the weekly all-models window and every weekly per-model
 window, for one or more accounts, refreshed while Claude Code is running.
 
+![Claude Usage Tracker: dashboard with per-account meters and reset countdowns, 24-hour sparklines, the history drawer, compact ring gauges, the process-gate states, status pills and settings](docs/showcase.png)
+
+*Every capability on one board, with mocked numbers: the dashboard, the
+history drawer, the compact view, the process gate, status pills and
+settings. Download the installers from the
+[latest release](https://github.com/Astiliano/ClaudeUsageTracker/releases/latest).*
+
 Design spec: `docs/2026-09-15-claude-usage-tracker-design.md`
 Implementation plan: `docs/superpowers/plans/2026-09-15-claude-usage-tracker.md`
 
