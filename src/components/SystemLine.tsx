@@ -11,9 +11,8 @@ interface Props {
 }
 
 /**
- * The second header line: what the Claude Code processes cost. Every
- * decision — which items, and whether the line is dimmed — is made by the
- * pure `systemLine`; this component only maps the result to markup.
+ * The second header line: the machine's CPU and memory shares, and the
+ * Claude process count when the chip does not carry it.
  */
 export function SystemLine({ system, error, showCount, now }: Props): JSX.Element {
   const { items, dimmed } = systemLine({ report: system, error, showCount, now });
@@ -21,7 +20,7 @@ export function SystemLine({ system, error, showCount, now }: Props): JSX.Elemen
     <div
       className={`sysline${dimmed ? " sysline-stale" : ""}`}
       role="group"
-      aria-label="Claude process usage"
+      aria-label="system usage"
     >
       {items.map((item) => (
         <span className="sysline-item" key={item.key} title={item.title}>

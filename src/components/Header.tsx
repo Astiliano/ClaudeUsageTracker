@@ -34,7 +34,7 @@ export function Header({
   onError,
 }: Props): JSX.Element {
   const banner = bannerFor(dashboard);
-  const count = system?.stats?.claude.count ?? null;
+  const count = system?.stats?.claude_count ?? null;
   const placement = countPlacement(banner?.kind ?? "idle", compact);
   const chip = chipFor(dashboard, placement === "chip" ? count : null);
 

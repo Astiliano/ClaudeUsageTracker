@@ -15,10 +15,10 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / GIB).toFixed(1)} GB`;
 }
 
-/** The Claude processes' share of total memory, or null without a total. */
+/** The machine's memory in use as a share of the total, or null without a total. */
 export function memPct(stats: SystemStats): number | null {
   if (stats.mem_total_bytes === 0) return null;
-  const pct = (stats.claude.rss_bytes / stats.mem_total_bytes) * 100;
+  const pct = (stats.mem_used_bytes / stats.mem_total_bytes) * 100;
   return Math.max(0, Math.min(100, pct));
 }
 
@@ -27,7 +27,7 @@ export function isStale(stats: SystemStats, now: number): boolean {
 }
 
 export interface SysItem {
-  key: "cpu" | "mem" | "count" | "none" | "waiting" | "unavailable";
+  key: "cpu" | "mem" | "count" | "waiting" | "unavailable";
   pct: number | null;
   text: string;
   title: string;
@@ -60,35 +60,24 @@ function countText(count: number): string {
 }
 
 function liveItems(stats: SystemStats, showCount: boolean): SysItem[] {
-  const cpu = stats.claude.cpu_pct;
+  const cpu = Math.round(stats.cpu_pct);
   const mem = memPct(stats);
-  const rss = formatBytes(stats.claude.rss_bytes);
-  const total = formatBytes(stats.mem_total_bytes);
   const items: SysItem[] = [
-    {
-      key: "cpu",
-      pct: cpu,
-      text: cpu === null ? "cpu —" : `cpu ${Math.round(cpu)}%`,
-      title:
-        cpu === null
-          ? "Claude processes: CPU share not yet known"
-          : `Claude processes: ${Math.round(cpu)}% of the machine's CPU`,
-    },
-    {
-      key: "mem",
-      pct: mem,
-      text: `mem ${rss}`,
-      title:
-        mem === null
-          ? `Claude processes: ${rss}`
-          : `Claude processes: ${rss} of ${total} (${Math.round(mem)}%)`,
-    },
+    { key: "cpu", pct: stats.cpu_pct, text: `cpu ${cpu}%`, title: `machine CPU: ${cpu}% busy` },
+    mem === null
+      ? { key: "mem", pct: null, text: "mem —", title: "machine memory: total unknown" }
+      : {
+          key: "mem",
+          pct: mem,
+          text: `mem ${Math.round(mem)}%`,
+          title: `machine memory: ${formatBytes(stats.mem_used_bytes)} of ${formatBytes(stats.mem_total_bytes)} used (${Math.round(mem)}%)`,
+        },
   ];
   if (showCount) {
     items.push({
       key: "count",
       pct: null,
-      text: countText(stats.claude.count),
+      text: countText(stats.claude_count),
       title: "Claude Code processes running",
     });
   }
@@ -97,8 +86,8 @@ function liveItems(stats: SystemStats, showCount: boolean): SysItem[] {
 
 /**
  * The whole rendering decision for the system line, per the spec §4.4 state
- * table. Rows 1 to 5 are exclusive; rows 6 to 8 are dim modifiers applied to
- * a row 4 or 5 match, the first true one supplying the reason.
+ * table. Rows 1 to 3 are exclusive; row 4 is any stats; rows 5 to 7 are dim
+ * modifiers on row 4, the first true one supplying the reason.
  */
 export function systemLine(input: {
   report: SystemReport | null;
@@ -138,17 +127,7 @@ export function systemLine(input: {
     };
   }
 
-  const items: SysItem[] =
-    stats.claude.count === 0
-      ? [
-          {
-            key: "none",
-            pct: null,
-            text: "no Claude processes",
-            title: "no Claude Code process is running",
-          },
-        ]
-      : liveItems(stats, showCount);
+  const items = liveItems(stats, showCount);
 
   let reason: string | null = null;
   if (error !== null) reason = error;

@@ -292,18 +292,13 @@ export function createMockBackend(): Backend {
   const mockSystem = new URLSearchParams(window.location.search).get("mockSystem");
   const GIB = 1024 * 1024 * 1024;
 
-  const systemStats = (): SystemStats => {
-    const drift = 0.95 + Math.random() * 0.1;
-    return {
-      sampled_at: Date.now(),
-      mem_total_bytes: 32 * GIB,
-      claude: {
-        count: 2,
-        rss_bytes: Math.round(1.2 * GIB * drift),
-        cpu_pct: Math.round((1 + Math.random() * 7) * 10) / 10,
-      },
-    };
-  };
+  const systemStats = (): SystemStats => ({
+    sampled_at: Date.now(),
+    cpu_pct: Math.round((5 + Math.random() * 25) * 10) / 10,
+    mem_used_bytes: Math.round(13 * GIB * (0.97 + Math.random() * 0.06)),
+    mem_total_bytes: 32 * GIB,
+    claude_count: 2,
+  });
 
   const findAccount = (id: string): MockAccount => {
     const found = accounts.find((a) => a.account.id === id);
