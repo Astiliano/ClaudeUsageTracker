@@ -1,6 +1,8 @@
 import { bannerFor } from "./banner";
+import type { BannerKind } from "./banner";
 import { formatLeft } from "./format";
 import type { Pill } from "./pill";
+import { processCountSuffix } from "./system";
 import { THEME, THRESHOLDS } from "./theme";
 import type { AccountRow, Dashboard, ModelWindow, Win } from "./types";
 
@@ -44,14 +46,32 @@ export function accountCountLabel(n: number): string {
 
 export interface Chip { dot: "live" | "idle" | "warn" | "crit"; text: string }
 
-export function chipFor(dashboard: Dashboard): Chip {
+export function chipFor(dashboard: Dashboard, claudeProcesses: number | null = null): Chip {
   const banner = bannerFor(dashboard);
   switch (banner?.kind) {
     case "halted": return { dot: "crit", text: "polling halted" };
     case "stalled": return { dot: "warn", text: "stalled, recovered" };
     case "no_binary": return { dot: "warn", text: "no claude binary" };
     case "no_accounts": return { dot: "warn", text: "no enabled accounts" };
-    case "active": return { dot: "live", text: `polling every ${dashboard.interval_secs} s` };
-    default: return { dot: "idle", text: "idle · waits for Claude Code" };
+    // Only these two chips carry the count, so only these two compute it.
+    case "active": return {
+      dot: "live",
+      text: `polling every ${dashboard.interval_secs} s${processCountSuffix(claudeProcesses)}`,
+    };
+    default: return {
+      dot: "idle",
+      text: `idle · waits for Claude Code${processCountSuffix(claudeProcesses)}`,
+    };
   }
+}
+
+/**
+ * Where the Claude process count goes, so it is shown exactly once. The chip
+ * only carries it when it has room (not cards) and its text is about polling
+ * at all; every other chip leaves it to the system line, so a halted or
+ * stalled header still says how many Claude processes exist.
+ */
+export function countPlacement(kind: BannerKind, compact: boolean): "chip" | "line" {
+  if (compact) return "line";
+  return kind === "active" || kind === "idle" ? "chip" : "line";
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Pill } from "./pill";
-import { accountCountLabel, accountDotColor, chipFor, sessionNote, summarizeModels, weekNote } from "./present";
+import { accountCountLabel, accountDotColor, chipFor, countPlacement, sessionNote, summarizeModels, weekNote } from "./present";
 import { THEME } from "./theme";
 import type { AccountRow, Dashboard } from "./types";
 
@@ -76,5 +76,35 @@ describe("chipFor", () => {
     expect(chipFor({ ...base, stalled_at: 1 })).toEqual({ dot: "warn", text: "stalled, recovered" });
     expect(chipFor({ ...base, binary: { path: null, source: null } })).toEqual({ dot: "warn", text: "no claude binary" });
     expect(chipFor({ ...base, accounts: [row({ enabled: false })] })).toEqual({ dot: "warn", text: "no enabled accounts" });
+  });
+
+  it("appends the process count to the active and idle chips only", () => {
+    expect(chipFor(base, 2).text).toBe("polling every 60 s · 2 Claude processes");
+    expect(chipFor({ ...base, gate: "idle" }, 1).text).toBe("idle · waits for Claude Code · 1 Claude process");
+    expect(chipFor({ ...base, halted: "guard" }, 2).text).toBe("polling halted");
+    expect(chipFor({ ...base, stalled_at: 1 }, 2).text).toBe("stalled, recovered");
+    expect(chipFor({ ...base, binary: { path: null, source: null } }, 2).text).toBe("no claude binary");
+    expect(chipFor({ ...base, accounts: [row({ enabled: false })] }, 2).text).toBe("no enabled accounts");
+  });
+
+  it("leaves every chip unchanged when the count is unknown", () => {
+    expect(chipFor(base, null).text).toBe("polling every 60 s");
+    expect(chipFor({ ...base, gate: "idle" }, null).text).toBe("idle · waits for Claude Code");
+  });
+});
+
+describe("countPlacement", () => {
+  it("uses the chip only for active and idle at full width", () => {
+    expect(countPlacement("active", false)).toBe("chip");
+    expect(countPlacement("idle", false)).toBe("chip");
+  });
+
+  it("falls back to the line in cards and for every other chip kind", () => {
+    expect(countPlacement("active", true)).toBe("line");
+    expect(countPlacement("idle", true)).toBe("line");
+    for (const kind of ["halted", "stalled", "no_binary", "no_accounts"] as const) {
+      expect(countPlacement(kind, false)).toBe("line");
+      expect(countPlacement(kind, true)).toBe("line");
+    }
   });
 });

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use cut_core::commands::{
     core_clear_halt, core_poll_now, core_set_settings, core_update_account, lock_binary,
-    lock_status, Core,
+    lock_status, Core, SystemSlot,
 };
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
 use cut_core::scheduler::machine::DriverStatus;
@@ -83,6 +83,7 @@ impl EventSink for Recorder {
         self.stalls.fetch_add(1, Ordering::SeqCst);
     }
     fn refresh_tray(&self) {}
+    fn system_sampled(&self) {}
 }
 
 /// Records every exclusion it is handed, so a test can assert what the
@@ -161,6 +162,7 @@ fn harness(running: bool) -> Harness {
         store,
         triggers: Arc::new(Triggers::new()),
         status: Arc::new(Mutex::new(DriverStatus::default())),
+        system: Arc::new(Mutex::new(SystemSlot::default())),
         binary: Arc::new(Mutex::new(None)),
         halt_latched: AtomicBool::new(false),
         close_to_tray: AtomicBool::new(true),
@@ -195,6 +197,7 @@ fn driver_for(h: &Harness, binary: Arc<dyn BinaryProbe>) -> Driver {
         Arc::clone(&h.process) as Arc<dyn ProcessProbe>,
         binary,
         h.shutdown.clone(),
+        Arc::new(std::sync::atomic::AtomicU32::new(0)),
     )
 }
 
