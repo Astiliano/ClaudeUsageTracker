@@ -264,12 +264,20 @@ and the UI): `ok`, `no_usage_data`, `parse_error`, `spawn_error`, `timeout`,
   `sys.refresh_processes_specifics(ProcessesToUpdate::All, true,
    ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet)
                                 .with_cmd(UpdateKind::OnlyIfNotSet))`.
-- Match if pid ≠ `exclude_pid` and either (a) process name equals `claude` or
-  `claude.exe` case-insensitively, or (b) name is `node`/`node.exe` and any
-  cmd arg contains `@anthropic-ai/claude-code` (either slash). Other
-  scripted `claude -p` users are counted: they consume quota too.
-- The pure matcher `matches_claude(name, cmd) -> bool` is unit-tested; the
-  check duration and matched PIDs are logged at DEBUG.
+A process counts when `matches_claude(name, cmd)` holds, its pid is not the
+live poll child's, and it is not a child of this app started after this app.
+The last clause is what keeps a recycled parent pid from hiding a real
+session: Windows reports `th32ParentProcessID` even after the parent has
+exited. The rule lives in `Exclusion::counts` (`src-tauri/src/process.rs`)
+and is shared by the gate and the sampler, so the two can never disagree
+about which processes count.
+
+**Sampler.** `src-tauri/src/system.rs` walks the process table every 5 s on
+the blocking pool with its own `sysinfo::System`, publishes `SystemStats`
+into `Core.system`, emits `system:sampled`, and fires the `Presence` trigger
+when the Claude process count goes from zero to non-zero. It never spawns the
+CLI. Three consecutive panicking samples stop it for the rest of the run and
+set `stopped`, which the header surfaces.
 
 ### 6.3 `usage/runner.rs`
 
@@ -387,24 +395,55 @@ pub fn decide(&mut self, t: Trigger, claude_running: Option<bool>,
 returns a *description* of what the driver must do and never performs I/O.
 Rules, evaluated in this order:
 
+> Updated 2026-09-17: the gate now reconciles on every trigger that carries a
+> process answer, and a `Presence` trigger wakes the driver when Claude Code
+> appears. See `docs/superpowers/specs/2026-09-17-gate-and-system-design.md`.
+
 0. `halted` (global guard halt, §6.3) → `Skip(Halted)` for every trigger.
 1. `cycle.is_some()` → `Skip(Busy)`. (The driver calls `is_busy()` before
    spending a process check, so the app's own child can never latch the
    gate.)
 2. `!binary_present` → `Skip(NoBinary)` for every trigger.
 3. `enabled.is_empty()` → `Skip(NoEnabledAccounts)` for every trigger.
-4. Compute the candidate list: `Timer` requires `claude_running == Some(_)`
-   (`None` is a driver bug: `debug_assert!`, then `Skip(GateIdle)`);
-   Idle&!running → `Skip(GateIdle)`; otherwise all enabled.
-   `Manual`/`Startup`: all enabled. `AccountChanged(ids)`: `ids ∩ enabled`.
+4. Candidate list. `Timer` and `Presence` require `claude_running == Some(_)`
+   (`None`: `debug_assert!`, then `Skip(GateIdle)`). `Timer`: Idle & !running
+   → `Skip(GateIdle)`; otherwise all enabled. `Presence`: Active & anything →
+   `Skip(AlreadyActive)`; Idle & !running → `Skip(GateIdle)`; Idle & running →
+   all enabled. `Manual` / `Startup`: all enabled regardless of the answer.
+   `AccountChanged(ids)`: `ids ∩ enabled`. Rule 5 (backoff) is unchanged.
 5. Filter by backoff (D16): drop accounts whose `next_allowed > now` unless
    trigger is `Manual` or `AccountChanged` (both reset that account's
    backoff). Empty → `Skip(AllBackedOff)` — which therefore always means
    "enabled accounts exist and every one is in cooldown".
-6. **Only now**, for a `Timer` that runs: Idle&running → gate=Active,
-   `gate_transition=Some(Active)`; Active&!running → gate=Idle,
-   `gate_transition=Some(Idle)` (the final poll). A skipped decision never
-   moves the gate, so the promised final poll cannot be lost to backoff.
+6. A `Run` **with a process answer** reconciles the gate:
+   - Idle & `Some(true)` → Active, `gate_transition = Some(Active)`, for
+     every trigger (opening the gate early on a subset poll is harmless: the
+     next Timer polls everyone).
+   - Active & `Some(false)` → Idle, `gate_transition = Some(Idle)`, **only
+     for `Timer`, `Manual` and `Startup`**, whose candidate list is the whole
+     enabled set. That run is the final poll. **Invariant: the run that
+     closes the gate polls every enabled account not in cooldown.** (A
+     partially backed-off Timer already closes the gate without the
+     cooling accounts today; that gap is pre-existing and unchanged.)
+     `AccountChanged` polls `ids ∩ enabled` and therefore never closes the
+     gate; with Claude gone it runs its subset and leaves the gate Active
+     for the Timer's final poll.
+   - `None` never moves the gate. A `Skip` never moves the gate.
+
+Consequences: a Manual poll with Claude gone while Active is the final poll,
+so the following Timer skips as `gate_idle` instead of polling once more; a
+Startup or Manual poll with Claude running while Idle lands on Active and the
+chip is right before the cycle even finishes (status is published right after
+`decide`). `preview_manual` is unchanged: Manual still runs from either gate.
+
+Full table (gate, answer → candidates, transition), Skips omitted:
+
+| trigger | Idle, Some(true) | Idle, Some(false) | Active, Some(true) | Active, Some(false) | None |
+|---|---|---|---|---|---|
+| Timer | all, →Active | skip gate_idle | all, — | all, →Idle | skip gate_idle (debug_assert) |
+| Presence | all, →Active | skip gate_idle | skip already_active | skip already_active | skip gate_idle (debug_assert) |
+| Manual / Startup | all, →Active | all, — | all, — | all, →Idle | all, — |
+| AccountChanged | ids∩enabled, →Active | ids∩enabled, — | ids∩enabled, — | ids∩enabled, — | ids∩enabled, — |
 
 `begin_cycle(now) -> CycleToken` sets `cycle = Some{started_at}`; the token
 is an RAII guard whose `Drop` calls `end_cycle()`, so a panic or task abort
@@ -416,8 +455,9 @@ Option<Duration>` is the machine's only watchdog contribution.
 **Enum wire forms.** Every enum that crosses a DB/log/event/command
 boundary serialises as `snake_case`, like `outcome`: `DisabledReason` →
 `user` | `guard_tripped`; `SkipReason` → `halted` | `busy` | `no_binary` |
-`no_enabled_accounts` | `gate_idle` | `all_backed_off`; `Trigger` → `timer`
-| `manual` | `startup` | `account_changed`; `Gate` → `idle` | `active`.
+`no_enabled_accounts` | `gate_idle` | `all_backed_off` | `already_active`;
+`Trigger` → `timer` | `manual` | `startup` | `account_changed` | `presence`;
+`Gate` → `idle` | `active`.
 
 #### `driver.rs`
 
@@ -448,6 +488,10 @@ boundary serialises as `snake_case`, like `outcome`: `DisabledReason` →
                                      => if cycle_age > enabled × timeout_secs + 10 s:
                                          abort cycle task (JoinHandle::abort), kill child via
                                          its handle, log ERROR, emit poller:stalled,
+    _ = triggers.notified_presence() => {
+        // already active → debug; busy → defer and re-fire at the next
+        // flush point; otherwise probe and decide.
+    }
     _ = shutdown.cancelled()         => break,
   }
   ```
@@ -658,11 +702,12 @@ Single window, dark/light follows OS.
 | `clear_halt` | → () — clears `polling_halted` and logs WARN with the previous value. **Does not poll**: every quota-spending action stays a separate, explicit act (the user presses Refresh) |
 | `open_login` | `{id}` → () |
 | `open_log_dir` | → () via opener plugin |
+| `get_system` | → `{ stats: SystemStats \| null, stopped: bool }` — the sampler's latest figures. No store access. |
 | `get_snapshot_raw` | `{snapshot_id}` → `{raw?, error?}` |
 
 All commands are `async fn … -> Result<T, AppError>`; `AppError` serialises to
 `{code, message}`. Events: `usage:updated {account_id}`, `cycle:finished`,
-`gate:changed {gate}`, `poller:stalled {at, cycle_age_ms}`.
+`gate:changed {gate}`, `system:sampled`, `poller:stalled {at, cycle_age_ms}`.
 
 ## 9. Dependencies
 
