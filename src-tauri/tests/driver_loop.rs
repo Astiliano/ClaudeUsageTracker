@@ -931,3 +931,125 @@ async fn a_held_final_poll_keeps_the_gate_active_until_it_runs() {
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
+
+/// Two accounts, Startup polled both (Claude not running, so the gate stays
+/// idle), then Claude starts and memory reads ample once and low after: the
+/// presence decision passes, and the re-check before account 2 sees the drop.
+async fn two_accounts_then_a_drop(h: &Harness) -> tokio::task::JoinHandle<()> {
+    add_account(h, ".claude");
+    add_account(h, ".claude-b");
+    let driver = driver_for(h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(h, 1).await;
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+    h.process.running.store(true, Ordering::SeqCst);
+    h.memory.script(&[Some(u64::MAX), Some(LOW)]);
+    handle
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cycle_stops_before_the_next_spawn_when_memory_drops() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = two_accounts_then_a_drop(&h).await;
+
+    h.core.triggers.presence();
+    wait_for_cycles(&h, 2).await;
+
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        3,
+        "exactly one account polled before the drop"
+    );
+    let status = lock_status(&h.core.status).clone();
+    assert_eq!(status.memory_hold.expect("hold").available_bytes, LOW);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 1);
+    assert_eq!(status.gate.as_str(), "active");
+    assert_eq!(
+        status.backoff_until.len(),
+        0,
+        "no backoff for the unpolled account"
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manual_cycle_ignores_a_mid_cycle_drop() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = two_accounts_then_a_drop(&h).await;
+
+    h.core.triggers.manual();
+    wait_for_cycles(&h, 2).await;
+
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        4,
+        "both accounts polled"
+    );
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 0);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_closing_cycle_keeps_the_gate_active() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(true);
+    add_account(&h, ".claude");
+    add_account(&h, ".claude-b");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active"]);
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+
+    // Claude has quit, so the next Timer is the final poll that closes the
+    // gate (a real Timer wait). Memory is ample for the decision and low
+    // before the second spawn.
+    h.process.running.store(false, Ordering::SeqCst);
+    h.memory.script(&[Some(u64::MAX), Some(LOW)]);
+    wait_until("the closing cycle to be cut", 15, || {
+        h.events.cycles.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        3,
+        "one account polled before the cut"
+    );
+    assert!(lock_status(&h.core.status).memory_hold.is_some());
+    assert_eq!(
+        *h.events.gates.lock().expect("lock"),
+        vec!["active", "idle", "active"]
+    );
+    assert_eq!(lock_status(&h.core.status).gate.as_str(), "active");
+
+    // `cycle_finished` fires inside `run_cycle` before the token drops, so
+    // wait for idle first: a wake sent earlier would be consumed while the
+    // driver still reads busy.
+    h.memory.script(&[Some(u64::MAX)]);
+    h.core.triggers.memory_recovered();
+    wait_until("both accounts to poll again", 3, || {
+        h.events.usage_updated.lock().expect("lock").len() == 5
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(
+        h.events.gates.lock().expect("lock").last().map(String::as_str),
+        Some("idle")
+    );
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}

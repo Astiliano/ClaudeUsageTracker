@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::AppResult;
-use crate::memory::{floor_bytes, read_memory, MemoryProbe};
+use crate::memory::{floor_bytes, read_memory, MemoryGuard, MemoryProbe};
 use crate::scheduler::machine::{
     begin_cycle, hold_change, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate,
     HoldChange, Machine, MemoryHold, Recorded, SharedMachine, Trigger,
@@ -201,6 +201,12 @@ struct CycleInputs {
     timeout: Duration,
     pid_slot: Arc<AtomicU32>,
     cancel: CancellationToken,
+    /// Set for automatic triggers only: the cycle re-reads memory before
+    /// every spawn after the first (spec 4.3a). Bypass triggers carry `None`.
+    memory_guard: Option<MemoryGuard>,
+    /// The decision that started this cycle closed the gate (rule 6), so a
+    /// mid-cycle hold must reopen it.
+    closed_gate: bool,
 }
 
 /// Adapter that performs the four halt steps against the real store. Owns
@@ -278,6 +284,8 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         timeout,
         pid_slot,
         cancel,
+        memory_guard,
+        closed_gate,
     } = inputs;
 
     info!(
@@ -286,11 +294,42 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         "cycle started"
     );
 
+    let total = accounts.len();
     let mut first_poll_logged_env = false;
-    for account_id in accounts {
+    for (i, account_id) in accounts.into_iter().enumerate() {
         if cancel.is_cancelled() {
             debug!("cycle cancelled before finishing");
             return;
+        }
+
+        // The first account was just checked by `decide`; every later spawn
+        // re-reads the floor, so a long cycle cannot ignore it (spec 4.3a).
+        // A `None` reading fails open.
+        if i > 0 {
+            if let Some(g) = &memory_guard {
+                if let Some(available) = read_memory(&*g.probe, &g.lost) {
+                    if available < g.floor_bytes {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let reopened = lock_machine(&machine)
+                            .hold_mid_cycle(available, g.floor_bytes, now, closed_gate);
+                        publish_status(&machine, &core.status, now);
+                        events.memory_hold_changed();
+                        if let Some(gate) = reopened {
+                            info!(gate = gate.as_str(), trigger = "memory_hold", "gate changed");
+                            events.gate_changed(gate.as_str());
+                        }
+                        info!(
+                            available_bytes = available,
+                            floor_bytes = g.floor_bytes,
+                            mid_cycle = true,
+                            polled = i,
+                            remaining = total - i,
+                            "memory hold"
+                        );
+                        break;
+                    }
+                }
+            }
         }
 
         let account = {
@@ -543,6 +582,7 @@ impl Driver {
         trigger: Trigger,
         binary: PathBuf,
         settings: &UserSettings,
+        closed_gate: bool,
         done_tx: &UnboundedSender<u64>,
     ) -> LiveCycle {
         let generation = self.cycle_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -551,6 +591,11 @@ impl Driver {
         // command arriving immediately sees it.
         self.publish();
         let cancel = self.shutdown.child_token();
+        let memory_guard = trigger.is_automatic().then(|| MemoryGuard {
+            probe: Arc::clone(&self.memory),
+            floor_bytes: floor_bytes(settings.min_free_memory_mb),
+            lost: Arc::clone(&self.memory_reading_lost),
+        });
         let inputs = CycleInputs {
             core: Arc::clone(&self.core),
             events: Arc::clone(&self.events),
@@ -562,6 +607,8 @@ impl Driver {
             timeout: Duration::from_secs(u64::from(settings.timeout_secs)),
             pid_slot: Arc::clone(&self.pid_slot),
             cancel: cancel.clone(),
+            memory_guard,
+            closed_gate,
         };
         let signal = CycleDone {
             tx: done_tx.clone(),
@@ -787,7 +834,8 @@ impl Driver {
                     self.events.gate_changed(gate.as_str());
                 }
                 let binary = binary_path?;
-                Some(self.start_cycle(accounts, reason, binary, settings, done_tx))
+                let closed_gate = gate_transition == Some(Gate::Idle);
+                Some(self.start_cycle(accounts, reason, binary, settings, closed_gate, done_tx))
             }
         }
     }

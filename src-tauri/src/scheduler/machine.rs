@@ -229,6 +229,36 @@ impl Machine {
         self.hold
     }
 
+    /// The memory hold of a cycle that is already running (spec 4.3a): the
+    /// cycle task read a figure below the floor before a spawn. Sets the hold
+    /// with the same `since` rule as rule 5b and never touches backoff.
+    ///
+    /// Rule 6 is the only gate write, and every `decide` while the cycle runs
+    /// stops at rule 1 (Busy), so a cycle whose decision closed the gate is
+    /// the only thing that moved it. When `cycle_closed_gate` is true the
+    /// final poll is being cut, so the gate goes back to Active, where rule 5b
+    /// would have left it had the low figure been read at decide time, and
+    /// `Some(Active)` is returned for the caller to announce.
+    pub fn hold_mid_cycle(
+        &mut self,
+        available: u64,
+        floor: u64,
+        now: i64,
+        cycle_closed_gate: bool,
+    ) -> Option<Gate> {
+        self.hold = Some(MemoryHold {
+            available_bytes: available,
+            floor_bytes: floor,
+            since: self.hold.map_or(now, |h| h.since),
+        });
+        if cycle_closed_gate {
+            self.gate = Gate::Active;
+            Some(Gate::Active)
+        } else {
+            None
+        }
+    }
+
     pub fn gate(&self) -> Gate {
         self.gate
     }
@@ -1581,5 +1611,66 @@ mod tests {
         let m = held_machine();
         assert_eq!(m.status(NOW).memory_hold, Some(the_hold(NOW)));
         assert_eq!(Machine::new().status(NOW).memory_hold, None);
+    }
+
+    #[test]
+    fn hold_mid_cycle_sets_the_hold_and_keeps_since() {
+        let mut m = Machine::new();
+        let before = m.status(NOW).backoff_until;
+        assert_eq!(m.hold_mid_cycle(LOW, FLOOR, NOW, false), None);
+        assert_eq!(m.memory_hold(), Some(the_hold(NOW)));
+
+        assert_eq!(m.hold_mid_cycle(LOW, FLOOR, NOW + 5000, false), None);
+        let hold = m.memory_hold().expect("still held");
+        assert_eq!(hold.since, NOW, "a repeat keeps the first since");
+        assert_eq!(hold.available_bytes, LOW);
+
+        assert_eq!(
+            m.status(NOW + 5000).backoff_until,
+            before,
+            "a mid-cycle hold never touches backoff"
+        );
+    }
+
+    #[test]
+    fn hold_mid_cycle_reopens_a_gate_its_cycle_closed() {
+        // Active, then a Timer final poll that closes the gate.
+        let mut m = Machine::new();
+        m.decide(
+            Trigger::Timer,
+            &facts(Some(true), true, false, &accounts(), NOW),
+        );
+        assert_eq!(m.gate(), Gate::Active);
+        let d = m.decide(
+            Trigger::Timer,
+            &facts(Some(false), true, false, &accounts(), NOW + 1),
+        );
+        assert!(matches!(
+            d,
+            Decision::Run { gate_transition: Some(Gate::Idle), .. }
+        ));
+        assert_eq!(m.gate(), Gate::Idle);
+
+        assert_eq!(
+            m.hold_mid_cycle(LOW, FLOOR, NOW + 2, true),
+            Some(Gate::Active)
+        );
+        assert_eq!(m.gate(), Gate::Active);
+        assert_eq!(m.status(NOW + 2).gate, Gate::Active);
+        assert_eq!(m.memory_hold(), Some(the_hold(NOW + 2)));
+
+        // An opening Run (Idle to Active): the cycle did not close the gate,
+        // so the hold leaves it alone.
+        let mut m = Machine::new();
+        let d = m.decide(
+            Trigger::Timer,
+            &facts(Some(true), true, false, &accounts(), NOW),
+        );
+        assert!(matches!(
+            d,
+            Decision::Run { gate_transition: Some(Gate::Active), .. }
+        ));
+        assert_eq!(m.hold_mid_cycle(LOW, FLOOR, NOW + 1, false), None);
+        assert_eq!(m.gate(), Gate::Active);
     }
 }
