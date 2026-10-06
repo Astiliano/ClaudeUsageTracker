@@ -259,6 +259,24 @@ use tauri::Emitter;
 
 use crate::scheduler::driver::EventSink;
 
+pub const EVT_USAGE_UPDATED: &str = "usage:updated";
+pub const EVT_CYCLE_FINISHED: &str = "cycle:finished";
+pub const EVT_GATE_CHANGED: &str = "gate:changed";
+pub const EVT_POLLER_STALLED: &str = "poller:stalled";
+pub const EVT_SYSTEM_SAMPLED: &str = "system:sampled";
+pub const EVT_MEMORY_HOLD: &str = "memory:hold";
+pub const EVT_SETTINGS_APPLIED: &str = "settings:applied";
+
+pub const FRONTEND_EVENT_NAMES: [&str; 7] = [
+    EVT_USAGE_UPDATED,
+    EVT_CYCLE_FINISHED,
+    EVT_GATE_CHANGED,
+    EVT_POLLER_STALLED,
+    EVT_SYSTEM_SAMPLED,
+    EVT_MEMORY_HOLD,
+    EVT_SETTINGS_APPLIED,
+];
+
 #[derive(Serialize, Clone)]
 struct AccountEvent<'a> {
     account_id: &'a str,
@@ -290,18 +308,18 @@ impl TauriEvents {
 
 impl EventSink for TauriEvents {
     fn usage_updated(&self, account_id: &str) {
-        let _ = self.app.emit("usage:updated", AccountEvent { account_id });
+        let _ = self.app.emit(EVT_USAGE_UPDATED, AccountEvent { account_id });
     }
     fn cycle_finished(&self) {
-        let _ = self.app.emit("cycle:finished", ());
+        let _ = self.app.emit(EVT_CYCLE_FINISHED, ());
     }
     fn gate_changed(&self, gate: &str) {
-        let _ = self.app.emit("gate:changed", GateEvent { gate });
+        let _ = self.app.emit(EVT_GATE_CHANGED, GateEvent { gate });
     }
     fn poller_stalled(&self, at: i64, cycle_age_ms: u64) {
         let _ = self
             .app
-            .emit("poller:stalled", StalledEvent { at, cycle_age_ms });
+            .emit(EVT_POLLER_STALLED, StalledEvent { at, cycle_age_ms });
     }
     fn refresh_tray(&self) {
         // `EventSink` is a plain (non-async) trait so it stays object-safe
@@ -316,7 +334,13 @@ impl EventSink for TauriEvents {
         });
     }
     fn system_sampled(&self) {
-        let _ = self.app.emit("system:sampled", ());
+        let _ = self.app.emit(EVT_SYSTEM_SAMPLED, ());
+    }
+    fn memory_hold_changed(&self) {
+        let _ = self.app.emit(EVT_MEMORY_HOLD, ());
+    }
+    fn settings_applied(&self) {
+        let _ = self.app.emit(EVT_SETTINGS_APPLIED, ());
     }
 }
 
@@ -579,5 +603,13 @@ mod tests {
     #[test]
     fn no_halt_value_is_not_halted() {
         assert!(!halted_fail_closed(Ok(None)));
+    }
+
+    #[test]
+    fn every_frontend_event_name_is_listed_in_events_ts() {
+        let ts = include_str!("../../src/lib/events.ts");
+        for name in FRONTEND_EVENT_NAMES {
+            assert!(ts.contains(&format!("\"{name}\"")), "{name} missing from src/lib/events.ts");
+        }
     }
 }

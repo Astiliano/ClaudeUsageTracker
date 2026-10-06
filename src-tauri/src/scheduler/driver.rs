@@ -33,6 +33,10 @@ pub trait EventSink: Send + Sync {
     fn refresh_tray(&self);
     /// The sampler published a fresh `SystemStats` (spec §4.2).
     fn system_sampled(&self);
+    /// The memory hold status changed.
+    fn memory_hold_changed(&self);
+    /// Settings were applied by the UI.
+    fn settings_applied(&self);
 }
 
 /// The process gate, abstracted for the same reason.
@@ -1040,6 +1044,8 @@ mod tests {
         fn poller_stalled(&self, _at: i64, _cycle_age_ms: u64) {}
         fn refresh_tray(&self) {}
         fn system_sampled(&self) {}
+        fn memory_hold_changed(&self) {}
+        fn settings_applied(&self) {}
     }
 
     struct IdleProcess;

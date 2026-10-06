@@ -1,5 +1,6 @@
 import type { Backend } from "./backend";
 import type { Metric } from "./history";
+import { SYSTEM_EVENTS } from "./events";
 import limits from "./historyLimits.json";
 import type {
   Account,
@@ -496,7 +497,7 @@ export function createMockBackend(): Backend {
       return result as T;
     },
     listen: (event: string, handler: () => void) => {
-      if (event !== "system:sampled") return Promise.resolve(() => undefined);
+      if (!(SYSTEM_EVENTS as readonly string[]).includes(event)) return Promise.resolve(() => undefined);
       const timer = window.setInterval(handler, 5000);
       return Promise.resolve(() => window.clearInterval(timer));
     },

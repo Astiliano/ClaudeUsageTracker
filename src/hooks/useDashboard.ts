@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { errorMessage } from "../lib/errors";
+import { HISTORY_EVENTS, REFETCH_EVENTS } from "../lib/events";
 import { SPARK_PRESET, SPARK_UNIT, UNITS, WEEK_ALL, alignedSince } from "../lib/history";
 import type { Dashboard, HistoryPoint } from "../lib/types";
 
@@ -118,11 +119,8 @@ export function useDashboard(): UseDashboard {
     };
 
     const attach = async (): Promise<void> => {
-      const names = ["usage:updated", "gate:changed", "poller:stalled"];
-      for (const name of names) {
-        await subscribe(name, () => refetch());
-      }
-      await subscribe("cycle:finished", () => void loadWithHistory());
+      for (const name of REFETCH_EVENTS) await subscribe(name, () => refetch());
+      for (const name of HISTORY_EVENTS) await subscribe(name, () => void loadWithHistory());
     };
 
     void attach();

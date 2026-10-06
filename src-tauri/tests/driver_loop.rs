@@ -63,6 +63,8 @@ struct Recorder {
     cycles: AtomicUsize,
     gates: Mutex<Vec<String>>,
     stalls: AtomicUsize,
+    memory_holds: AtomicUsize,
+    settings_applied: AtomicUsize,
 }
 
 impl EventSink for Recorder {
@@ -84,6 +86,12 @@ impl EventSink for Recorder {
     }
     fn refresh_tray(&self) {}
     fn system_sampled(&self) {}
+    fn memory_hold_changed(&self) {
+        self.memory_holds.fetch_add(1, Ordering::SeqCst);
+    }
+    fn settings_applied(&self) {
+        self.settings_applied.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Records every exclusion it is handed, so a test can assert what the

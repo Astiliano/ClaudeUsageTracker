@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "../lib/backend";
 import { errorMessage } from "../lib/errors";
+import { SYSTEM_EVENTS } from "../lib/events";
 import type { SystemReport } from "../lib/types";
 
 interface UseSystem {
@@ -51,7 +52,7 @@ export function useSystem(): UseSystem {
 
     const attach = async (): Promise<void> => {
       try {
-        const unlisten = await backend().listen("system:sampled", () => void load());
+        const unlisten = await backend().listen(SYSTEM_EVENTS[0], () => void load());
         if (cancelled) {
           unlisten();
         } else {
