@@ -33,7 +33,7 @@ restart until you clear it.
 
 Accounts can be reordered by dragging rows with the grip handle, or with the
 Move up/Move down buttons inside a row's edit drawer. Column headers can also
-be dragged to reorder; column order, typeface and text size persist per
+be dragged to reorder; column order and text size persist per
 machine in the webview's local storage. Columns other than Account can also
 be hidden from Settings. Click a row's sparkline to open the
 history drawer, which offers range presets from 1 hour to 30 days, a
@@ -41,10 +41,47 @@ granularity override and a metric picker. Removing an account (in a row's edit d
 a second click within 4 seconds before it deletes the account and its
 history.
 
-Below 820 px the table auto-hides the Updated and Per model columns; below
-640 px it switches to one card per account with ring gauges instead of a
+Below 757 px the table auto-hides the Updated and Per model columns; below
+573 px it switches to one card per account with ring gauges instead of a
 table (the window has a minimum size of 360×240). "Keep window on top" is a
 per-machine toggle in Settings, alongside the others.
+
+The look is a dense native utility: no centred page column, 6 px gutters, 40 px
+rows, flat panels with 1 px lines and square corners. The breakpoints above
+are computed from the same constants the stylesheet reads, so they track the
+layout. The history chart grows or shrinks with the window so a row and its
+drawer fill the viewport, and stays legible at the 360×240 minimum. The UI uses
+the system font (Segoe UI Variable on Windows) and the system monospace; there
+is no font picker and no bundled web font.
+
+### Memory floor
+
+Each refresh spawns one `claude` process per account, which can take a few
+hundred MB. To avoid starting a poll when the machine is short of memory, the
+app checks Windows commit headroom (the figure that actually runs out on a
+busy machine) before every automatic refresh. **Memory floor** in Settings,
+next to Poll gap, is the minimum free commit in MB: the default is 1536, `0`
+means never hold, and the maximum is 65536.
+
+- Below the floor, automatic (timer) refreshes are held and the header shows a
+  `held · <n> free` chip with the current figure; hovering it shows the floor.
+  A hold is also checked again before each account is polled inside a cycle.
+- **Refresh now**, app start and account changes bypass the hold, like the
+  process gate.
+- The memory sampler re-checks the floor on every tick, and the refresh runs
+  again as soon as headroom recovers. Each hold and release is logged at INFO
+  with the measured figure, and each cycle logs the peak memory of the polling
+  child (`peak_working_set_bytes`, `peak_commit_bytes`) so the floor can be
+  tuned from evidence.
+
+### Closing to the tray
+
+Closing the window hides the app to the tray and destroys the window, which
+frees its WebView2 memory (several hundred MB). The scheduler, sampler and tray
+keep running. Clicking the tray icon, or launching the app a second time,
+rebuilds the window at its last size, position and maximized state. While no
+window exists the system sampler runs every 30 s instead of every 5 s, so
+Claude Code start and stop are noticed up to 30 s later.
 
 ## Requirements
 
