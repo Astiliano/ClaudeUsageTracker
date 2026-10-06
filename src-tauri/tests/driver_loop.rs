@@ -742,3 +742,192 @@ async fn manual_refresh_runs_while_held_and_clears_the_hold() {
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
+
+/// Polls `check` until it holds, failing with `what` after `secs` seconds. The
+/// wake tests use short bounds on purpose: the next Timer is at least 10 s
+/// after the last cycle, so a broken wake arm times out here instead of
+/// passing through the Timer.
+async fn wait_until(what: &str, secs: u64, check: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if check() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {secs} s waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memory_wake_after_recovery_runs_the_held_refresh() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    h.memory.script(&[Some(u64::MAX)]);
+    h.core.triggers.memory_recovered();
+
+    wait_until("the held refresh to finish", 3, || {
+        h.events.cycles.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 2);
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memory_wake_without_a_hold_is_ignored() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    add_account(&h, ".claude");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+
+    h.core.triggers.memory_recovered();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(h.events.cycles.load(Ordering::SeqCst), 1);
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 1);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 0);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lowering_the_floor_in_settings_releases_the_hold() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    // The figure stays LOW: only the floor moves.
+    core_set_settings(
+        &h.core,
+        &UserSettings {
+            min_free_memory_mb: 0,
+            ..defaults()
+        },
+    )
+    .expect("set settings");
+
+    wait_until("the settings arm to apply the change", 3, || {
+        h.events.settings_applied.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    wait_until("the lowered floor to run the held refresh", 3, || {
+        h.events.cycles.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_floor_only_change_keeps_backoff() {
+    let mut env = EnvGuard::new().await;
+    env.set("FAKE_CLAUDE_MODE", "exit-nonzero");
+    env.set("FAKE_CLAUDE_EXIT", "7");
+    env.set("FAKE_CLAUDE_STDERR", "auth failed");
+    let h = harness(true);
+    let a = add_account(&h, ".claude");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+
+    let held_until = lock_status(&h.core.status)
+        .backoff_until
+        .get(&a)
+        .copied()
+        .expect("the failed Startup poll must leave the account in backoff");
+
+    core_set_settings(
+        &h.core,
+        &UserSettings {
+            min_free_memory_mb: 1024,
+            ..defaults()
+        },
+    )
+    .expect("set floor");
+    wait_until("the floor change to be applied", 3, || {
+        h.events.settings_applied.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(
+        lock_status(&h.core.status).backoff_until.get(&a).copied(),
+        Some(held_until),
+        "a floor-only change must not reset backoff"
+    );
+
+    // Control: a polling-relevant change does reset it.
+    core_set_settings(
+        &h.core,
+        &UserSettings {
+            min_free_memory_mb: 1024,
+            interval_secs: 11,
+            ..defaults()
+        },
+    )
+    .expect("set interval");
+    wait_until("the interval change to be applied", 3, || {
+        h.events.settings_applied.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert!(
+        !lock_status(&h.core.status).backoff_until.contains_key(&a),
+        "an interval change must reset backoff"
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_final_poll_keeps_the_gate_active_until_it_runs() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(true);
+    add_account(&h, ".claude");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active"]);
+
+    // Claude has quit, so the next Timer would be the final poll that closes
+    // the gate; memory is low, so it is held instead (a real Timer wait).
+    h.process.running.store(false, Ordering::SeqCst);
+    h.memory.script(&[Some(LOW)]);
+    wait_until("the Timer to hold the final poll", 15, || {
+        lock_status(&h.core.status).memory_hold.is_some()
+    })
+    .await;
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 1);
+    assert_eq!(lock_status(&h.core.status).gate.as_str(), "active");
+
+    h.memory.script(&[Some(u64::MAX)]);
+    h.core.triggers.memory_recovered();
+    wait_until("the held final poll to run", 5, || {
+        h.events.usage_updated.lock().expect("lock").len() == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active", "idle"]);
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}

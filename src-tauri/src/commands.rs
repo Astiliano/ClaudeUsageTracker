@@ -10,7 +10,7 @@ use crate::error::{AppError, AppResult};
 use crate::logging::LogHandle;
 use crate::scheduler::machine::{preview_manual, DriverStatus, MemoryHold};
 use crate::scheduler::triggers::Triggers;
-use crate::store::settings::{polling_relevant_changed, validate_settings, UserSettings};
+use crate::store::settings::{driver_relevant_changed, validate_settings, UserSettings};
 use crate::store::{HistoryMetric, HistoryPoint, Store, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS, RETENTION_MS};
 use crate::usage::{Account, SnapshotDto};
 #[cfg(test)]
@@ -386,9 +386,11 @@ pub fn core_get_settings(core: &Core, launch_at_login: bool) -> AppResult<UserSe
 /// (spec §8, D16):
 ///
 /// * `interval_secs`, `timeout_secs` and `claude_binary` are polling-relevant,
-///   so a change to any of them publishes on the settings watch. The driver's
-///   watch arm is what moves the deadline and resets backoff — this function
-///   does neither itself, because it has no machine handle.
+///   and `min_free_memory_mb` is driver-relevant, so a change to any of them
+///   publishes on the settings watch. The driver's watch arm is what moves the
+///   deadline and resets backoff (for the polling keys only: a floor-only
+///   change keeps backoff and just re-evaluates a memory hold) — this
+///   function does none of that itself, because it has no machine handle.
 /// * `close_to_tray`, `launch_at_login` and `log_level` are applied directly
 ///   and must never touch the scheduler. `log_level` goes through the reload
 ///   handle here; `launch_at_login` is written to the autostart plugin by the
@@ -409,7 +411,7 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
 
     core.close_to_tray.store(next.close_to_tray, Ordering::SeqCst);
 
-    let scheduler_affected = polling_relevant_changed(&previous, next);
+    let scheduler_affected = driver_relevant_changed(&previous, next);
     if scheduler_affected && core.settings_tx.send(next.clone()).is_err() {
         warn!("settings watch has no receiver; the driver may not be running");
     }
@@ -417,6 +419,7 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
     info!(
         interval_secs = next.interval_secs,
         timeout_secs = next.timeout_secs,
+        min_free_memory_mb = next.min_free_memory_mb,
         log_level = %next.log_level,
         scheduler_affected,
         "settings updated"

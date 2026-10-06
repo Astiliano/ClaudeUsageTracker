@@ -11,6 +11,7 @@ pub struct Triggers {
     manual: Notify,
     startup: Notify,
     presence: Notify,
+    memory_recovered: Notify,
     changed: Notify,
     changed_ids: Mutex<HashSet<String>>,
 }
@@ -32,6 +33,13 @@ impl Triggers {
     /// (spec §4.3). The sampler is the only caller.
     pub fn presence(&self) {
         self.presence.notify_one();
+    }
+
+    /// Fired by the sampler when memory recovers above the floor while a hold
+    /// exists, and by the driver's settings arm when a hold survives a
+    /// settings change (spec 4.3b, 4.4). Coalesces like `presence`.
+    pub fn memory_recovered(&self) {
+        self.memory_recovered.notify_one();
     }
 
     pub fn account_changed(&self, ids: Vec<String>) {
@@ -67,6 +75,10 @@ impl Triggers {
 
     pub async fn notified_presence(&self) {
         self.presence.notified().await;
+    }
+
+    pub async fn notified_memory_recovered(&self) {
+        self.memory_recovered.notified().await;
     }
 
     pub async fn notified_changed(&self) {
@@ -175,5 +187,34 @@ mod tests {
             .expect("presence notification");
         let manual = tokio::time::timeout(Duration::from_millis(200), t.notified_manual()).await;
         assert!(manual.is_err(), "presence must not fire the manual channel");
+    }
+
+    #[tokio::test]
+    async fn memory_recovered_coalesces_like_presence() {
+        let t = Arc::new(Triggers::new());
+        t.memory_recovered();
+        t.memory_recovered();
+
+        tokio::time::timeout(Duration::from_millis(200), t.notified_memory_recovered())
+            .await
+            .expect("first notification");
+
+        let second =
+            tokio::time::timeout(Duration::from_millis(200), t.notified_memory_recovered()).await;
+        assert!(second.is_err(), "memory wakes must coalesce, not queue");
+    }
+
+    #[tokio::test]
+    async fn memory_recovered_is_its_own_channel() {
+        let t = Arc::new(Triggers::new());
+        t.memory_recovered();
+        tokio::time::timeout(Duration::from_millis(200), t.notified_memory_recovered())
+            .await
+            .expect("memory notification");
+        let presence =
+            tokio::time::timeout(Duration::from_millis(200), t.notified_presence()).await;
+        assert!(presence.is_err(), "a memory wake must not fire the presence channel");
+        let manual = tokio::time::timeout(Duration::from_millis(200), t.notified_manual()).await;
+        assert!(manual.is_err(), "a memory wake must not fire the manual channel");
     }
 }

@@ -13,7 +13,7 @@ use crate::scheduler::machine::{
     begin_cycle, hold_change, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate,
     HoldChange, Machine, MemoryHold, Recorded, SharedMachine, Trigger,
 };
-use crate::store::settings::UserSettings;
+use crate::store::settings::{polling_relevant_changed, UserSettings};
 use crate::usage::runner::run_usage;
 use crate::usage::PollOutcome;
 
@@ -841,6 +841,25 @@ impl Driver {
         }
     }
 
+    /// The Timer decision, shared by the Timer arm and the memory-wake arm.
+    /// Busy is checked inside `probe_if_free` before a process check is spent,
+    /// so the app's own child can never latch the gate. A failed check lands
+    /// here as `None`, and the Timer never hands `None` to `decide`. The
+    /// caller owns `last_cycle_end`: a `None` return means no cycle started.
+    async fn handle_timer(
+        &self,
+        settings: &UserSettings,
+        done_tx: &UnboundedSender<u64>,
+    ) -> Option<LiveCycle> {
+        let Some(running) = self.probe_if_free().await else {
+            // probe_if_free has already logged which reason.
+            debug!("timer skipped: no process answer");
+            return None;
+        };
+        self.decide_and_maybe_run(Trigger::Timer, Some(running), settings, done_tx)
+            .await
+    }
+
     pub async fn run(self) {
         let mut settings_rx = self.core.settings_tx.subscribe();
         let mut settings = self.settings().await;
@@ -922,39 +941,38 @@ impl Driver {
 
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {
-                    // Busy is checked inside the helper before a process
-                    // check is spent, so the app's own child can never
-                    // latch the gate. A failed check lands here too, and
-                    // the Timer never hands `None` to `decide`.
-                    let Some(running) = self.probe_if_free().await else {
-                        // probe_if_free has already logged which reason.
-                        debug!("timer skipped: no process answer");
-                        last_cycle_end = chrono::Utc::now().timestamp_millis();
-                        continue;
-                    };
-                    if let Some(cycle) = self
-                        .decide_and_maybe_run(Trigger::Timer, Some(running), &settings, &done_tx)
-                        .await
-                    {
-                        live = Some(cycle);
-                    } else {
-                        last_cycle_end = chrono::Utc::now().timestamp_millis();
+                    match self.handle_timer(&settings, &done_tx).await {
+                        Some(cycle) => live = Some(cycle),
+                        None => last_cycle_end = chrono::Utc::now().timestamp_millis(),
                     }
                 }
                 changed = settings_rx.changed() => {
                     if changed.is_ok() {
-                        settings = settings_rx.borrow_and_update().clone();
-                        // Only a polling-relevant change reaches this arm at
-                        // all (spec section 8), and D16 makes it a deliberate
-                        // "try again" for every account.
-                        lock_machine(&self.machine).reset_all_backoff();
-                        self.publish();
+                        let next = settings_rx.borrow_and_update().clone();
+                        let prev = std::mem::replace(&mut settings, next);
+                        // The arm hears a polling-relevant change and a floor
+                        // change (spec 4.6). Only the first is a deliberate
+                        // "try again" for every account (D16); a floor-only
+                        // change must leave backoff alone.
+                        let backoff_reset = polling_relevant_changed(&prev, &settings);
+                        if backoff_reset {
+                            lock_machine(&self.machine).reset_all_backoff();
+                        }
                         info!(
                             interval_secs = settings.interval_secs,
                             timeout_secs = settings.timeout_secs,
-                            "settings applied to the driver; backoff reset"
+                            min_free_memory_mb = settings.min_free_memory_mb,
+                            backoff_reset,
+                            "settings applied to the driver"
                         );
+                        // A surviving hold is re-evaluated against the new
+                        // floor now rather than at the next tick.
+                        if lock_machine(&self.machine).memory_hold().is_some() {
+                            self.core.triggers.memory_recovered();
+                        }
                         // The deadline moves, the clock is not restarted.
+                        self.publish();
+                        self.events.settings_applied();
                     }
                 }
                 _ = self.core.triggers.notified_manual() => {
@@ -981,6 +999,21 @@ impl Driver {
                         .await
                     {
                         live = Some(cycle);
+                    }
+                }
+                _ = self.core.triggers.notified_memory_recovered() => {
+                    // No busy branch (spec 4.3b): rule 1 precludes a
+                    // decide-time hold while busy, and between a mid-cycle
+                    // hold and the reap `probe_if_free` returns `None`, so
+                    // the arm skips and the sampler's level-triggered wake
+                    // re-fires.
+                    if lock_machine(&self.machine).memory_hold().is_none() {
+                        debug!("memory wake ignored: no hold");
+                    } else {
+                        match self.handle_timer(&settings, &done_tx).await {
+                            Some(cycle) => live = Some(cycle),
+                            None => last_cycle_end = chrono::Utc::now().timestamp_millis(),
+                        }
                     }
                 }
                 _ = self.core.triggers.notified_changed() => {
