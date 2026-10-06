@@ -31,6 +31,7 @@ export function Settings({
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [intervalDraft, setIntervalDraft] = useState<string>("");
   const [timeoutDraft, setTimeoutDraft] = useState<string>("");
+  const [memoryDraft, setMemoryDraft] = useState<string>("");
   const [binaryDraft, setBinaryDraft] = useState<string>("");
   const [newPath, setNewPath] = useState<string>("");
 
@@ -41,6 +42,7 @@ export function Settings({
         setSettings(loaded);
         setIntervalDraft(String(loaded.interval_secs));
         setTimeoutDraft(String(loaded.timeout_secs));
+        setMemoryDraft(String(loaded.min_free_memory_mb));
         setBinaryDraft(loaded.claude_binary);
       } catch (e) {
         onError(errorMessage(e));
@@ -73,6 +75,7 @@ export function Settings({
       setSettings(previous);
       setIntervalDraft(String(previous.interval_secs));
       setTimeoutDraft(String(previous.timeout_secs));
+      setMemoryDraft(String(previous.min_free_memory_mb));
       setBinaryDraft(previous.claude_binary);
       onError(errorMessage(e));
     }
@@ -112,6 +115,18 @@ export function Settings({
   };
   const onTimeoutKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === "Enter") commitTimeout();
+  };
+
+  const commitMemory = (): void => {
+    const n = Number(memoryDraft);
+    if (memoryDraft.trim() === "" || Number.isNaN(n)) {
+      setMemoryDraft(String(settings.min_free_memory_mb));
+      return;
+    }
+    void save({ ...settings, min_free_memory_mb: n });
+  };
+  const onMemoryKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === "Enter") commitMemory();
   };
 
   const commitBinary = (): void => {
@@ -220,6 +235,22 @@ export function Settings({
               onKeyDown={onTimeoutKeyDown}
             />
             <span className="hint">seconds · 5–120</span>
+          </div>
+        </div>
+        <div className="field">
+          <div className="section-label">Memory floor</div>
+          <div className="field-row">
+            <input
+              type="number"
+              min={0}
+              max={65536}
+              className="input input-mono input-num"
+              value={memoryDraft}
+              onChange={(e) => setMemoryDraft(e.target.value)}
+              onBlur={commitMemory}
+              onKeyDown={onMemoryKeyDown}
+            />
+            <span className="hint">MB free commit · 0 = never hold</span>
           </div>
         </div>
       </div>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Pill } from "./pill";
 import { accountCountLabel, accountDotColor, chipFor, countPlacement, sessionNote, summarizeModels, weekNote } from "./present";
+import { formatBytes } from "./system";
 import { THEME } from "./theme";
 import type { AccountRow, Dashboard } from "./types";
 
@@ -74,6 +75,7 @@ describe("chipFor", () => {
   const base: Dashboard = {
     accounts: [row()], gate: "active", busy: false, halted: null, stalled_at: null,
     binary: { path: "C:/claude.exe", source: "local_bin" }, interval_secs: 60,
+    memory_hold: null,
   };
   it("maps each banner kind to a dot and short text", () => {
     expect(chipFor(base)).toEqual({ dot: "live", text: "polling every 60 s" });
@@ -82,6 +84,16 @@ describe("chipFor", () => {
     expect(chipFor({ ...base, stalled_at: 1 })).toEqual({ dot: "warn", text: "stalled, recovered" });
     expect(chipFor({ ...base, binary: { path: null, source: null } })).toEqual({ dot: "warn", text: "no claude binary" });
     expect(chipFor({ ...base, accounts: [row({ enabled: false })] })).toEqual({ dot: "warn", text: "no enabled accounts" });
+  });
+
+  it("shows the free figure on the held chip and never the process count", () => {
+    const held: Dashboard = {
+      ...base,
+      memory_hold: { available_bytes: 512 * 1024 * 1024, floor_bytes: 1536 * 1024 * 1024, since: 0 },
+    };
+    const text = `held · ${formatBytes(512 * 1024 * 1024)} free`;
+    expect(chipFor(held, null)).toEqual({ dot: "warn", text });
+    expect(chipFor(held, 2)).toEqual({ dot: "warn", text });
   });
 
   it("appends the process count to the active and idle chips only", () => {
@@ -100,6 +112,11 @@ describe("chipFor", () => {
 });
 
 describe("countPlacement", () => {
+  it("leaves the count to the system line on a held chip", () => {
+    expect(countPlacement("held", false)).toBe("line");
+    expect(countPlacement("held", true)).toBe("line");
+  });
+
   it("uses the chip only for active and idle at full width", () => {
     expect(countPlacement("active", false)).toBe("chip");
     expect(countPlacement("idle", false)).toBe("chip");
@@ -108,7 +125,7 @@ describe("countPlacement", () => {
   it("falls back to the line in cards and for every other chip kind", () => {
     expect(countPlacement("active", true)).toBe("line");
     expect(countPlacement("idle", true)).toBe("line");
-    for (const kind of ["halted", "stalled", "no_binary", "no_accounts"] as const) {
+    for (const kind of ["halted", "stalled", "no_binary", "no_accounts", "held"] as const) {
       expect(countPlacement(kind, false)).toBe("line");
       expect(countPlacement(kind, true)).toBe("line");
     }

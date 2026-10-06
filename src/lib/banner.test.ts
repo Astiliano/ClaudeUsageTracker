@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bannerFor } from "./banner";
+import { formatBytes } from "./system";
 import type { Account, AccountRow, Dashboard } from "./types";
 
 function account(over: Partial<Account> = {}): Account {
@@ -28,9 +29,13 @@ function dash(over: Partial<Dashboard> = {}): Dashboard {
     stalled_at: null,
     binary: { path: "/home/josh/.local/bin/claude", source: "local_bin" },
     interval_secs: 60,
+    memory_hold: null,
     ...over,
   };
 }
+
+const MIB = 1024 * 1024;
+const HOLD = { available_bytes: 512 * MIB, floor_bytes: 1536 * MIB, since: 0 };
 
 describe("bannerFor", () => {
   it("shows the halt banner ahead of everything else", () => {
@@ -88,5 +93,23 @@ describe("bannerFor", () => {
   it("treats an empty account list as no enabled accounts", () => {
     const b = bannerFor(dash({ accounts: [] }));
     expect(b?.kind).toBe("no_accounts");
+  });
+
+  it("shows the held banner, with both figures, when automatic refreshes are held", () => {
+    const b = bannerFor(dash({ memory_hold: HOLD }));
+    expect(b?.kind).toBe("held");
+    expect(b?.tone).toBe("info");
+    expect(b?.text).toContain(formatBytes(512 * MIB));
+    expect(b?.text).toContain(formatBytes(1536 * MIB));
+  });
+
+  it("holds outrank active and idle but yield to no_accounts and the faults above it", () => {
+    expect(bannerFor(dash({ memory_hold: HOLD, gate: "active" }))?.kind).toBe("held");
+    expect(bannerFor(dash({ memory_hold: HOLD, gate: "idle" }))?.kind).toBe("held");
+    const noAccounts = dash({ memory_hold: HOLD, accounts: [row({ account: account({ enabled: false }) })] });
+    expect(bannerFor(noAccounts)?.kind).toBe("no_accounts");
+    expect(bannerFor(dash({ memory_hold: HOLD, binary: { path: null, source: null } }))?.kind).toBe("no_binary");
+    expect(bannerFor(dash({ memory_hold: HOLD, stalled_at: 1 }))?.kind).toBe("stalled");
+    expect(bannerFor(dash({ memory_hold: HOLD, halted: "guard" }))?.kind).toBe("halted");
   });
 });

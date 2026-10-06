@@ -2,7 +2,7 @@ import { bannerFor } from "./banner";
 import type { BannerKind } from "./banner";
 import { formatLeft } from "./format";
 import type { Pill } from "./pill";
-import { processCountSuffix } from "./system";
+import { formatBytes, processCountSuffix } from "./system";
 import { THEME, THRESHOLDS } from "./theme";
 import type { AccountRow, Dashboard, ModelWindow, Win } from "./types";
 
@@ -61,6 +61,10 @@ export function chipFor(dashboard: Dashboard, claudeProcesses: number | null = n
     case "stalled": return { dot: "warn", text: "stalled, recovered" };
     case "no_binary": return { dot: "warn", text: "no claude binary" };
     case "no_accounts": return { dot: "warn", text: "no enabled accounts" };
+    case "held": return {
+      dot: "warn",
+      text: `held · ${formatBytes(dashboard.memory_hold?.available_bytes ?? 0)} free`,
+    };
     // Only these two chips carry the count, so only these two compute it.
     case "active": return {
       dot: "live",
