@@ -9,6 +9,10 @@ pub const DEFAULT_INTERVAL_SECS: u32 = 60;
 pub const MIN_TIMEOUT_SECS: u32 = 5;
 pub const MAX_TIMEOUT_SECS: u32 = 120;
 pub const DEFAULT_TIMEOUT_SECS: u32 = 30;
+/// Spec 4.6: below this much free commit, automatic refreshes hold.
+/// 0 means never hold.
+pub const DEFAULT_MIN_FREE_MEMORY_MB: u32 = 1536;
+pub const MAX_MIN_FREE_MEMORY_MB: u32 = 65536;
 
 pub const KEY_POLLING_HALTED: &str = "polling_halted";
 
@@ -23,6 +27,7 @@ pub struct UserSettings {
     pub close_to_tray: bool,
     pub launch_at_login: bool,
     pub log_level: String,
+    pub min_free_memory_mb: u32,
 }
 
 /// D5 and spec 6.3/7 clamps. Rejection code is `out_of_range`.
@@ -45,6 +50,12 @@ pub fn validate_settings(s: &UserSettings) -> AppResult<()> {
             s.log_level
         )));
     }
+    if s.min_free_memory_mb > MAX_MIN_FREE_MEMORY_MB {
+        return Err(AppError::OutOfRange(format!(
+            "min_free_memory_mb must be 0..={MAX_MIN_FREE_MEMORY_MB}, got {}",
+            s.min_free_memory_mb
+        )));
+    }
     Ok(())
 }
 
@@ -57,6 +68,15 @@ pub fn polling_relevant_changed(previous: &UserSettings, next: &UserSettings) ->
     previous.interval_secs != next.interval_secs
         || previous.timeout_secs != next.timeout_secs
         || previous.claude_binary != next.claude_binary
+}
+
+/// Spec 4.6: whether the driver must hear about a settings change. That is
+/// every polling-relevant change plus a change of the memory floor, which the
+/// driver reads at decide time but which must not reset backoff by itself
+/// (the driver decides the reset, spec 4.3b).
+pub fn driver_relevant_changed(previous: &UserSettings, next: &UserSettings) -> bool {
+    polling_relevant_changed(previous, next)
+        || previous.min_free_memory_mb != next.min_free_memory_mb
 }
 
 impl Store {
@@ -107,6 +127,8 @@ impl Store {
             log_level: self
                 .get_raw("log_level")?
                 .unwrap_or_else(|| "info".to_string()),
+            min_free_memory_mb: self
+                .get_u32("min_free_memory_mb", DEFAULT_MIN_FREE_MEMORY_MB)?,
         })
     }
 
@@ -118,6 +140,7 @@ impl Store {
         self.set_raw("claude_binary", &s.claude_binary)?;
         self.set_raw("close_to_tray", if s.close_to_tray { "1" } else { "0" })?;
         self.set_raw("log_level", &s.log_level)?;
+        self.set_raw("min_free_memory_mb", &s.min_free_memory_mb.to_string())?;
         Ok(())
     }
 
@@ -157,6 +180,7 @@ mod tests {
             close_to_tray: true,
             launch_at_login: false,
             log_level: "info".to_string(),
+            min_free_memory_mb: DEFAULT_MIN_FREE_MEMORY_MB,
         }
     }
 
@@ -170,6 +194,7 @@ mod tests {
         assert!(s.close_to_tray);
         assert!(!s.launch_at_login);
         assert_eq!(s.log_level, "info");
+        assert_eq!(s.min_free_memory_mb, 1536);
     }
 
     #[test]
@@ -181,6 +206,7 @@ mod tests {
         s.claude_binary = "C:/bin/claude.exe".into();
         s.close_to_tray = false;
         s.log_level = "debug".into();
+        s.min_free_memory_mb = 2048;
         store.save_settings(&s).expect("save");
 
         let back = store.stored_settings().expect("read");
@@ -189,6 +215,7 @@ mod tests {
         assert_eq!(back.claude_binary, "C:/bin/claude.exe");
         assert!(!back.close_to_tray);
         assert_eq!(back.log_level, "debug");
+        assert_eq!(back.min_free_memory_mb, 2048);
     }
 
     #[test]
@@ -340,6 +367,103 @@ mod tests {
         let mut level = base.clone();
         level.log_level = "debug".into();
         assert!(!polling_relevant_changed(&base, &level));
+
+        // The memory floor is a fourth non-polling key. It reaches the driver
+        // through `driver_relevant_changed`, never through this predicate.
+        let mut floor_only = base.clone();
+        floor_only.min_free_memory_mb = 512;
+        assert!(!polling_relevant_changed(&base, &floor_only));
+    }
+
+    #[test]
+    fn the_memory_floor_accepts_0_and_65536_and_rejects_65537() {
+        for v in [0, MAX_MIN_FREE_MEMORY_MB] {
+            let mut s = defaults();
+            s.min_free_memory_mb = v;
+            validate_settings(&s).unwrap_or_else(|e| panic!("{v} must be valid: {e}"));
+        }
+        assert_eq!(MAX_MIN_FREE_MEMORY_MB, 65536);
+        let mut s = defaults();
+        s.min_free_memory_mb = 65537;
+        assert!(matches!(
+            validate_settings(&s),
+            Err(AppError::OutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn an_out_of_range_memory_floor_never_reaches_the_table() {
+        let store = Store::open_in_memory().expect("open");
+        let mut s = defaults();
+        s.min_free_memory_mb = 65537;
+        let err = store.save_settings(&s).expect_err("must reject");
+        assert_eq!(err.code(), "out_of_range");
+        assert_eq!(store.get_raw("min_free_memory_mb").expect("raw"), None);
+        assert_eq!(store.stored_settings().expect("read").min_free_memory_mb, 1536);
+    }
+
+    #[test]
+    fn the_memory_floor_reaches_the_driver_but_is_not_polling_relevant() {
+        let base = defaults();
+        let mut floor = base.clone();
+        floor.min_free_memory_mb = 512;
+        assert!(driver_relevant_changed(&base, &floor));
+        assert!(!polling_relevant_changed(&base, &floor));
+
+        let mut interval = base.clone();
+        interval.interval_secs = 120;
+        assert!(driver_relevant_changed(&base, &interval));
+
+        assert!(!driver_relevant_changed(&defaults(), &defaults()));
+    }
+
+    /// Migration: a database written by a version that predates the key has
+    /// no `min_free_memory_mb` row. It must load with every old value intact
+    /// and the floor at the documented default, with no schema change.
+    #[test]
+    fn a_database_from_before_the_floor_loads_unchanged_with_the_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("usage.sqlite");
+        {
+            let store = Store::open(&path).expect("open");
+            store.set_raw("interval_secs", "120").expect("set");
+            store.set_raw("timeout_secs", "45").expect("set");
+            store.set_raw("claude_binary", "C:/bin/claude.exe").expect("set");
+            store.set_raw("close_to_tray", "0").expect("set");
+            store.set_raw("log_level", "debug").expect("set");
+            assert_eq!(store.get_raw("min_free_memory_mb").expect("raw"), None);
+        }
+        let store = Store::open(&path).expect("reopen");
+        let s = store.stored_settings().expect("read");
+        assert_eq!(s.interval_secs, 120);
+        assert_eq!(s.timeout_secs, 45);
+        assert_eq!(s.claude_binary, "C:/bin/claude.exe");
+        assert!(!s.close_to_tray);
+        assert_eq!(s.log_level, "debug");
+        assert_eq!(s.min_free_memory_mb, DEFAULT_MIN_FREE_MEMORY_MB);
+        assert_eq!(s.min_free_memory_mb, 1536);
+        // Reading never writes the default back.
+        assert_eq!(store.get_raw("min_free_memory_mb").expect("raw"), None);
+    }
+
+    #[test]
+    fn saving_over_a_pre_floor_database_adds_the_floor_and_keeps_the_rest() {
+        let store = Store::open_in_memory().expect("open");
+        store.set_raw("interval_secs", "90").expect("set");
+        let mut s = store.stored_settings().expect("read");
+        assert_eq!(s.min_free_memory_mb, 1536);
+        s.min_free_memory_mb = 0;
+        store.save_settings(&s).expect("save");
+        let back = store.stored_settings().expect("read");
+        assert_eq!(back.min_free_memory_mb, 0, "0 (never hold) is a stored value, not a missing one");
+        assert_eq!(back.interval_secs, 90);
+    }
+
+    #[test]
+    fn an_unparseable_stored_floor_reads_the_default() {
+        let store = Store::open_in_memory().expect("open");
+        store.set_raw("min_free_memory_mb", "lots").expect("set");
+        assert_eq!(store.stored_settings().expect("read").min_free_memory_mb, 1536);
     }
 
     #[test]

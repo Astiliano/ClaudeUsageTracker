@@ -15,6 +15,7 @@ pub fn defaults() -> UserSettings {
         close_to_tray: true,
         launch_at_login: false,
         log_level: "info".to_string(),
+        min_free_memory_mb: 1536,
     }
 }
 

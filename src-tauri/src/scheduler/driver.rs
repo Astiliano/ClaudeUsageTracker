@@ -587,6 +587,7 @@ impl Driver {
                     close_to_tray: true,
                     launch_at_login: false,
                     log_level: "info".to_string(),
+                    min_free_memory_mb: crate::store::settings::DEFAULT_MIN_FREE_MEMORY_MB,
                 }
             }
         }
@@ -1084,6 +1085,7 @@ mod tests {
             close_to_tray: true,
             launch_at_login: false,
             log_level: "info".to_string(),
+            min_free_memory_mb: 1536,
         }
     }
 
