@@ -50,4 +50,19 @@ describe("styles.css reads the shell variables (D9)", () => {
   it(".panel border is the panel-border variable", () => {
     expect(decl(rule(".panel"), "border")).toContain("var(--panel-border)");
   });
+  it(".panel has no border-radius (flat look)", () => {
+    expect(decl(rule(".panel"), "border-radius")).toBe("0");
+  });
+  it(".card has no border-radius (flat look)", () => {
+    expect(decl(rule(".card"), "border-radius")).toBe("0");
+  });
+  it(".chart has no border-radius (flat look)", () => {
+    expect(decl(rule(".chart"), "border-radius")).toBe("0");
+  });
+  it(".banner has no border-radius (flat look)", () => {
+    expect(decl(rule(".banner"), "border-radius")).toBe("0");
+  });
+  it(".modal-body has no border-radius (flat look)", () => {
+    expect(decl(rule(".modal-body"), "border-radius")).toBe("0");
+  });
 });

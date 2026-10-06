@@ -91,14 +91,14 @@ input, select, button { font-family: inherit; }
 /* ---- banner ---- */
 .banner {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 14px; border-radius: 10px;
+  padding: 10px 14px; border-radius: 0; border: 1px solid var(--line);
   font-family: var(--mono); font-size: 12px;
 }
 .banner-error { background: rgba(224, 112, 95, 0.12); border: 1px solid var(--crit); color: var(--crit); }
 .banner-warn { background: rgba(216, 169, 79, 0.12); border: 1px solid var(--warn); color: var(--warn); }
 
 /* ---- table / panel ---- */
-.panel { border: var(--panel-border) solid var(--line); border-radius: 14px; background: var(--panel); overflow: hidden; }
+.panel { border: var(--panel-border) solid var(--line); border-radius: 0; background: var(--panel); overflow: hidden; }
 .thead-wrap { position: relative; }
 .thead {
   display: grid; gap: var(--grid-gap); align-items: center;
@@ -198,7 +198,7 @@ button.pill { cursor: pointer; background: transparent; }
 .cards { display: flex; flex-direction: column; gap: 10px; }
 .card {
   display: flex; flex-direction: column; gap: 10px;
-  padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  padding: 8px; border: 1px solid var(--line); border-radius: 0; background: var(--panel);
 }
 .card-rings { display: flex; flex-wrap: wrap; gap: 10px 14px; }
 .ring { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 64px; }
@@ -211,10 +211,10 @@ button.pill { cursor: pointer; background: transparent; }
 
 /* ---- drawers ---- */
 .drawer {
-  padding: 16px 18px 18px 56px;
+  padding: 6px 8px 8px 8px;
   background: var(--drawer);
   border-top: 1px solid var(--line-soft);
-  display: flex; flex-direction: column; gap: 10px;
+  display: flex; flex-direction: column; gap: 6px;
 }
 .drawer-head {
   font-family: var(--mono); font-size: 11px;
@@ -223,11 +223,11 @@ button.pill { cursor: pointer; background: transparent; }
 .drawer-label { text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); }
 .drawer-stats { display: flex; gap: 14px; color: var(--muted); }
 .chart {
-  position: relative; height: 148px; border: 1px solid var(--line-head); border-radius: 10px;
-  background: var(--chart); padding: 14px 16px;
+  position: relative; height: 148px; border: 1px solid var(--line-head); border-radius: 0;
+  background: var(--chart); padding: 6px 8px;
 }
 .chart svg { width: 100%; height: 100%; overflow: visible; }
-.chart-dots { position: absolute; inset: 14px 16px; pointer-events: auto; }
+.chart-dots { position: absolute; inset: 6px 8px; pointer-events: auto; }
 .dot {
   position: absolute; width: 8px; height: 8px; border-radius: 50%;
   background: #e9eef3; border: 2px solid var(--chart);
@@ -314,7 +314,7 @@ button.pill { cursor: pointer; background: transparent; }
 /* ---- modal + toast ---- */
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; z-index: 50; }
 .modal-body {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 0;
   padding: 20px 22px; max-width: 720px; max-height: 80vh; overflow: auto;
 }
 .modal-body pre {
