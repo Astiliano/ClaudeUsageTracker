@@ -56,10 +56,10 @@ export function HistoryDrawer({ accountId, latest, cycle, zoom, rowRef, onError,
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(false);
   const [tip, setTip] = useState<Tip | null>(null);
-  // Only the most recently started request may write `result`.
   const drawerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   useChartHeight(drawerRef, chartRef, rowRef, zoom);
+  // Only the most recently started request may write `result`.
   const seq = useRef(0);
   const onErrorRef = useRef(onError);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);

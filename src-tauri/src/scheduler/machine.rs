@@ -378,9 +378,11 @@ impl Machine {
     /// Pure in its arguments and the machine's fields; performs no I/O.
     /// Runs the rules, then applies the hold's lifetime to the result in this
     /// one place, so no early return inside the rules can miss it (spec 4.2):
-    /// any `Run` clears the hold; a `Timer` skip other than `LowMemory` clears
-    /// it (that decision is the current verdict and memory no longer explains
-    /// it); every other skip leaves it.
+    /// a `Run` that polls every enabled account clears the hold, but an
+    /// `AccountChanged` Run polls only a subset, so the held full refresh is
+    /// still owed and the hold stays; a `Timer` skip other than `LowMemory`
+    /// clears it (that decision is the current verdict and memory no longer
+    /// explains it); every other skip leaves it.
     pub fn decide(&mut self, trigger: Trigger, facts: &Facts<'_>) -> Decision {
         let timer = match &trigger {
             Trigger::Timer => true,
@@ -388,9 +390,14 @@ impl Machine {
                 false
             }
         };
+        let subset = matches!(trigger, Trigger::AccountChanged(_));
         let decision = self.decide_rules(trigger, facts);
         match &decision {
-            Decision::Run { .. } => self.hold = None,
+            Decision::Run { .. } => {
+                if !subset {
+                    self.hold = None;
+                }
+            }
             Decision::Skip(SkipReason::LowMemory) => {}
             Decision::Skip(
                 SkipReason::Halted
@@ -1499,6 +1506,20 @@ mod tests {
         );
         assert!(matches!(d, Decision::Run { .. }), "got {d:?}");
         assert_eq!(m.memory_hold(), None);
+    }
+
+    #[test]
+    fn an_account_changed_run_keeps_the_hold() {
+        // A subset poll does not discharge the held full refresh: the hold
+        // (and its `since`) survive so the sampler's recovery wake still
+        // fires and the banner does not flicker.
+        let mut m = held_machine();
+        let d = m.decide(
+            Trigger::AccountChanged(ids(&["a"])),
+            &mem_facts(Some(true), Some(LOW), &accounts(), NOW + 1000),
+        );
+        assert_eq!(run_accounts(&d), ids(&["a"]), "got {d:?}");
+        assert_eq!(m.memory_hold(), Some(the_hold(NOW)));
     }
 
     #[test]

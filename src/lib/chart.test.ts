@@ -19,6 +19,15 @@ describe("chartHeightPx", () => {
       Math.floor(900 / 1.22 - 41 - 105 / 1.22),
     );
   });
+  it("fills a 1600x900 window at zoom 1.22 (hand-computed 610, not the formula)", () => {
+    expect(chartHeightPx({ viewportPx: 900, chromePx: 104.92, zoom: 1.22 })).toBe(610);
+  });
+  it("fills a 1600x900 window at zoom 0.92 (hand-computed 851)", () => {
+    expect(chartHeightPx({ viewportPx: 900, chromePx: 79.12, zoom: 0.92 })).toBe(851);
+  });
+  it("floors a 700x240 window at zoom 1.22 to CHART_MIN_PX (fit 69.7)", () => {
+    expect(chartHeightPx({ viewportPx: 240, chromePx: 104.92, zoom: 1.22 })).toBe(CHART_MIN_PX);
+  });
   it("exposes the spec bounds", () => {
     expect(CHART_MIN_PX).toBe(72);
     expect(CHART_MAX_PX).toBe(1200);

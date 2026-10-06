@@ -14,6 +14,8 @@ export type Layout = "full" | "narrow" | "cards";
 export const APP_GUTTER = 6;
 /** `.row-grid` height. */
 export const ROW_HEIGHT = 40;
+/** `.row` bottom border width (chartHeightPx adds it to ROW_HEIGHT). */
+export const ROW_BORDER = 1;
 /** `.row-grid` and `.thead` horizontal padding. */
 export const ROW_PAD_X = 8;
 /** `.panel` border width. */
@@ -48,6 +50,7 @@ export function shellVars(): Record<string, string> {
   return {
     "--gutter": `${APP_GUTTER}px`,
     "--row-h": `${ROW_HEIGHT}px`,
+    "--row-border": `${ROW_BORDER}px`,
     "--row-pad-x": `${ROW_PAD_X}px`,
     "--grid-gap": `${GRID_GAP}px`,
     "--panel-border": `${PANEL_BORDER}px`,

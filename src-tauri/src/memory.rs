@@ -39,12 +39,9 @@ pub fn available_commit_bytes() -> Option<u64> {
         K32GetPerformanceInfo, PERFORMANCE_INFORMATION,
     };
 
-    // SAFETY: PERFORMANCE_INFORMATION is plain data of integers, for which
-    // the all-zero bit pattern is a valid value.
-    let mut pi: PERFORMANCE_INFORMATION = unsafe { std::mem::zeroed() };
     let cb = std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32;
-    pi.cb = cb;
-    // SAFETY: `pi` is a live, zeroed out-param and `cb` is its exact size.
+    let mut pi = PERFORMANCE_INFORMATION { cb, ..Default::default() };
+    // SAFETY: `pi` is a live, initialised out-param and `cb` is its exact size.
     let ok = unsafe { K32GetPerformanceInfo(&mut pi, cb) };
     if ok == 0 {
         return None;
@@ -103,17 +100,14 @@ pub fn process_peak(handle: std::os::windows::io::RawHandle) -> Option<ChildPeak
         K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     };
 
-    // SAFETY: PROCESS_MEMORY_COUNTERS is plain data of integers, for which
-    // the all-zero bit pattern is a valid value.
-    let mut c: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
     let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    c.cb = cb;
+    let mut c = PROCESS_MEMORY_COUNTERS { cb, ..Default::default() };
     // A process handle is an opaque kernel id that this function never
     // dereferences: an invalid one makes the call fail with BOOL 0. It
     // travels as an integer so the safe signature does not trip
     // clippy::not_unsafe_ptr_arg_deref.
     let handle = handle as usize as HANDLE;
-    // SAFETY: `c` is a live, zeroed out-param and `cb` is its exact size.
+    // SAFETY: `c` is a live, initialised out-param and `cb` is its exact size.
     // The handle is only looked up by the kernel; a stale or invalid value
     // returns 0 (mapped to None below), never memory unsafety.
     let ok = unsafe { K32GetProcessMemoryInfo(handle, &mut c, cb) };
@@ -280,6 +274,14 @@ mod tests {
         let handle = unsafe { GetCurrentProcess() } as RawHandle;
         let p = process_peak(handle).expect("K32GetProcessMemoryInfo should succeed");
         assert!(p.working_set_bytes > 0 && p.commit_bytes > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_peak_of_a_null_handle_is_none() {
+        // K32GetProcessMemoryInfo fails with ERROR_INVALID_HANDLE (BOOL 0);
+        // absent must not turn into a zero reading.
+        assert_eq!(process_peak(std::ptr::null_mut()), None);
     }
 
     #[cfg(not(windows))]

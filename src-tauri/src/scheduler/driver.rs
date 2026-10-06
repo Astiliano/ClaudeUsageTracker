@@ -853,6 +853,19 @@ impl Driver {
         }
     }
 
+    /// The figure for a release line. An automatic trigger passes the reading
+    /// it decided on, and `None` there is a lost reading, which stays omitted.
+    /// A bypass trigger carries no reading into `decide`, so one direct read
+    /// is taken for the log line only: not through `read_memory`, so the
+    /// reading-lost flag stays untouched (spec 4.3).
+    fn release_figure(&self, trigger: &Trigger, available: Option<u64>) -> Option<u64> {
+        if trigger.is_automatic() {
+            available
+        } else {
+            self.memory.available_commit_bytes()
+        }
+    }
+
     /// Logs and announces a hold transition. Runs after `publish`, so the
     /// refetch the event triggers sees the new hold (spec 4.3).
     fn log_hold_change(
@@ -877,7 +890,7 @@ impl Driver {
                 floor_bytes = floor,
                 "memory hold"
             ),
-            (HoldChange::Released, Some(prior), _) => match available {
+            (HoldChange::Released, Some(prior), _) => match self.release_figure(trigger, available) {
                 Some(figure) => info!(
                     available_bytes = figure,
                     floor_bytes = floor,
@@ -1304,6 +1317,36 @@ mod tests {
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
         )
+    }
+
+    fn prior_hold() -> MemoryHold {
+        MemoryHold { available_bytes: 1, floor_bytes: 2, since: 1_000 }
+    }
+
+    #[tokio::test]
+    async fn a_bypass_release_logs_a_measured_figure() {
+        // A bypass trigger carries no reading into `decide`, so the release
+        // line takes one direct read: AmpleMemory answers u64::MAX.
+        let (tmp, core, _id) = test_core();
+        let driver = test_driver(core, tmp.path());
+        let log = crate::test_log::captured(|| {
+            driver.log_hold_change(&Trigger::Manual, Some(prior_hold()), None, None, 2, 5_000)
+        });
+        assert!(log.contains("memory hold released"), "{log}");
+        assert!(log.contains("available_bytes=18446744073709551615"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn an_automatic_release_without_a_reading_logs_no_figure() {
+        // A Timer that reached `decide` with `None` is a lost reading: the
+        // figure stays omitted, and no second read may be spent on it.
+        let (tmp, core, _id) = test_core();
+        let driver = test_driver(core, tmp.path());
+        let log = crate::test_log::captured(|| {
+            driver.log_hold_change(&Trigger::Timer, Some(prior_hold()), None, None, 2, 5_000)
+        });
+        assert!(log.contains("memory hold released"), "{log}");
+        assert!(!log.contains("available_bytes"), "{log}");
     }
 
     #[tokio::test]

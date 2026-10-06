@@ -338,6 +338,7 @@ pub async fn run_usage(
 
     let status = match waited {
         None => {
+            peak = sample_peak(&child, peak);
             let _ = child.kill().await;
             let _ = child.wait().await;
             pid_slot.store(0, Ordering::SeqCst);
@@ -350,6 +351,9 @@ pub async fn run_usage(
             );
         }
         Some(Err(())) => {
+            // The child is still unreaped here, so its handle is readable: take
+            // the last peak before the kill rather than the last tick's.
+            peak = sample_peak(&child, peak);
             let _ = child.kill().await;
             let _ = child.wait().await;
             pid_slot.store(0, Ordering::SeqCst);

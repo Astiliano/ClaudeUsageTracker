@@ -669,16 +669,20 @@ async fn wait_for_cycles(h: &Harness, want: usize) {
     }
 }
 
-/// Blocks until the published status carries a memory hold.
+/// Blocks until the published status carries a memory hold and the hold's
+/// event has been emitted. The driver publishes first and emits after, so the
+/// status alone can be seen in the gap and the event count would still be 0.
 async fn wait_for_hold(h: &Harness) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if lock_status(&h.core.status).memory_hold.is_some() {
+        if lock_status(&h.core.status).memory_hold.is_some()
+            && h.events.memory_holds.load(Ordering::SeqCst) >= 1
+        {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the driver never published a memory hold"
+            "the driver never published a memory hold and emitted its event"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -717,6 +721,38 @@ async fn a_cycle_reports_a_peak() {
     let peaks = h.events.peaks.lock().expect("lock").clone();
     assert_eq!(peaks.len(), 1, "{peaks:?}");
     assert!(peaks[0].is_some(), "the cycle must carry its child's peak: {peaks:?}");
+}
+
+/// Two accounts, the first child holds 200 MiB and the second holds none.
+/// The cycle's reported peak must be the maximum over its polls; a "last poll
+/// wins" fold would report the light second child.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cycle_reports_the_maximum_peak_of_its_polls() {
+    let mut env = EnvGuard::new().await;
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "2");
+    env.set("FAKE_CLAUDE_BALLAST_MB", "200");
+    env.set("FAKE_CLAUDE_BALLAST_DIR_CONTAINS", "ballast-heavy");
+    let h = harness(false);
+    add_account(&h, "ballast-heavy");
+    add_account(&h, "light");
+
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+
+    wait_for_cycles(&h, 1).await;
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let peaks = h.events.peaks.lock().expect("lock").clone();
+    assert_eq!(peaks.len(), 1, "{peaks:?}");
+    let peak = peaks[0].expect("the cycle must carry its children's peak");
+    let ballast = 200 * 1_048_576;
+    assert!(
+        peak.working_set_bytes >= ballast && peak.commit_bytes >= ballast,
+        "the folded maximum must include the heavy first child: {peak:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

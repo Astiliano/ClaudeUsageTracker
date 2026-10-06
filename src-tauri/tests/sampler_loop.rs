@@ -16,7 +16,7 @@ use cut_core::memory::{floor_bytes, MIB};
 use cut_core::scheduler::driver::EventSink;
 use cut_core::scheduler::machine::MemoryHold;
 use cut_core::store::settings::UserSettings;
-use cut_core::system::run_sampler;
+use cut_core::system::{run_sampler, VISIBLE_INTERVAL};
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -160,6 +160,39 @@ async fn a_kick_samples_at_once_while_hidden() {
     // Hidden, the next tick is 30 s away: only the kick can explain a
     // second sample inside 3 s.
     wait_for_count(&sink, 2, Duration::from_secs(3)).await;
+    stop(shutdown, handle).await;
+}
+
+/// Window state selects the cadence in `run_sampler` itself (system.rs reads
+/// `window_open` into `sampler_step`): the pure functions are unit-tested, this
+/// pins the wiring. Hidden, nothing may sample for longer than the 5 s open
+/// interval; the open control proves the same wait does produce a sample.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hidden_sampler_waits_longer_than_the_open_interval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (core, _rx) = test_core(dir.path());
+    let sink = CountingSink::new();
+    let memory = Arc::new(FakeMemory::new());
+    core.window_open.store(false, Ordering::SeqCst);
+
+    let (shutdown, handle) = spawn_sampler(&core, &sink, &memory);
+    wait_for_count(&sink, 1, Duration::from_secs(10)).await;
+    sleep(VISIBLE_INTERVAL + Duration::from_millis(500)).await;
+    assert_eq!(sink.count(), 1, "a hidden sampler must not sample at the open cadence");
+    stop(shutdown, handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_sampler_samples_again_within_the_open_interval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (core, _rx) = test_core(dir.path());
+    let sink = CountingSink::new();
+    let memory = Arc::new(FakeMemory::new());
+    core.window_open.store(true, Ordering::SeqCst);
+
+    let (shutdown, handle) = spawn_sampler(&core, &sink, &memory);
+    wait_for_count(&sink, 1, Duration::from_secs(10)).await;
+    wait_for_count(&sink, 2, VISIBLE_INTERVAL + Duration::from_millis(1500)).await;
     stop(shutdown, handle).await;
 }
 

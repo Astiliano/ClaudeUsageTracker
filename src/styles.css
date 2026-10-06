@@ -129,7 +129,7 @@ input, select, button { font-family: inherit; }
 .row {
   position: relative;
   background: var(--panel);
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: var(--row-border) solid var(--line-soft);
   transition: transform 150ms ease, box-shadow 150ms ease;
 }
 .row-lifted {

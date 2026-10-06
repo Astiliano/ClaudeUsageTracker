@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_ORDER, gridMinWidth, visibleColumns } from "./columns";
 import {
   BREAKPOINTS,
+  ROW_BORDER,
   ROW_HEIGHT,
   SHELL_PADDING,
   autoHiddenColumns,
@@ -42,6 +43,9 @@ describe("the density constants", () => {
   it("ROW_HEIGHT is 40", () => {
     expect(ROW_HEIGHT).toBe(40);
   });
+  it("ROW_BORDER is 1", () => {
+    expect(ROW_BORDER).toBe(1);
+  });
   it("the table fits exactly at each computed breakpoint", () => {
     expect(gridMinWidth(DEFAULT_ORDER) + SHELL_PADDING).toBe(BREAKPOINTS.narrow);
     const narrow = visibleColumns(DEFAULT_ORDER, autoHiddenColumns("narrow"));
@@ -54,6 +58,7 @@ describe("shellVars and shellStyle", () => {
     expect(shellVars()).toEqual({
       "--gutter": "6px",
       "--row-h": "40px",
+      "--row-border": "1px",
       "--row-pad-x": "8px",
       "--grid-gap": "8px",
       "--panel-border": "1px",

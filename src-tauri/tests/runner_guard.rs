@@ -219,6 +219,59 @@ async fn a_finished_run_reports_a_peak() {
     assert!(p.commit_bytes > 0, "{p:?}");
 }
 
+/// The first sampling tick and the deadline (or a cancel) are both ready on
+/// the first poll when the limit is already spent, and `select!` picks at
+/// random. A read taken just before the kill makes the outcome deterministic;
+/// without it roughly half the runs report no peak. Eight runs make a
+/// regression fail with probability 1 - 2^-8 per arm.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_timeout_reads_the_peak_before_the_kill() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for i in 0..8 {
+        let r = run_with(
+            "slow",
+            &[("FAKE_CLAUDE_SLEEP_SECS", "60")],
+            Duration::ZERO,
+            tmp.path(),
+            tmp.path(),
+        )
+        .await;
+        assert!(matches!(r.outcome, PollOutcome::Timeout(_)), "run {i}: {:?}", r.outcome);
+        assert!(r.peak.is_some(), "run {i}: a timeout must carry the peak read before the kill");
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_cancel_reads_the_peak_before_the_kill() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut env = EnvGuard::acquire();
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "60");
+    for i in 0..8 {
+        let pid = AtomicU32::new(0);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let r = run_usage(
+            &fake(),
+            tmp.path(),
+            tmp.path(),
+            Duration::from_secs(60),
+            now(),
+            &pid,
+            &cancel,
+            false,
+        )
+        .await;
+        match &r.outcome {
+            PollOutcome::SpawnError(m) => assert!(m.contains("cancelled"), "run {i}: {m}"),
+            other => panic!("run {i}: expected a cancelled SpawnError, got {other:?}"),
+        }
+        assert!(r.peak.is_some(), "run {i}: a cancel must carry the peak read before the kill");
+    }
+}
+
 #[cfg(not(windows))]
 #[tokio::test]
 async fn a_finished_run_reports_no_peak() {

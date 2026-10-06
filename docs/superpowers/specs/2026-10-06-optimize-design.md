@@ -305,8 +305,11 @@ Rule 5b runs after rule 5 (backoff) and before rule 6:
 
 Hold lifetime:
 
-- Any `Run` clears `hold`, whatever the trigger. Manual still refreshes
-  while held.
+- Any `Run` that polls every enabled account (Timer, Presence, Manual,
+  Startup) clears `hold`. Manual still refreshes while held. An
+  `AccountChanged` `Run` polls only a subset, so it leaves `hold` untouched:
+  the held full refresh is still owed, and the sampler's recovery wake must
+  still reach it.
 - A `Timer` decision that ends in any skip other than `LowMemory` clears it
   too, early return or not (`Halted`, `Busy`, `NoBinary`,
   `NoEnabledAccounts`, `GateIdle`, `AllBackedOff`). That decision is the

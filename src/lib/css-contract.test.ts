@@ -18,7 +18,7 @@ function decl(body: string, prop: string): string | undefined {
 }
 
 /** Every custom property the assertions below expect the stylesheet to read. */
-const ASSERTED_VARS = ["--gutter", "--row-h", "--row-pad-x", "--grid-gap", "--panel-border", "--ring-min", "--ring-max"] as const;
+const ASSERTED_VARS = ["--gutter", "--row-h", "--row-border", "--row-pad-x", "--grid-gap", "--panel-border", "--ring-min", "--ring-max"] as const;
 
 describe("styles.css reads the shell variables (D9)", () => {
   it("the stylesheet was read", () => {
@@ -41,6 +41,9 @@ describe("styles.css reads the shell variables (D9)", () => {
     expect(decl(body, "height")).toBe("var(--row-h)");
     expect(decl(body, "padding")).toBe("0 var(--row-pad-x)");
     expect(decl(body, "gap")).toBe("var(--grid-gap)");
+  });
+  it(".row bottom border is the row-border variable", () => {
+    expect(decl(rule(".row"), "border-bottom")).toContain("var(--row-border)");
   });
   it(".thead lines its tracks up with the rows", () => {
     const body = rule(".thead");

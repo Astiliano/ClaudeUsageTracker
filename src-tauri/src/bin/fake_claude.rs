@@ -9,6 +9,20 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Touched ballast, so a test can give one account's child a known memory
+/// peak. Held only when `CLAUDE_CONFIG_DIR` (set by the runner per account)
+/// contains `FAKE_CLAUDE_BALLAST_DIR_CONTAINS`; the size is
+/// `FAKE_CLAUDE_BALLAST_MB`. A non-zero fill makes the pages resident.
+fn ballast() -> Vec<u8> {
+    let mb: usize = env_or("FAKE_CLAUDE_BALLAST_MB", "0").parse().unwrap_or(0);
+    let needle = env_or("FAKE_CLAUDE_BALLAST_DIR_CONTAINS", "");
+    let dir = env_or("CLAUDE_CONFIG_DIR", "");
+    if mb == 0 || needle.is_empty() || !dir.contains(&needle) {
+        return Vec::new();
+    }
+    vec![1u8; mb * 1024 * 1024]
+}
+
 /// Minimal JSON string escaping; enough for paths, env values and argv.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
@@ -78,7 +92,9 @@ fn main() {
         }
         "slow" => {
             let secs: u64 = env_or("FAKE_CLAUDE_SLEEP_SECS", "60").parse().unwrap_or(60);
+            let held = ballast();
             std::thread::sleep(std::time::Duration::from_secs(secs));
+            std::hint::black_box(&held);
             print_line(&usage_envelope(""));
         }
         other => {
