@@ -1,3 +1,4 @@
+import { formatBytes } from "./system";
 import type { Dashboard } from "./types";
 
 export type BannerKind =
@@ -5,6 +6,7 @@ export type BannerKind =
   | "stalled"
   | "no_binary"
   | "no_accounts"
+  | "held"
   | "active"
   | "idle";
 
@@ -61,6 +63,15 @@ export function bannerFor(dashboard: Dashboard): Banner | null {
       kind: "no_accounts",
       tone: "warn",
       text: "Polling paused: no enabled accounts",
+    };
+  }
+
+  if (dashboard.memory_hold !== null) {
+    const { available_bytes, floor_bytes } = dashboard.memory_hold;
+    return {
+      kind: "held",
+      tone: "info",
+      text: `Holding refresh: ${formatBytes(available_bytes)} free, floor ${formatBytes(floor_bytes)}`,
     };
   }
 

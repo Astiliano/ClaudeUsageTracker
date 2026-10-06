@@ -164,9 +164,28 @@ pub fn icon_rgba(level: Level, size: u32) -> Vec<u8> {
     buf
 }
 
-/// Window close hides to the tray unless the user turned that off.
-pub fn should_hide_on_close(close_to_tray: bool) -> bool {
-    close_to_tray
+/// What the `ExitRequested` handler does with an exit request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitAction {
+    /// The shutdown sequence already finished; let the exit through.
+    Allow,
+    /// The last window is gone and the app lives in the tray: stay running.
+    KeepRunning,
+    /// Run the shutdown sequence (Quit, or a close with close-to-tray off).
+    Shutdown,
+}
+
+/// Decides an exit request. `code` is `None` when the last window went away
+/// and `Some(n)` for `AppHandle::exit(n)`; `approved` is set once the
+/// shutdown sequence has finished.
+pub fn exit_action(code: Option<i32>, close_to_tray: bool, approved: bool) -> ExitAction {
+    if approved {
+        ExitAction::Allow
+    } else if code.is_none() && close_to_tray {
+        ExitAction::KeepRunning
+    } else {
+        ExitAction::Shutdown
+    }
 }
 
 use std::collections::HashMap;
@@ -257,7 +276,26 @@ pub async fn apply_tray(app: &tauri::AppHandle, core: &Core) {
 use serde::Serialize;
 use tauri::Emitter;
 
+use crate::memory::ChildPeak;
 use crate::scheduler::driver::EventSink;
+
+pub const EVT_USAGE_UPDATED: &str = "usage:updated";
+pub const EVT_CYCLE_FINISHED: &str = "cycle:finished";
+pub const EVT_GATE_CHANGED: &str = "gate:changed";
+pub const EVT_POLLER_STALLED: &str = "poller:stalled";
+pub const EVT_SYSTEM_SAMPLED: &str = "system:sampled";
+pub const EVT_MEMORY_HOLD: &str = "memory:hold";
+pub const EVT_SETTINGS_APPLIED: &str = "settings:applied";
+
+pub const FRONTEND_EVENT_NAMES: [&str; 7] = [
+    EVT_USAGE_UPDATED,
+    EVT_CYCLE_FINISHED,
+    EVT_GATE_CHANGED,
+    EVT_POLLER_STALLED,
+    EVT_SYSTEM_SAMPLED,
+    EVT_MEMORY_HOLD,
+    EVT_SETTINGS_APPLIED,
+];
 
 #[derive(Serialize, Clone)]
 struct AccountEvent<'a> {
@@ -290,18 +328,18 @@ impl TauriEvents {
 
 impl EventSink for TauriEvents {
     fn usage_updated(&self, account_id: &str) {
-        let _ = self.app.emit("usage:updated", AccountEvent { account_id });
+        let _ = self.app.emit(EVT_USAGE_UPDATED, AccountEvent { account_id });
     }
-    fn cycle_finished(&self) {
-        let _ = self.app.emit("cycle:finished", ());
+    fn cycle_finished(&self, _peak: Option<ChildPeak>) {
+        let _ = self.app.emit(EVT_CYCLE_FINISHED, ());
     }
     fn gate_changed(&self, gate: &str) {
-        let _ = self.app.emit("gate:changed", GateEvent { gate });
+        let _ = self.app.emit(EVT_GATE_CHANGED, GateEvent { gate });
     }
     fn poller_stalled(&self, at: i64, cycle_age_ms: u64) {
         let _ = self
             .app
-            .emit("poller:stalled", StalledEvent { at, cycle_age_ms });
+            .emit(EVT_POLLER_STALLED, StalledEvent { at, cycle_age_ms });
     }
     fn refresh_tray(&self) {
         // `EventSink` is a plain (non-async) trait so it stays object-safe
@@ -316,7 +354,13 @@ impl EventSink for TauriEvents {
         });
     }
     fn system_sampled(&self) {
-        let _ = self.app.emit("system:sampled", ());
+        let _ = self.app.emit(EVT_SYSTEM_SAMPLED, ());
+    }
+    fn memory_hold_changed(&self) {
+        let _ = self.app.emit(EVT_MEMORY_HOLD, ());
+    }
+    fn settings_applied(&self) {
+        let _ = self.app.emit(EVT_SETTINGS_APPLIED, ());
     }
 }
 
@@ -553,9 +597,25 @@ mod tests {
     }
 
     #[test]
-    fn close_to_tray_decides_whether_a_window_close_hides_or_quits() {
-        assert!(should_hide_on_close(true));
-        assert!(!should_hide_on_close(false));
+    fn exit_action_allows_keeps_running_or_shuts_down() {
+        // (code, close_to_tray, approved, expected)
+        let table = [
+            (None, false, false, ExitAction::Shutdown),
+            (None, true, false, ExitAction::KeepRunning),
+            (Some(0), false, false, ExitAction::Shutdown),
+            (Some(0), true, false, ExitAction::Shutdown),
+            (None, false, true, ExitAction::Allow),
+            (None, true, true, ExitAction::Allow),
+            (Some(0), false, true, ExitAction::Allow),
+            (Some(0), true, true, ExitAction::Allow),
+        ];
+        for (code, close_to_tray, approved, expected) in table {
+            assert_eq!(
+                exit_action(code, close_to_tray, approved),
+                expected,
+                "code={code:?} close_to_tray={close_to_tray} approved={approved}"
+            );
+        }
     }
 
     #[test]
@@ -579,5 +639,13 @@ mod tests {
     #[test]
     fn no_halt_value_is_not_halted() {
         assert!(!halted_fail_closed(Ok(None)));
+    }
+
+    #[test]
+    fn every_frontend_event_name_is_listed_in_events_ts() {
+        let ts = include_str!("../../src/lib/events.ts");
+        for name in FRONTEND_EVENT_NAMES {
+            assert!(ts.contains(&format!("\"{name}\"")), "{name} missing from src/lib/events.ts");
+        }
     }
 }

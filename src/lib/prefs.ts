@@ -1,8 +1,7 @@
 import { type ColumnKey, DEFAULT_ORDER, normalizeColumnOrder, normalizeHiddenColumns } from "./columns";
-import { type FontKey, type SizeKey, isFontKey, isSizeKey } from "./theme";
+import { type SizeKey, isSizeKey } from "./theme";
 
 export interface Prefs {
-  font: FontKey;
   size: SizeKey;
   columnOrder: ColumnKey[];
   /** Columns the user hid in Settings; "account" is never in here. */
@@ -13,7 +12,6 @@ export interface Prefs {
 export const PREFS_KEY = "usage-tracker.prefs.v1";
 
 export const DEFAULT_PREFS: Readonly<Prefs> = {
-  font: "system",
   size: "md",
   columnOrder: [...DEFAULT_ORDER],
   hiddenColumns: [],
@@ -28,7 +26,6 @@ export interface PrefsStore {
 
 function fresh(): Prefs {
   return {
-    font: DEFAULT_PREFS.font,
     size: DEFAULT_PREFS.size,
     columnOrder: [...DEFAULT_ORDER],
     hiddenColumns: [],
@@ -48,7 +45,6 @@ export function parsePrefs(raw: string | null): Prefs {
   }
   if (typeof parsed !== "object" || parsed === null) return out;
   const rec = parsed as Record<string, unknown>;
-  if (isFontKey(rec.font)) out.font = rec.font;
   if (isSizeKey(rec.size)) out.size = rec.size;
   const order = normalizeColumnOrder(rec.columnOrder);
   if (order !== null) out.columnOrder = order;

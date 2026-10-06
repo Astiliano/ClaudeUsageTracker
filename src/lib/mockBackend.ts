@@ -1,5 +1,6 @@
 import type { Backend } from "./backend";
 import type { Metric } from "./history";
+import { SYSTEM_EVENTS } from "./events";
 import limits from "./historyLimits.json";
 import type {
   Account,
@@ -18,6 +19,7 @@ const MIN_INTERVAL_SECS = 10;
 const MAX_INTERVAL_SECS = 3600;
 const MIN_TIMEOUT_SECS = 5;
 const MAX_TIMEOUT_SECS = 120;
+const MAX_MIN_FREE_MEMORY_MB = 65536;
 const RANGE_SLACK_MS = 300_000;
 const MAX_LABEL_LEN = 64;
 
@@ -53,7 +55,8 @@ function isUserSettings(v: unknown): v is UserSettings {
     typeof v.claude_binary === "string" &&
     typeof v.close_to_tray === "boolean" &&
     typeof v.launch_at_login === "boolean" &&
-    (v.log_level === "info" || v.log_level === "debug")
+    (v.log_level === "info" || v.log_level === "debug") &&
+    typeof v.min_free_memory_mb === "number"
   );
 }
 
@@ -274,7 +277,7 @@ function sampleValue(s: Sample, metric: Metric): number | null {
  * into the real DTO shapes, so the UI can be exercised in a plain browser
  * (`VITE_MOCK_BACKEND=1`) without a running Tauri host.
  */
-export function createMockBackend(): Backend {
+export function createMockBackend(search: string = window.location.search): Backend {
   const accounts = seedAccounts();
   let settings: UserSettings = {
     interval_secs: 60,
@@ -283,13 +286,14 @@ export function createMockBackend(): Backend {
     close_to_tray: true,
     launch_at_login: false,
     log_level: "info",
+    min_free_memory_mb: 1536,
   };
   let nextAccountSeq = accounts.length + 1;
 
   // The only URL-driven behaviour in the mock, so Playwright can reach the
   // dimmed and unavailable states without a rebuild. The real backend never
   // looks at the URL.
-  const mockSystem = new URLSearchParams(window.location.search).get("mockSystem");
+  const mockSystem = new URLSearchParams(search).get("mockSystem");
   const GIB = 1024 * 1024 * 1024;
 
   const systemStats = (): SystemStats => ({
@@ -320,6 +324,7 @@ export function createMockBackend(): Backend {
     stalled_at: null,
     binary: { path: "C:\\Users\\josh\\.local\\bin\\claude.exe", source: "local_bin" },
     interval_secs: settings.interval_secs,
+    memory_hold: null,
   });
 
   const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
@@ -453,6 +458,12 @@ export function createMockBackend(): Backend {
       if (next.timeout_secs < MIN_TIMEOUT_SECS || next.timeout_secs > MAX_TIMEOUT_SECS) {
         throw { code: "out_of_range", message: "timeout_secs must be 5..=120" } satisfies AppErrorShape;
       }
+      if (next.min_free_memory_mb < 0 || next.min_free_memory_mb > MAX_MIN_FREE_MEMORY_MB) {
+        throw {
+          code: "out_of_range",
+          message: `min_free_memory_mb must be 0..=${MAX_MIN_FREE_MEMORY_MB}`,
+        } satisfies AppErrorShape;
+      }
       settings = next;
       return undefined;
     },
@@ -496,7 +507,7 @@ export function createMockBackend(): Backend {
       return result as T;
     },
     listen: (event: string, handler: () => void) => {
-      if (event !== "system:sampled") return Promise.resolve(() => undefined);
+      if (!(SYSTEM_EVENTS as readonly string[]).includes(event)) return Promise.resolve(() => undefined);
       const timer = window.setInterval(handler, 5000);
       return Promise.resolve(() => window.clearInterval(timer));
     },

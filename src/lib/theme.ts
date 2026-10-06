@@ -23,31 +23,6 @@ export function metricColor(pct: number): string {
   return THEME[metricTone(pct)];
 }
 
-export type FontKey = "system" | "plex" | "jetbrains";
-export interface FontChoice { label: string; ui: string; mono: string }
-
-export const FONTS: Record<FontKey, FontChoice> = {
-  system: {
-    label: "System",
-    ui: "ui-sans-serif, 'Segoe UI', Helvetica, Arial, sans-serif",
-    mono: "ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace",
-  },
-  plex: {
-    label: "IBM Plex",
-    ui: "'IBM Plex Sans', Helvetica, sans-serif",
-    mono: "'IBM Plex Mono', monospace",
-  },
-  jetbrains: {
-    label: "JetBrains",
-    ui: "ui-sans-serif, 'Segoe UI', Helvetica, sans-serif",
-    mono: "'JetBrains Mono', monospace",
-  },
-};
-export const FONT_KEYS: readonly FontKey[] = ["system", "plex", "jetbrains"];
-export function isFontKey(v: unknown): v is FontKey {
-  return typeof v === "string" && (FONT_KEYS as readonly string[]).includes(v);
-}
-
 export type SizeKey = "sm" | "md" | "lg" | "xl";
 export interface SizeChoice { label: string; zoom: number }
 export const SIZES: Record<SizeKey, SizeChoice> = {

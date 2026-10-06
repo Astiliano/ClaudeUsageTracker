@@ -62,6 +62,15 @@ export interface Dashboard {
   stalled_at: number | null;
   binary: BinaryInfo;
   interval_secs: number;
+  /** Set while automatic refreshes are held for low commit headroom. */
+  memory_hold: MemoryHold | null;
+}
+
+/** Mirrors the Rust `MemoryHold`: bytes at the last held decision, and the epoch-ms it began. */
+export interface MemoryHold {
+  available_bytes: number;
+  floor_bytes: number;
+  since: number;
 }
 
 export interface SystemStats {
@@ -90,6 +99,8 @@ export interface UserSettings {
   close_to_tray: boolean;
   launch_at_login: boolean;
   log_level: "info" | "debug";
+  /** Automatic refreshes hold below this much free commit, in MB; 0 never holds. */
+  min_free_memory_mb: number;
 }
 
 export interface RawSnapshot {

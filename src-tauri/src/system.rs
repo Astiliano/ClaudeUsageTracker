@@ -7,12 +7,26 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use crate::commands::{lock_system, Core};
+use crate::commands::{lock_status, lock_system, Core};
+use crate::memory::{floor_bytes, recovery_due, MemoryProbe};
 use crate::process::{Exclusion, ProcView};
 use crate::scheduler::driver::EventSink;
 
-/// How often the sampler walks the process table.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the sampler walks the process table while the window is open.
+pub const VISIBLE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often it walks the table while the window is destroyed (closed to the
+/// tray). Presence and memory-recovery latency rise to this.
+pub const HIDDEN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The wait between samples for the window state.
+pub fn sample_interval(window_open: bool) -> Duration {
+    if window_open {
+        VISIBLE_INTERVAL
+    } else {
+        HIDDEN_INTERVAL
+    }
+}
 
 /// Three consecutive panicking samples stop the task for the rest of the run.
 const MAX_CONSECUTIVE_PANICS: u32 = 3;
@@ -79,11 +93,32 @@ pub fn presence_edge(prev_count: u32, next_count: u32) -> bool {
 }
 
 /// How long to wait after a panicking sample, or `None` to stop for good.
-pub fn after_panic(panics: u32) -> Option<Duration> {
+pub fn after_panic(panics: u32, window_open: bool) -> Option<Duration> {
     if panics >= MAX_CONSECUTIVE_PANICS {
         None
     } else {
-        Some(SAMPLE_INTERVAL)
+        Some(sample_interval(window_open))
+    }
+}
+
+/// What one good sample tells the loop to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplerStep {
+    /// Wake the driver: a hold exists and the commit headroom is back at or
+    /// above the floor. Level-triggered, so there is no edge to lose.
+    pub wake: bool,
+    pub wait: Duration,
+}
+
+pub fn sampler_step(
+    held: bool,
+    available: Option<u64>,
+    floor_bytes: u64,
+    window_open: bool,
+) -> SamplerStep {
+    SamplerStep {
+        wake: recovery_due(held, available, floor_bytes),
+        wait: sample_interval(window_open),
     }
 }
 
@@ -165,11 +200,15 @@ impl Sampler {
     }
 }
 
-/// Samples every 5 s, publishes into `Core.system`, and fires the presence
-/// trigger when Claude Code appears. Never spawns the CLI.
+/// Samples every 5 s with the window open and every 30 s without, or at once
+/// on a `sampler_kick`. Publishes into `Core.system`, fires the presence
+/// trigger when Claude Code appears, and wakes the driver on every tick that
+/// finds a memory hold with the headroom back above the floor. Never spawns
+/// the CLI.
 pub async fn run_sampler(
     core: Arc<Core>,
     events: Arc<dyn EventSink>,
+    memory: Arc<dyn MemoryProbe>,
     pid_slot: Arc<AtomicU32>,
     shutdown: CancellationToken,
 ) {
@@ -177,10 +216,12 @@ pub async fn run_sampler(
     let mut prev_count: u32 = 0;
     let mut panics: u32 = 0;
     let mut wait = Duration::ZERO;
+    let mut last_logged_wait: Option<Duration> = None;
 
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
+            _ = core.sampler_kick.notified() => {}
             _ = tokio::time::sleep(wait) => {}
         }
 
@@ -203,7 +244,7 @@ pub async fn run_sampler(
             Err(join) => {
                 panics += 1;
                 error!(error = %join, attempt = panics, "system sample panicked");
-                match after_panic(panics) {
+                match after_panic(panics, core.window_open.load(Ordering::SeqCst)) {
                     None => {
                         error!("system sampler stopped after repeated panics");
                         lock_system(&core.system).stopped = true;
@@ -244,7 +285,20 @@ pub async fn run_sampler(
         prev_count = stats.claude_count;
         lock_system(&core.system).stats = Some(stats);
         events.system_sampled();
-        wait = SAMPLE_INTERVAL;
+
+        let held = lock_status(&core.status).memory_hold.is_some();
+        let floor = floor_bytes(core.settings_tx.borrow().min_free_memory_mb);
+        let available = memory.available_commit_bytes();
+        let step = sampler_step(held, available, floor, core.window_open.load(Ordering::SeqCst));
+        if step.wake {
+            debug!(available_bytes = available, floor_bytes = floor, "memory recovered; waking driver");
+            core.triggers.memory_recovered();
+        }
+        wait = step.wait;
+        if last_logged_wait != Some(wait) {
+            debug!(secs = wait.as_secs(), "sample interval");
+            last_logged_wait = Some(wait);
+        }
     }
 }
 
@@ -296,10 +350,44 @@ mod tests {
     }
 
     #[test]
-    fn after_panic_waits_a_full_interval_then_gives_up_on_the_third() {
-        assert_eq!(after_panic(1), Some(SAMPLE_INTERVAL));
-        assert_eq!(after_panic(2), Some(SAMPLE_INTERVAL));
-        assert_eq!(after_panic(3), None, "three in a row stops the sampler");
+    fn sample_interval_is_5s_open_and_30s_hidden() {
+        assert_eq!(VISIBLE_INTERVAL, Duration::from_secs(5));
+        assert_eq!(HIDDEN_INTERVAL, Duration::from_secs(30));
+        assert_eq!(sample_interval(true), Duration::from_secs(5));
+        assert_eq!(sample_interval(false), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn sampler_step_wakes_only_while_held_and_at_or_above_the_floor() {
+        const FLOOR: u64 = 1_610_612_736;
+        for held in [true, false] {
+            for available in [None, Some(FLOOR - 1), Some(FLOOR), Some(FLOOR + 1)] {
+                let expected = held && matches!(available, Some(a) if a >= FLOOR);
+                assert_eq!(
+                    sampler_step(held, available, FLOOR, true).wake,
+                    expected,
+                    "held={held} available={available:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sampler_step_waits_by_window_state() {
+        assert_eq!(sampler_step(false, None, 0, true).wait, Duration::from_secs(5));
+        assert_eq!(sampler_step(false, None, 0, false).wait, Duration::from_secs(30));
+        assert_eq!(sampler_step(true, Some(u64::MAX), 0, true).wait, Duration::from_secs(5));
+        assert_eq!(sampler_step(true, Some(u64::MAX), 0, false).wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn after_panic_waits_one_interval_for_the_window_state_then_gives_up_on_the_third() {
+        for panics in [1, 2] {
+            assert_eq!(after_panic(panics, true), Some(Duration::from_secs(5)));
+            assert_eq!(after_panic(panics, false), Some(Duration::from_secs(30)));
+        }
+        assert_eq!(after_panic(3, true), None, "three in a row stops the sampler");
+        assert_eq!(after_panic(3, false), None);
     }
 
     /// Smoke test against the real machine: it must return, prime on the

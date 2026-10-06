@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -8,11 +8,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::AppResult;
+use crate::memory::{floor_bytes, merge_peak, read_memory, ChildPeak, MemoryGuard, MemoryProbe};
 use crate::scheduler::machine::{
-    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Gate, Machine, Recorded,
-    SharedMachine, Trigger,
+    begin_cycle, hold_change, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate,
+    HoldChange, Machine, MemoryHold, Recorded, SharedMachine, Trigger,
 };
-use crate::store::settings::UserSettings;
+use crate::store::settings::{polling_relevant_changed, UserSettings};
 use crate::usage::runner::run_usage;
 use crate::usage::PollOutcome;
 
@@ -27,12 +28,18 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 /// payloads and re-reads state through commands.
 pub trait EventSink: Send + Sync {
     fn usage_updated(&self, account_id: &str);
-    fn cycle_finished(&self);
+    /// `peak` is the highest child memory seen across the cycle's polls, or
+    /// `None` when none was sampled.
+    fn cycle_finished(&self, peak: Option<ChildPeak>);
     fn gate_changed(&self, gate: &str);
     fn poller_stalled(&self, at: i64, cycle_age_ms: u64);
     fn refresh_tray(&self);
     /// The sampler published a fresh `SystemStats` (spec §4.2).
     fn system_sampled(&self);
+    /// The memory hold status changed.
+    fn memory_hold_changed(&self);
+    /// Settings were applied by the UI.
+    fn settings_applied(&self);
 }
 
 /// The process gate, abstracted for the same reason.
@@ -196,6 +203,12 @@ struct CycleInputs {
     timeout: Duration,
     pid_slot: Arc<AtomicU32>,
     cancel: CancellationToken,
+    /// Set for automatic triggers only: the cycle re-reads memory before
+    /// every spawn after the first (spec 4.3a). Bypass triggers carry `None`.
+    memory_guard: Option<MemoryGuard>,
+    /// The decision that started this cycle closed the gate (rule 6), so a
+    /// mid-cycle hold must reopen it.
+    closed_gate: bool,
 }
 
 /// Adapter that performs the four halt steps against the real store. Owns
@@ -273,6 +286,8 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         timeout,
         pid_slot,
         cancel,
+        memory_guard,
+        closed_gate,
     } = inputs;
 
     info!(
@@ -281,11 +296,43 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         "cycle started"
     );
 
+    let total = accounts.len();
     let mut first_poll_logged_env = false;
-    for account_id in accounts {
+    let mut cycle_peak: Option<ChildPeak> = None;
+    for (i, account_id) in accounts.into_iter().enumerate() {
         if cancel.is_cancelled() {
             debug!("cycle cancelled before finishing");
             return;
+        }
+
+        // The first account was just checked by `decide`; every later spawn
+        // re-reads the floor, so a long cycle cannot ignore it (spec 4.3a).
+        // A `None` reading fails open.
+        if i > 0 {
+            if let Some(g) = &memory_guard {
+                if let Some(available) = read_memory(&*g.probe, &g.lost) {
+                    if available < g.floor_bytes {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let reopened = lock_machine(&machine)
+                            .hold_mid_cycle(available, g.floor_bytes, now, closed_gate);
+                        publish_status(&machine, &core.status, now);
+                        events.memory_hold_changed();
+                        if let Some(gate) = reopened {
+                            info!(gate = gate.as_str(), trigger = "memory_hold", "gate changed");
+                            events.gate_changed(gate.as_str());
+                        }
+                        info!(
+                            available_bytes = available,
+                            floor_bytes = g.floor_bytes,
+                            mid_cycle = true,
+                            polled = i,
+                            remaining = total - i,
+                            "memory hold"
+                        );
+                        break;
+                    }
+                }
+            }
         }
 
         let account = {
@@ -314,6 +361,7 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         )
         .await;
         first_poll_logged_env = true;
+        cycle_peak = merge_peak(cycle_peak, result.peak);
 
         if cancel.is_cancelled() {
             debug!(account_id = %account_id, "cycle cancelled mid-poll; result discarded");
@@ -345,7 +393,7 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
             arm_and_perform_halt(&core, sink, taken_at, envelope, reason).await;
             events.usage_updated(&account_id);
             events.refresh_tray();
-            events.cycle_finished();
+            events.cycle_finished(cycle_peak);
             warn!("cycle abandoned after a guard trip");
             return;
         }
@@ -378,6 +426,8 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
                 duration_ms = result.duration_ms,
                 trigger = trigger.as_str(),
                 error = ?outcome.error_text(),
+                peak_working_set_bytes = result.peak.map(|p| p.working_set_bytes),
+                peak_commit_bytes = result.peak.map(|p| p.commit_bytes),
                 "poll finished"
             );
         } else {
@@ -387,6 +437,8 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
                 outcome = kind.as_str(),
                 duration_ms = result.duration_ms,
                 trigger = trigger.as_str(),
+                peak_working_set_bytes = result.peak.map(|p| p.working_set_bytes),
+                peak_commit_bytes = result.peak.map(|p| p.commit_bytes),
                 "poll finished"
             );
         }
@@ -395,17 +447,26 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         events.refresh_tray();
     }
 
-    events.cycle_finished();
-    info!(trigger = trigger.as_str(), "cycle finished");
+    events.cycle_finished(cycle_peak);
+    info!(
+        trigger = trigger.as_str(),
+        peak_working_set_bytes = cycle_peak.map(|p| p.working_set_bytes),
+        peak_commit_bytes = cycle_peak.map(|p| p.commit_bytes),
+        "cycle finished"
+    );
 }
 
 pub struct Driver {
     core: Arc<Core>,
     events: Arc<dyn EventSink>,
     process: Arc<dyn ProcessProbe>,
+    memory: Arc<dyn MemoryProbe>,
     binary: Arc<dyn BinaryProbe>,
     shutdown: CancellationToken,
     pid_slot: Arc<AtomicU32>,
+    /// True while the last probe read returned no figure. Shared by every
+    /// read so each transition is logged once (spec 4.3).
+    memory_reading_lost: Arc<AtomicBool>,
     /// Labels each cycle so a late "cycle finished" message can be matched
     /// against the cycle actually in flight.
     cycle_generation: AtomicU64,
@@ -444,6 +505,7 @@ impl Driver {
         core: Arc<Core>,
         events: Arc<dyn EventSink>,
         process: Arc<dyn ProcessProbe>,
+        memory: Arc<dyn MemoryProbe>,
         binary: Arc<dyn BinaryProbe>,
         shutdown: CancellationToken,
         pid_slot: Arc<AtomicU32>,
@@ -452,9 +514,11 @@ impl Driver {
             core,
             events,
             process,
+            memory,
             binary,
             shutdown,
             pid_slot,
+            memory_reading_lost: Arc::new(AtomicBool::new(false)),
             cycle_generation: AtomicU64::new(0),
             machine: Arc::new(Mutex::new(Machine::new())),
         }
@@ -531,6 +595,7 @@ impl Driver {
         trigger: Trigger,
         binary: PathBuf,
         settings: &UserSettings,
+        closed_gate: bool,
         done_tx: &UnboundedSender<u64>,
     ) -> LiveCycle {
         let generation = self.cycle_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -539,6 +604,11 @@ impl Driver {
         // command arriving immediately sees it.
         self.publish();
         let cancel = self.shutdown.child_token();
+        let memory_guard = trigger.is_automatic().then(|| MemoryGuard {
+            probe: Arc::clone(&self.memory),
+            floor_bytes: floor_bytes(settings.min_free_memory_mb),
+            lost: Arc::clone(&self.memory_reading_lost),
+        });
         let inputs = CycleInputs {
             core: Arc::clone(&self.core),
             events: Arc::clone(&self.events),
@@ -550,6 +620,8 @@ impl Driver {
             timeout: Duration::from_secs(u64::from(settings.timeout_secs)),
             pid_slot: Arc::clone(&self.pid_slot),
             cancel: cancel.clone(),
+            memory_guard,
+            closed_gate,
         };
         let signal = CycleDone {
             tx: done_tx.clone(),
@@ -583,6 +655,7 @@ impl Driver {
                     close_to_tray: true,
                     launch_at_login: false,
                     log_level: "info".to_string(),
+                    min_free_memory_mb: crate::store::settings::DEFAULT_MIN_FREE_MEMORY_MB,
                 }
             }
         }
@@ -721,24 +794,43 @@ impl Driver {
         let halted = self.halted().await;
         let now = chrono::Utc::now().timestamp_millis();
 
-        let decision = lock_machine(&self.machine).decide(
-            trigger,
-            claude_running,
-            binary_path.is_some(),
-            halted,
-            &enabled,
-            now,
-        );
+        // Only automatic triggers read the probe; the `None` a bypass trigger
+        // carries is not a read and must not touch the reading-lost flag.
+        let available = if trigger.is_automatic() {
+            read_memory(&*self.memory, &self.memory_reading_lost)
+        } else {
+            None
+        };
+        let floor = floor_bytes(settings.min_free_memory_mb);
+        let (before, decision, after) = {
+            let mut machine = lock_machine(&self.machine);
+            let before = machine.memory_hold();
+            let decision = machine.decide(
+                trigger.clone(),
+                &Facts {
+                    claude_running,
+                    available_commit_bytes: available,
+                    memory_floor_bytes: floor,
+                    binary_present: binary_path.is_some(),
+                    halted,
+                    enabled: &enabled,
+                    now,
+                },
+            );
+            (before, decision, machine.memory_hold())
+        };
         // Spec 5.1: publish after every decide, so a skipped Manual trigger
         // and a gate transition are both visible to commands at once.
         self.publish();
+        self.log_hold_change(&trigger, before, after, available, floor, now);
 
         match decision {
             Decision::Skip(reason) => {
                 match reason {
                     crate::scheduler::machine::SkipReason::GateIdle
                     | crate::scheduler::machine::SkipReason::Busy
-                    | crate::scheduler::machine::SkipReason::AlreadyActive => {
+                    | crate::scheduler::machine::SkipReason::AlreadyActive
+                    | crate::scheduler::machine::SkipReason::LowMemory => {
                         debug!(reason = reason.as_str(), "decision skipped")
                     }
                     _ => warn!(reason = reason.as_str(), "decision skipped"),
@@ -755,9 +847,91 @@ impl Driver {
                     self.events.gate_changed(gate.as_str());
                 }
                 let binary = binary_path?;
-                Some(self.start_cycle(accounts, reason, binary, settings, done_tx))
+                let closed_gate = gate_transition == Some(Gate::Idle);
+                Some(self.start_cycle(accounts, reason, binary, settings, closed_gate, done_tx))
             }
         }
+    }
+
+    /// The figure for a release line. An automatic trigger passes the reading
+    /// it decided on, and `None` there is a lost reading, which stays omitted.
+    /// A bypass trigger carries no reading into `decide`, so one direct read
+    /// is taken for the log line only: not through `read_memory`, so the
+    /// reading-lost flag stays untouched (spec 4.3).
+    fn release_figure(&self, trigger: &Trigger, available: Option<u64>) -> Option<u64> {
+        if trigger.is_automatic() {
+            available
+        } else {
+            self.memory.available_commit_bytes()
+        }
+    }
+
+    /// Logs and announces a hold transition. Runs after `publish`, so the
+    /// refetch the event triggers sees the new hold (spec 4.3).
+    fn log_hold_change(
+        &self,
+        trigger: &Trigger,
+        before: Option<MemoryHold>,
+        after: Option<MemoryHold>,
+        available: Option<u64>,
+        floor: u64,
+        now: i64,
+    ) {
+        let change = hold_change(before, after);
+        match (change, before, after) {
+            (HoldChange::Started, _, Some(hold)) => info!(
+                available_bytes = hold.available_bytes,
+                floor_bytes = floor,
+                trigger = trigger.as_str(),
+                "memory hold"
+            ),
+            (HoldChange::Refreshed, _, Some(hold)) => debug!(
+                available_bytes = hold.available_bytes,
+                floor_bytes = floor,
+                "memory hold"
+            ),
+            (HoldChange::Released, Some(prior), _) => match self.release_figure(trigger, available) {
+                Some(figure) => info!(
+                    available_bytes = figure,
+                    floor_bytes = floor,
+                    held_ms = now - prior.since,
+                    trigger = trigger.as_str(),
+                    "memory hold released"
+                ),
+                None => info!(
+                    floor_bytes = floor,
+                    held_ms = now - prior.since,
+                    trigger = trigger.as_str(),
+                    "memory hold released"
+                ),
+            },
+            _ => {}
+        }
+        match change {
+            HoldChange::Started | HoldChange::Refreshed | HoldChange::Released => {
+                self.events.memory_hold_changed()
+            }
+            HoldChange::Unchanged => {}
+        }
+    }
+
+    /// The Timer decision, shared by the Timer arm and the memory-wake arm.
+    /// Busy is checked inside `probe_if_free` before a process check is spent,
+    /// so the app's own child can never latch the gate. A failed check lands
+    /// here as `None`, and the Timer never hands `None` to `decide`. The
+    /// caller owns `last_cycle_end`: a `None` return means no cycle started.
+    async fn handle_timer(
+        &self,
+        settings: &UserSettings,
+        done_tx: &UnboundedSender<u64>,
+    ) -> Option<LiveCycle> {
+        let Some(running) = self.probe_if_free().await else {
+            // probe_if_free has already logged which reason.
+            debug!("timer skipped: no process answer");
+            return None;
+        };
+        self.decide_and_maybe_run(Trigger::Timer, Some(running), settings, done_tx)
+            .await
     }
 
     pub async fn run(self) {
@@ -841,39 +1015,38 @@ impl Driver {
 
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {
-                    // Busy is checked inside the helper before a process
-                    // check is spent, so the app's own child can never
-                    // latch the gate. A failed check lands here too, and
-                    // the Timer never hands `None` to `decide`.
-                    let Some(running) = self.probe_if_free().await else {
-                        // probe_if_free has already logged which reason.
-                        debug!("timer skipped: no process answer");
-                        last_cycle_end = chrono::Utc::now().timestamp_millis();
-                        continue;
-                    };
-                    if let Some(cycle) = self
-                        .decide_and_maybe_run(Trigger::Timer, Some(running), &settings, &done_tx)
-                        .await
-                    {
-                        live = Some(cycle);
-                    } else {
-                        last_cycle_end = chrono::Utc::now().timestamp_millis();
+                    match self.handle_timer(&settings, &done_tx).await {
+                        Some(cycle) => live = Some(cycle),
+                        None => last_cycle_end = chrono::Utc::now().timestamp_millis(),
                     }
                 }
                 changed = settings_rx.changed() => {
                     if changed.is_ok() {
-                        settings = settings_rx.borrow_and_update().clone();
-                        // Only a polling-relevant change reaches this arm at
-                        // all (spec section 8), and D16 makes it a deliberate
-                        // "try again" for every account.
-                        lock_machine(&self.machine).reset_all_backoff();
-                        self.publish();
+                        let next = settings_rx.borrow_and_update().clone();
+                        let prev = std::mem::replace(&mut settings, next);
+                        // The arm hears a polling-relevant change and a floor
+                        // change (spec 4.6). Only the first is a deliberate
+                        // "try again" for every account (D16); a floor-only
+                        // change must leave backoff alone.
+                        let backoff_reset = polling_relevant_changed(&prev, &settings);
+                        if backoff_reset {
+                            lock_machine(&self.machine).reset_all_backoff();
+                        }
                         info!(
                             interval_secs = settings.interval_secs,
                             timeout_secs = settings.timeout_secs,
-                            "settings applied to the driver; backoff reset"
+                            min_free_memory_mb = settings.min_free_memory_mb,
+                            backoff_reset,
+                            "settings applied to the driver"
                         );
+                        // A surviving hold is re-evaluated against the new
+                        // floor now rather than at the next tick.
+                        if lock_machine(&self.machine).memory_hold().is_some() {
+                            self.core.triggers.memory_recovered();
+                        }
                         // The deadline moves, the clock is not restarted.
+                        self.publish();
+                        self.events.settings_applied();
                     }
                 }
                 _ = self.core.triggers.notified_manual() => {
@@ -900,6 +1073,21 @@ impl Driver {
                         .await
                     {
                         live = Some(cycle);
+                    }
+                }
+                _ = self.core.triggers.notified_memory_recovered() => {
+                    // No busy branch (spec 4.3b): rule 1 precludes a
+                    // decide-time hold while busy, and between a mid-cycle
+                    // hold and the reap `probe_if_free` returns `None`, so
+                    // the arm skips and the sampler's level-triggered wake
+                    // re-fires.
+                    if lock_machine(&self.machine).memory_hold().is_none() {
+                        debug!("memory wake ignored: no hold");
+                    } else {
+                        match self.handle_timer(&settings, &done_tx).await {
+                            Some(cycle) => live = Some(cycle),
+                            None => last_cycle_end = chrono::Utc::now().timestamp_millis(),
+                        }
                     }
                 }
                 _ = self.core.triggers.notified_changed() => {
@@ -1027,14 +1215,24 @@ mod tests {
 
     // ---- shared fixtures for the loop-level tests -------------------------
 
+    /// Ample commit, so no unit test depends on this machine's free memory.
+    struct AmpleMemory;
+    impl MemoryProbe for AmpleMemory {
+        fn available_commit_bytes(&self) -> Option<u64> {
+            Some(u64::MAX)
+        }
+    }
+
     struct SilentEvents;
     impl EventSink for SilentEvents {
         fn usage_updated(&self, _account_id: &str) {}
-        fn cycle_finished(&self) {}
+        fn cycle_finished(&self, _peak: Option<ChildPeak>) {}
         fn gate_changed(&self, _gate: &str) {}
         fn poller_stalled(&self, _at: i64, _cycle_age_ms: u64) {}
         fn refresh_tray(&self) {}
         fn system_sampled(&self) {}
+        fn memory_hold_changed(&self) {}
+        fn settings_applied(&self) {}
     }
 
     struct IdleProcess;
@@ -1073,6 +1271,7 @@ mod tests {
             close_to_tray: true,
             launch_at_login: false,
             log_level: "info".to_string(),
+            min_free_memory_mb: 1536,
         }
     }
 
@@ -1096,6 +1295,9 @@ mod tests {
             binary: Arc::new(Mutex::new(None)),
             halt_latched: std::sync::atomic::AtomicBool::new(false),
             close_to_tray: std::sync::atomic::AtomicBool::new(true),
+            window_open: std::sync::atomic::AtomicBool::new(true),
+            creating: std::sync::atomic::AtomicBool::new(false),
+            sampler_kick: tokio::sync::Notify::new(),
             settings_tx,
             log: None,
             app_data_dir: tmp.path().to_path_buf(),
@@ -1110,10 +1312,41 @@ mod tests {
             core,
             Arc::new(SilentEvents),
             Arc::new(IdleProcess),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
         )
+    }
+
+    fn prior_hold() -> MemoryHold {
+        MemoryHold { available_bytes: 1, floor_bytes: 2, since: 1_000 }
+    }
+
+    #[tokio::test]
+    async fn a_bypass_release_logs_a_measured_figure() {
+        // A bypass trigger carries no reading into `decide`, so the release
+        // line takes one direct read: AmpleMemory answers u64::MAX.
+        let (tmp, core, _id) = test_core();
+        let driver = test_driver(core, tmp.path());
+        let log = crate::test_log::captured(|| {
+            driver.log_hold_change(&Trigger::Manual, Some(prior_hold()), None, None, 2, 5_000)
+        });
+        assert!(log.contains("memory hold released"), "{log}");
+        assert!(log.contains("available_bytes=18446744073709551615"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn an_automatic_release_without_a_reading_logs_no_figure() {
+        // A Timer that reached `decide` with `None` is a lost reading: the
+        // figure stays omitted, and no second read may be spent on it.
+        let (tmp, core, _id) = test_core();
+        let driver = test_driver(core, tmp.path());
+        let log = crate::test_log::captured(|| {
+            driver.log_hold_change(&Trigger::Timer, Some(prior_hold()), None, None, 2, 5_000)
+        });
+        assert!(log.contains("memory hold released"), "{log}");
+        assert!(!log.contains("available_bytes"), "{log}");
     }
 
     #[tokio::test]
@@ -1124,6 +1357,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1148,6 +1382,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             shutdown.clone(),
             Arc::new(AtomicU32::new(0)),
@@ -1169,6 +1404,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(IdleProcess),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1220,6 +1456,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(IdleProcess),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             shutdown.clone(),
             Arc::new(AtomicU32::new(0)),
@@ -1265,6 +1502,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1313,6 +1551,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1587,11 +1826,15 @@ mod tests {
         lock_machine(&machine).record("a", &PollOutcome::Timeout(30), now);
         lock_machine(&machine).decide(
             Trigger::Timer,
-            Some(true),
-            true,
-            false,
-            &["b".to_string()],
-            now,
+            &Facts {
+                claude_running: Some(true),
+                available_commit_bytes: None,
+                memory_floor_bytes: 0,
+                binary_present: true,
+                halted: false,
+                enabled: &["b".to_string()],
+                now,
+            },
         );
 
         publish_status(&machine, &slot, now);

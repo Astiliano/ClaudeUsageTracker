@@ -77,11 +77,12 @@ describe("normalizeHiddenColumns", () => {
 
 describe("gridMinWidth", () => {
   it("sums track minimums plus the gaps between tracks", () => {
-    expect(GRID_GAP).toBe(10);
+    expect(GRID_GAP).toBe(8);
     // 26 + 150 + 3*86 + 76 + 82 + 62 = 654 tracks, 7 gaps
     expect(gridMinWidth(DEFAULT_ORDER)).toBe(654 + 7 * GRID_GAP);
     // 26 + 150 + 86 + 86 + 76 + 62 = 486 tracks, 5 gaps
     expect(gridMinWidth(["account", "session", "week", "spark"])).toBe(486 + 5 * GRID_GAP);
     expect(COLUMNS.account.width).toBe("minmax(150px,1fr)");
+    expect(COLUMNS.spark.width).toBe("minmax(76px,1fr)");
   });
 });

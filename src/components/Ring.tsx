@@ -1,5 +1,5 @@
 import type { JSX } from "react";
-import { RING_SIZES, ringDash } from "../lib/gauge";
+import { RING_SIZES, ringDash, ringViewBox } from "../lib/gauge";
 import { metricColor } from "../lib/theme";
 
 type Props = { pct: number | null; title?: string } & (
@@ -24,12 +24,7 @@ export function Ring(props: Props): JSX.Element {
   const text = pct === null ? "—" : `${Math.round(Math.max(0, Math.min(100, pct)))}%`;
 
   const arc = (
-    <svg
-      width={geometry.size}
-      height={geometry.size}
-      viewBox={`0 0 ${geometry.size} ${geometry.size}`}
-      aria-hidden="true"
-    >
+    <svg viewBox={ringViewBox(geometry)} aria-hidden="true">
       <circle cx={c} cy={c} r={geometry.radius} fill="none" stroke="var(--track-off)" strokeWidth={geometry.stroke} />
       {pct !== null && pct > 0 && (
         <circle cx={c} cy={c} r={geometry.radius} fill="none" stroke={metricColor(pct)} strokeWidth={geometry.stroke}

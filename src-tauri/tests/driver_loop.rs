@@ -15,15 +15,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cut_core::commands::{
-    core_clear_halt, core_poll_now, core_set_settings, core_update_account, lock_binary,
-    lock_status, Core, SystemSlot,
+    core_clear_halt, core_get_dashboard, core_poll_now, core_set_settings, core_update_account, lock_binary,
+    lock_status, Core,
 };
+use cut_core::memory::{ChildPeak, MemoryProbe};
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
-use cut_core::scheduler::machine::DriverStatus;
-use cut_core::scheduler::triggers::Triggers;
 use cut_core::store::settings::UserSettings;
-use cut_core::store::Store;
 use tokio_util::sync::CancellationToken;
+
+mod common;
+use common::{defaults, test_core, FakeMemory};
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -61,8 +62,11 @@ impl Drop for EnvGuard {
 struct Recorder {
     usage_updated: Mutex<Vec<String>>,
     cycles: AtomicUsize,
+    peaks: Mutex<Vec<Option<ChildPeak>>>,
     gates: Mutex<Vec<String>>,
     stalls: AtomicUsize,
+    memory_holds: AtomicUsize,
+    settings_applied: AtomicUsize,
 }
 
 impl EventSink for Recorder {
@@ -71,7 +75,10 @@ impl EventSink for Recorder {
             v.push(account_id.to_string());
         }
     }
-    fn cycle_finished(&self) {
+    fn cycle_finished(&self, peak: Option<ChildPeak>) {
+        if let Ok(mut v) = self.peaks.lock() {
+            v.push(peak);
+        }
         self.cycles.fetch_add(1, Ordering::SeqCst);
     }
     fn gate_changed(&self, gate: &str) {
@@ -84,6 +91,12 @@ impl EventSink for Recorder {
     }
     fn refresh_tray(&self) {}
     fn system_sampled(&self) {}
+    fn memory_hold_changed(&self) {
+        self.memory_holds.fetch_add(1, Ordering::SeqCst);
+    }
+    fn settings_applied(&self) {
+        self.settings_applied.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Records every exclusion it is handed, so a test can assert what the
@@ -130,16 +143,6 @@ impl BinaryProbe for NoBinary {
     }
 }
 
-fn defaults() -> UserSettings {
-    UserSettings {
-        interval_secs: 10,
-        timeout_secs: 5,
-        claude_binary: String::new(),
-        close_to_tray: true,
-        launch_at_login: false,
-        log_level: "info".to_string(),
-    }
-}
 
 fn fake_claude() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_claude"))
@@ -150,33 +153,22 @@ struct Harness {
     core: Arc<Core>,
     events: Arc<Recorder>,
     process: Arc<FixedProcess>,
+    memory: Arc<FakeMemory>,
     shutdown: CancellationToken,
+    _settings_rx: tokio::sync::watch::Receiver<UserSettings>,
 }
 
 fn harness(running: bool) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let store = Arc::new(Store::open_in_memory().expect("open"));
-    let (settings_tx, _rx) = tokio::sync::watch::channel(defaults());
-    store.save_settings(&defaults()).expect("save settings");
-    let core = Arc::new(Core {
-        store,
-        triggers: Arc::new(Triggers::new()),
-        status: Arc::new(Mutex::new(DriverStatus::default())),
-        system: Arc::new(Mutex::new(SystemSlot::default())),
-        binary: Arc::new(Mutex::new(None)),
-        halt_latched: AtomicBool::new(false),
-        close_to_tray: AtomicBool::new(true),
-        settings_tx,
-        log: None,
-        app_data_dir: tmp.path().to_path_buf(),
-        log_dir: tmp.path().join("logs"),
-    });
+    let (core, settings_rx) = test_core(tmp.path());
     Harness {
         _tmp: tmp,
         core,
         events: Arc::new(Recorder::default()),
         process: Arc::new(FixedProcess::new(running)),
+        memory: Arc::new(FakeMemory::new()),
         shutdown: CancellationToken::new(),
+        _settings_rx: settings_rx,
     }
 }
 
@@ -195,6 +187,7 @@ fn driver_for(h: &Harness, binary: Arc<dyn BinaryProbe>) -> Driver {
         Arc::clone(&h.core),
         Arc::clone(&h.events) as Arc<dyn EventSink>,
         Arc::clone(&h.process) as Arc<dyn ProcessProbe>,
+        Arc::clone(&h.memory) as Arc<dyn MemoryProbe>,
         binary,
         h.shutdown.clone(),
         Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -653,6 +646,483 @@ async fn the_driver_publishes_gate_busy_and_backoff_into_shared_state() {
         published.backoff_until.contains_key(&a),
         "record must be followed by a publish: {published:?}"
     );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+const LOW: u64 = 512 * 1_048_576;
+
+/// Blocks until the driver has finished `want` cycles and published idle.
+async fn wait_for_cycles(h: &Harness, want: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if h.events.cycles.load(Ordering::SeqCst) >= want && !lock_status(&h.core.status).busy {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {want} finished cycles, still at {}",
+            h.events.cycles.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Blocks until the published status carries a memory hold and the hold's
+/// event has been emitted. The driver publishes first and emits after, so the
+/// status alone can be seen in the gap and the event count would still be 0.
+async fn wait_for_hold(h: &Harness) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if lock_status(&h.core.status).memory_hold.is_some()
+            && h.events.memory_holds.load(Ordering::SeqCst) >= 1
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the driver never published a memory hold and emitted its event"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The hold setup of spec section 10: Startup polls with ample memory, then a
+/// presence arrives below the floor, so no test waits on the Timer.
+async fn held_driver(h: &Harness) -> tokio::task::JoinHandle<()> {
+    add_account(h, ".claude");
+    let driver = driver_for(h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(h, 1).await;
+    h.process.running.store(true, Ordering::SeqCst);
+    h.memory.script(&[Some(LOW)]);
+    h.core.triggers.presence();
+    wait_for_hold(h).await;
+    handle
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cycle_reports_a_peak() {
+    let mut env = EnvGuard::new().await;
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "2");
+    let h = harness(false);
+    add_account(&h, ".claude");
+
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+
+    wait_for_cycles(&h, 1).await;
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let peaks = h.events.peaks.lock().expect("lock").clone();
+    assert_eq!(peaks.len(), 1, "{peaks:?}");
+    assert!(peaks[0].is_some(), "the cycle must carry its child's peak: {peaks:?}");
+}
+
+/// Two accounts, the first child holds 200 MiB and the second holds none.
+/// The cycle's reported peak must be the maximum over its polls; a "last poll
+/// wins" fold would report the light second child.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cycle_reports_the_maximum_peak_of_its_polls() {
+    let mut env = EnvGuard::new().await;
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "2");
+    env.set("FAKE_CLAUDE_BALLAST_MB", "200");
+    env.set("FAKE_CLAUDE_BALLAST_DIR_CONTAINS", "ballast-heavy");
+    let h = harness(false);
+    add_account(&h, "ballast-heavy");
+    add_account(&h, "light");
+
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+
+    wait_for_cycles(&h, 1).await;
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let peaks = h.events.peaks.lock().expect("lock").clone();
+    assert_eq!(peaks.len(), 1, "{peaks:?}");
+    let peak = peaks[0].expect("the cycle must carry its children's peak");
+    let ballast = 200 * 1_048_576;
+    assert!(
+        peak.working_set_bytes >= ballast && peak.commit_bytes >= ballast,
+        "the folded maximum must include the heavy first child: {peak:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_presence_below_the_floor_spawns_nothing_and_publishes_the_hold() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    let status = lock_status(&h.core.status).clone();
+    let hold = status.memory_hold.expect("hold");
+    assert_eq!(hold.available_bytes, LOW);
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        1,
+        "only the Startup cycle may have polled"
+    );
+    assert_eq!(h.events.cycles.load(Ordering::SeqCst), 1);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 1);
+    assert_eq!(status.gate.as_str(), "idle");
+    assert_eq!(
+        core_get_dashboard(&h.core).expect("dashboard").memory_hold,
+        status.memory_hold
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_refresh_runs_while_held_and_clears_the_hold() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    h.core.triggers.manual();
+    wait_for_cycles(&h, 2).await;
+
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        core_get_dashboard(&h.core).expect("dashboard").memory_hold,
+        None
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+/// Polls `check` until it holds, failing with `what` after `secs` seconds. The
+/// wake tests use short bounds on purpose: the next Timer is at least 10 s
+/// after the last cycle, so a broken wake arm times out here instead of
+/// passing through the Timer.
+async fn wait_until(what: &str, secs: u64, check: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if check() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {secs} s waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memory_wake_after_recovery_runs_the_held_refresh() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    h.memory.script(&[Some(u64::MAX)]);
+    h.core.triggers.memory_recovered();
+
+    wait_until("the held refresh to finish", 3, || {
+        h.events.cycles.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 2);
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memory_wake_without_a_hold_is_ignored() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    // Claude is running, so Startup opens the gate. A wake handled without
+    // the hold check would reach (Active, running) and Run a second cycle.
+    let h = harness(true);
+    add_account(&h, ".claude");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+
+    h.core.triggers.memory_recovered();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(h.events.cycles.load(Ordering::SeqCst), 1);
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 1);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 0);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lowering_the_floor_in_settings_releases_the_hold() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    // The figure stays LOW: only the floor moves.
+    core_set_settings(
+        &h.core,
+        &UserSettings {
+            min_free_memory_mb: 0,
+            ..defaults()
+        },
+    )
+    .expect("set settings");
+
+    wait_until("the settings arm to apply the change", 3, || {
+        h.events.settings_applied.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    wait_until("the lowered floor to run the held refresh", 3, || {
+        h.events.cycles.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_floor_only_change_keeps_backoff() {
+    let mut env = EnvGuard::new().await;
+    env.set("FAKE_CLAUDE_MODE", "exit-nonzero");
+    env.set("FAKE_CLAUDE_EXIT", "7");
+    env.set("FAKE_CLAUDE_STDERR", "auth failed");
+    let h = harness(true);
+    let a = add_account(&h, ".claude");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+
+    let held_until = lock_status(&h.core.status)
+        .backoff_until
+        .get(&a)
+        .copied()
+        .expect("the failed Startup poll must leave the account in backoff");
+
+    core_set_settings(
+        &h.core,
+        &UserSettings {
+            min_free_memory_mb: 1024,
+            ..defaults()
+        },
+    )
+    .expect("set floor");
+    wait_until("the floor change to be applied", 3, || {
+        h.events.settings_applied.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(
+        lock_status(&h.core.status).backoff_until.get(&a).copied(),
+        Some(held_until),
+        "a floor-only change must not reset backoff"
+    );
+
+    // Control: a polling-relevant change does reset it.
+    core_set_settings(
+        &h.core,
+        &UserSettings {
+            min_free_memory_mb: 1024,
+            interval_secs: 11,
+            ..defaults()
+        },
+    )
+    .expect("set interval");
+    wait_until("the interval change to be applied", 3, || {
+        h.events.settings_applied.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert!(
+        !lock_status(&h.core.status).backoff_until.contains_key(&a),
+        "an interval change must reset backoff"
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_final_poll_keeps_the_gate_active_until_it_runs() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(true);
+    add_account(&h, ".claude");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active"]);
+
+    // Claude has quit, so the next Timer would be the final poll that closes
+    // the gate; memory is low, so it is held instead (a real Timer wait).
+    h.process.running.store(false, Ordering::SeqCst);
+    h.memory.script(&[Some(LOW)]);
+    wait_until("the Timer to hold the final poll", 15, || {
+        lock_status(&h.core.status).memory_hold.is_some()
+    })
+    .await;
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 1);
+    assert_eq!(lock_status(&h.core.status).gate.as_str(), "active");
+
+    h.memory.script(&[Some(u64::MAX)]);
+    h.core.triggers.memory_recovered();
+    wait_until("the held final poll to run", 5, || {
+        h.events.usage_updated.lock().expect("lock").len() == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active", "idle"]);
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+/// Two accounts, Startup polled both (Claude not running, so the gate stays
+/// idle), then Claude starts and memory reads ample once and low after: the
+/// presence decision passes, and the re-check before account 2 sees the drop.
+async fn two_accounts_then_a_drop(h: &Harness) -> tokio::task::JoinHandle<()> {
+    two_accounts_then_script(h, &[Some(u64::MAX), Some(LOW)]).await
+}
+
+/// As above, with the probe script after Claude starts chosen by the test.
+async fn two_accounts_then_script(
+    h: &Harness,
+    script: &[Option<u64>],
+) -> tokio::task::JoinHandle<()> {
+    add_account(h, ".claude");
+    add_account(h, ".claude-b");
+    let driver = driver_for(h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(h, 1).await;
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+    h.process.running.store(true, Ordering::SeqCst);
+    h.memory.script(script);
+    handle
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cycle_stops_before_the_next_spawn_when_memory_drops() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = two_accounts_then_a_drop(&h).await;
+
+    h.core.triggers.presence();
+    wait_for_cycles(&h, 2).await;
+
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        3,
+        "exactly one account polled before the drop"
+    );
+    let status = lock_status(&h.core.status).clone();
+    assert_eq!(status.memory_hold.expect("hold").available_bytes, LOW);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 1);
+    assert_eq!(status.gate.as_str(), "active");
+    assert_eq!(
+        status.backoff_until.len(),
+        0,
+        "no backoff for the unpolled account"
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manual_cycle_ignores_a_mid_cycle_drop() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    // A Manual decide does not read the probe, so the first read of this
+    // cycle would be the mid-cycle re-check: it must see LOW if a guard were
+    // wrongly attached, and the test then fails.
+    let handle = two_accounts_then_script(&h, &[Some(LOW)]).await;
+
+    h.core.triggers.manual();
+    wait_for_cycles(&h, 2).await;
+
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        4,
+        "both accounts polled"
+    );
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 0);
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_closing_cycle_keeps_the_gate_active() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(true);
+    add_account(&h, ".claude");
+    add_account(&h, ".claude-b");
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(&h, 1).await;
+    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active"]);
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+
+    // Claude has quit, so the next Timer is the final poll that closes the
+    // gate (a real Timer wait). Memory is ample for the decision and low
+    // before the second spawn.
+    h.process.running.store(false, Ordering::SeqCst);
+    h.memory.script(&[Some(u64::MAX), Some(LOW)]);
+    wait_until("the closing cycle to be cut", 15, || {
+        h.events.cycles.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_for_idle(&h).await;
+
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        3,
+        "one account polled before the cut"
+    );
+    assert!(lock_status(&h.core.status).memory_hold.is_some());
+    assert_eq!(
+        *h.events.gates.lock().expect("lock"),
+        vec!["active", "idle", "active"]
+    );
+    assert_eq!(lock_status(&h.core.status).gate.as_str(), "active");
+
+    // `cycle_finished` fires inside `run_cycle` before the token drops, so
+    // wait for idle first: a wake sent earlier would be consumed while the
+    // driver still reads busy.
+    h.memory.script(&[Some(u64::MAX)]);
+    h.core.triggers.memory_recovered();
+    wait_until("both accounts to poll again", 3, || {
+        h.events.usage_updated.lock().expect("lock").len() == 5
+    })
+    .await;
+    wait_for_idle(&h).await;
+    assert_eq!(
+        h.events.gates.lock().expect("lock").last().map(String::as_str),
+        Some("idle")
+    );
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
 
     h.shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;

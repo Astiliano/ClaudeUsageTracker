@@ -8,9 +8,9 @@ use tracing::{debug, info, warn};
 use crate::discovery::{enumerate_profiles, find_claude_binary};
 use crate::error::{AppError, AppResult};
 use crate::logging::LogHandle;
-use crate::scheduler::machine::{preview_manual, DriverStatus};
+use crate::scheduler::machine::{preview_manual, DriverStatus, MemoryHold};
 use crate::scheduler::triggers::Triggers;
-use crate::store::settings::{polling_relevant_changed, validate_settings, UserSettings};
+use crate::store::settings::{driver_relevant_changed, validate_settings, UserSettings};
 use crate::store::{HistoryMetric, HistoryPoint, Store, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS, RETENTION_MS};
 use crate::usage::{Account, SnapshotDto};
 #[cfg(test)]
@@ -66,15 +66,58 @@ pub struct Core {
     /// never landed. Every halted check is `latch || stored`, and only
     /// `core_clear_halt` lowers it.
     pub halt_latched: AtomicBool,
-    /// Cache of `UserSettings::close_to_tray`, seeded at setup and rewritten
-    /// by `core_set_settings`. The window-close handler runs on the UI thread
-    /// and must never take the store's connection mutex, which parks for up
-    /// to `busy_timeout` under contention.
+    /// Cache of `UserSettings::close_to_tray` (whether closing the window
+    /// keeps the app running in the tray), seeded at setup and rewritten by
+    /// `core_set_settings`. It is read on the UI thread and must never take
+    /// the store's connection mutex, which parks for up to `busy_timeout`
+    /// under contention.
     pub close_to_tray: AtomicBool,
+    /// Whether the main window currently exists. Seeded `true` (the config
+    /// creates it at launch); `window_created` and `window_destroyed` are the
+    /// only writers.
+    pub window_open: AtomicBool,
+    /// Set while a window build is in flight, so a second tray click or a
+    /// second launch cannot start a second build. Taken by `begin_create`.
+    pub creating: AtomicBool,
+    /// Wakes the sampler when the window appears or disappears. `notify_one`
+    /// stores a permit when nobody is waiting, so a kick is never lost.
+    pub sampler_kick: tokio::sync::Notify,
     pub settings_tx: watch::Sender<UserSettings>,
     pub log: Option<Arc<LogHandle>>,
     pub app_data_dir: PathBuf,
     pub log_dir: PathBuf,
+}
+
+/// Proof that the caller owns the single in-flight window build. Dropping it
+/// (on success, error or panic) lowers `Core::creating`.
+pub struct CreateGuard(Arc<Core>);
+
+impl Drop for CreateGuard {
+    fn drop(&mut self) {
+        self.0.creating.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Claims the right to build the main window. `None` means a build is already
+/// running.
+pub fn begin_create(core: &Arc<Core>) -> Option<CreateGuard> {
+    if core.creating.swap(true, Ordering::SeqCst) {
+        None
+    } else {
+        Some(CreateGuard(Arc::clone(core)))
+    }
+}
+
+/// Records that the main window now exists and wakes the sampler.
+pub fn window_created(core: &Core) {
+    core.window_open.store(true, Ordering::SeqCst);
+    core.sampler_kick.notify_one();
+}
+
+/// Records that the main window is gone and wakes the sampler.
+pub fn window_destroyed(core: &Core) {
+    core.window_open.store(false, Ordering::SeqCst);
+    core.sampler_kick.notify_one();
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +142,7 @@ pub struct Dashboard {
     pub stalled_at: Option<i64>,
     pub binary: BinaryInfo,
     pub interval_secs: u32,
+    pub memory_hold: Option<MemoryHold>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +202,7 @@ pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
         stalled_at: status.stalled_at,
         binary,
         interval_secs: settings.interval_secs,
+        memory_hold: status.memory_hold,
     })
 }
 
@@ -341,9 +386,11 @@ pub fn core_get_settings(core: &Core, launch_at_login: bool) -> AppResult<UserSe
 /// (spec §8, D16):
 ///
 /// * `interval_secs`, `timeout_secs` and `claude_binary` are polling-relevant,
-///   so a change to any of them publishes on the settings watch. The driver's
-///   watch arm is what moves the deadline and resets backoff — this function
-///   does neither itself, because it has no machine handle.
+///   and `min_free_memory_mb` is driver-relevant, so a change to any of them
+///   publishes on the settings watch. The driver's watch arm is what moves the
+///   deadline and resets backoff (for the polling keys only: a floor-only
+///   change keeps backoff and just re-evaluates a memory hold) — this
+///   function does none of that itself, because it has no machine handle.
 /// * `close_to_tray`, `launch_at_login` and `log_level` are applied directly
 ///   and must never touch the scheduler. `log_level` goes through the reload
 ///   handle here; `launch_at_login` is written to the autostart plugin by the
@@ -364,7 +411,7 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
 
     core.close_to_tray.store(next.close_to_tray, Ordering::SeqCst);
 
-    let scheduler_affected = polling_relevant_changed(&previous, next);
+    let scheduler_affected = driver_relevant_changed(&previous, next);
     if scheduler_affected && core.settings_tx.send(next.clone()).is_err() {
         warn!("settings watch has no receiver; the driver may not be running");
     }
@@ -372,6 +419,7 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
     info!(
         interval_secs = next.interval_secs,
         timeout_secs = next.timeout_secs,
+        min_free_memory_mb = next.min_free_memory_mb,
         log_level = %next.log_level,
         scheduler_affected,
         "settings updated"
@@ -652,6 +700,7 @@ mod tests {
             close_to_tray: true,
             launch_at_login: false,
             log_level: "info".to_string(),
+            min_free_memory_mb: 1536,
         }
     }
 
@@ -668,6 +717,9 @@ mod tests {
             binary: Arc::new(std::sync::Mutex::new(None)),
             halt_latched: AtomicBool::new(false),
             close_to_tray: AtomicBool::new(true),
+            window_open: AtomicBool::new(true),
+            creating: AtomicBool::new(false),
+            sampler_kick: tokio::sync::Notify::new(),
             settings_tx,
             log: None,
             app_data_dir: tmp.path().to_path_buf(),
@@ -1062,9 +1114,22 @@ exit 0
             st.gate = Gate::Active;
             st.busy = true;
             st.stalled_at = Some(4242);
+            st.memory_hold = Some(MemoryHold {
+                available_bytes: 512 * 1_048_576,
+                floor_bytes: 1536 * 1_048_576,
+                since: 4000,
+            });
         }
 
         let dash = core_get_dashboard(&core).expect("dashboard");
+        assert_eq!(
+            dash.memory_hold,
+            Some(MemoryHold {
+                available_bytes: 512 * 1_048_576,
+                floor_bytes: 1536 * 1_048_576,
+                since: 4000,
+            })
+        );
         assert_eq!(dash.gate, "active");
         assert!(dash.busy);
         assert_eq!(dash.halted, None);
@@ -1279,5 +1344,43 @@ exit 0
             .insert_snapshot(&a.id, now - crate::store::RETENTION_MS - 1, &ok_week(1), None, 1)
             .expect("too old (would already be pruned in production)");
         assert_eq!(core_get_history_models(&core, &a.id, now).expect("labels"), vec!["Fable".to_string()]);
+    }
+
+    #[test]
+    fn begin_create_is_single_flight_and_resets_on_drop() {
+        let (_tmp, c) = core();
+        let g = begin_create(&c);
+        assert!(g.is_some(), "the first create takes the guard");
+        assert!(begin_create(&c).is_none(), "a second create while one runs is refused");
+        drop(g);
+        assert!(begin_create(&c).is_some(), "dropping the guard releases it");
+    }
+
+    #[tokio::test]
+    async fn window_destroyed_clears_open_and_kicks_the_sampler() {
+        let (_tmp, c) = core();
+        assert!(c.window_open.load(Ordering::SeqCst), "seeded open");
+        window_destroyed(&c);
+        assert!(!c.window_open.load(Ordering::SeqCst));
+        let kicked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            c.sampler_kick.notified(),
+        )
+        .await;
+        assert!(kicked.is_ok(), "the sampler must be woken");
+    }
+
+    #[tokio::test]
+    async fn window_created_sets_open_and_kicks_the_sampler() {
+        let (_tmp, c) = core();
+        c.window_open.store(false, Ordering::SeqCst);
+        window_created(&c);
+        assert!(c.window_open.load(Ordering::SeqCst));
+        let kicked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            c.sampler_kick.notified(),
+        )
+        .await;
+        assert!(kicked.is_ok(), "the sampler must be woken");
     }
 }
