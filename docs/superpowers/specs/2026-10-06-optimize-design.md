@@ -234,6 +234,14 @@ pub fn process_peak(handle: std::os::windows::io::RawHandle) -> Option<ChildPeak
 /// sampler's recovery wake (§4.4). Tests inject `FakeMemory`.
 pub trait MemoryProbe: Send + Sync { fn available_commit_bytes(&self) -> Option<u64>; }
 pub struct RealMemoryProbe;   // delegates to available_commit_bytes()
+
+/// Every probe read in the driver and in the cycle task (§4.3, §4.3a).
+/// `lost.swap(reading.is_none())` yields `was_lost`, so two readers on
+/// different tasks log each transition once between them.
+pub fn read_memory(probe: &dyn MemoryProbe, lost: &AtomicBool) -> Option<u64>; // logs per reading_log
+/// What an automatic cycle carries into its task (§4.3a).
+#[derive(Clone)]
+pub struct MemoryGuard { pub probe: Arc<dyn MemoryProbe>, pub floor_bytes: u64, pub lost: Arc<AtomicBool> }
 ```
 
 - Cargo gets `[target.'cfg(windows)'.dependencies] windows-sys = { version =
@@ -335,8 +343,11 @@ Hold lifetime:
     refetch sees the hold.
 - `LowMemory` joins the DEBUG skip arm (737-747). The INFO line comes from
   `HoldChange::Started`.
-- Reading-loss logging: every probe read goes through one driver helper,
-  `read_memory()`, which keeps `memory_reading_lost: AtomicBool` and logs
+- Reading-loss logging: every probe read goes through one free function,
+  `memory::read_memory(probe, lost)` (§4.1). The Driver owns
+  `memory_reading_lost: Arc<AtomicBool>`, created in `Driver::new` (no new
+  parameter), and clones the same `Arc` into each `MemoryGuard` (§4.3a),
+  so the decide path and the cycle task share one flag. It logs
   per `reading_log` (§4.1): `Lost` is WARN "memory reading unavailable; not
   holding", `Restored` is INFO "memory reading restored". Only actual reads
   call it (automatic decides and the §4.3a check); the `None` that bypass
@@ -360,8 +371,13 @@ Event (the chip must change while the window is open):
   "settings:applied"] as const`, `HISTORY_EVENTS = ["cycle:finished"]`,
   `SYSTEM_EVENTS = ["system:sampled"]`. useDashboard.ts:121-125 iterates
   the first two, useSystem.ts the third.
-- tray.rs gains `pub const FRONTEND_EVENT_NAMES: [&str; 7]`, used by
-  `TauriEvents`. A tray.rs test reads `../../src/lib/events.ts` (relative
+- tray.rs gains one `pub const` per event name (`EVT_USAGE_UPDATED`,
+  `EVT_CYCLE_FINISHED`, `EVT_GATE_CHANGED`, `EVT_POLLER_STALLED`,
+  `EVT_SYSTEM_SAMPLED`, `EVT_MEMORY_HOLD`, `EVT_SETTINGS_APPLIED`) and
+  `pub const FRONTEND_EVENT_NAMES: [&str; 7]` built from those consts.
+  Every `TauriEvents` emit call (today string literals at tray.rs:293-319)
+  passes a const, never a literal, so the array test also covers the emit
+  sites, which cannot be unit-tested without an `AppHandle`. A tray.rs test reads `../../src/lib/events.ts` (relative
   to tray.rs) with `include_str!` and asserts each name appears there.
 - `cycle_finished` gains a parameter: `fn cycle_finished(&self, peak:
   Option<ChildPeak>)`. `TauriEvents` still emits `()`; the parameter makes
@@ -369,13 +385,16 @@ Event (the chip must change while the window is open):
 
 ### 4.3a Re-check before every spawn (`driver.rs` `run_cycle`)
 
-- `CycleInputs` gains `memory_guard: Option<(Arc<dyn MemoryProbe>, u64)>`
-  (probe, floor bytes). `start_cycle` sets it only when
+- `CycleInputs` gains `memory_guard: Option<MemoryGuard>` (§4.1: probe,
+  floor bytes and the Driver's shared `lost` flag). `run_cycle`
+  (driver.rs:264) is a free fn spawned at driver.rs:558 with no `&Driver`,
+  so the guard is how it reads. `start_cycle` sets it only when
   `trigger.is_automatic()`; Startup, Manual and AccountChanged get `None`,
   matching the bypass ruling. It also gains `closed_gate: bool`, set by
   `decide_and_maybe_run` from `gate_transition == Some(Gate::Idle)`.
 - Before every account after the first (the first was just checked by
-  `decide`), the loop reads the probe (`read_memory`). If the figure is
+  `decide`), the loop calls `read_memory(&*guard.probe, &guard.lost)`. If
+  the figure is
   `Some(a)` with `a < floor`:
   - `reopened = lock_machine(&machine).hold_mid_cycle(a, floor, now,
     closed_gate)`, then `publish_status`;
@@ -618,7 +637,8 @@ TS owns them, and the CSS reads them through custom properties (D9).
   `const` before its declaration at module load is a TDZ error).
 - layout.ts exports `shellVars(): Record<string, string>`, returning
   `--gutter: 6px`, `--row-h: 40px`, `--row-pad-x: 8px`, `--grid-gap: 8px`,
-  `--panel-border: 1px`, `--ring-min` and `--ring-max` (§7), and
+  `--panel-border: 1px`, `--ring-min` and `--ring-max` (from `RING_MIN_PX`
+  and `RING_MAX_PX` above; §7 uses them), and
   `shellStyle(zoom): CSSProperties`, which returns `{zoom, ...shellVars()}`
   (the one typed cast at App.tsx:56-61 moves with it). App.tsx uses
   `shellStyle(zoom)` in place of its inline object, so the spread is
@@ -667,12 +687,17 @@ History chart, sized in JS (D10):
   //       CHART_MAX_PX)      // + 1 is the row's bottom border
   ```
   `viewportPx` and `chromePx` are viewport (post-zoom) px; the row is
-  `ROW_HEIGHT` local px from layout.ts, not measured (the drawer sits inside
-  a `role="row"` wrapper, AccountRow.tsx:103-106, so it has no row
-  sibling); the result is local px for the inline `height`.
-- A new `src/hooks/useChartHeight.ts(drawerRef, chartRef, zoom)`. `zoom`
-  travels as a prop: AccountsTable (already has it, :19) -> AccountRow ->
-  HistoryDrawer.
+  `ROW_HEIGHT` local px from layout.ts, not measured (the drawer sits in
+  its own `role="row"` wrapper, AccountRow.tsx:103-106, a sibling of the
+  row grid at :85; both sit in the outer `.row` div at :84, whose 1 px
+  `border-bottom` is the + 1); the result is local px for the inline
+  `height`.
+- A new `src/hooks/useChartHeight.ts(drawerRef, chartRef, rowRef, zoom)`.
+  `zoom` travels as a prop: AccountsTable (already has it, :19) ->
+  AccountRow -> HistoryDrawer. `rowRef` is created in AccountRow, attached
+  to the outer `.row` div (:84), and passed to HistoryDrawer as a prop
+  beside `zoom`. Rejected: `drawer.closest(".row")`, which ties the hook to
+  a class name and silently scrolls nothing if the class changes.
   - `chromePx = drawer.getBoundingClientRect().height −
     chart.getBoundingClientRect().height`. That difference is the drawer's
     padding, head, controls, axis and gaps, and does not depend on the
@@ -683,9 +708,12 @@ History chart, sized in JS (D10):
     recomputes on a `ResizeObserver` on the drawer and on `resize`, and
     disconnects both on unmount. The CSS `.chart` loses `height: 148px`.
   - After its first write it calls `scrollIntoView({block: "start"})` on
-    the drawer's `role="row"` wrapper, so the drawer ends at the fold
-    instead of below it (the rows above it would otherwise push its x-axis
-    off-screen). The page is the scroller (no `overflow` on `.app`), and
+    `rowRef.current`, the outer `.row` (row grid, drawer and bottom
+    border), so the row top meets the viewport top and the drawer ends at
+    the fold instead of below it (the rows above it would otherwise push
+    its x-axis off-screen). Scrolling the drawer's own wrapper instead
+    would put the row grid, with the name and the toggle just clicked,
+    41 px above the viewport. The page is the scroller (no `overflow` on `.app`), and
     row + drawer = viewport leaves enough document below to scroll that
     far. Resizes recompute the height but never scroll.
   - Hypothesis, validate before building: in this WebView2 (Chromium with
@@ -783,6 +811,10 @@ memory.rs:
 - `merge_peak_keeps_some_over_none`
 - `recovery_due_only_while_held_and_at_or_above_floor` (`None` gives false)
 - `reading_log_fires_only_on_transitions` (four cases of was_lost × Some/None)
+- `read_memory_sets_and_clears_the_shared_flag`: a local scripted probe
+  `[None, None, Some(1)]` and one `Arc<AtomicBool>`; the flag reads true,
+  true, false after the three calls, and the returned values equal the
+  script (which transition logs is `reading_log`'s test)
 - `#[cfg(windows)] available_commit_bytes_reads_a_positive_figure`, which
   logs the elapsed time
 - `#[cfg(windows)] process_peak_of_this_process_is_positive`
@@ -856,13 +888,18 @@ Other Rust tests:
 
 Shared seam, `tests/common/mod.rs` (new): `defaults()`, `FakeMemory` (a
 scripted `Mutex<VecDeque<Option<u64>>>` that pops one reading per call and
-repeats the last; `script(&[..])` replaces the queue), and `test_core(dir)
+repeats the last; its one constructor, `FakeMemory::new()`, reads
+`Some(u64::MAX)` until scripted, and `script(&[..])` replaces the queue and
+is the only way either crate sets a reading), and `test_core(dir)
 -> (Arc<Core>, watch::Receiver<UserSettings>)`, which becomes the only
 `Core` literal under tests/ (driver_loop.rs:161 moves here). Each test
 keeps the receiver alive: tokio's `watch::Sender::send` stores nothing
 when no receiver exists (commands.rs:368 warns on exactly that), and
 `run_sampler` reads the floor from the watch with no driver subscribed.
-Both crates use every item, so no `dead_code` allow is needed.
+Both crates use every item (`defaults()` through `test_core`; `new` and
+`script` for every reading, fixed figures included), so no `dead_code`
+allow is needed. A common item one crate does not use is a clippy
+`-D warnings` failure, fixed by using or removing it, never by an allow.
 
 sampler_loop.rs drives the real `run_sampler` (real `Sampler`, which only
 reads) with a sink counting `system_sampled`. Negative checks use a barrier,
@@ -878,16 +915,27 @@ grow (the second sample proves the first one's step finished); then assert
 - `a_kick_samples_at_once_while_hidden`: `window_open = false`; after the
   first sample, `sampler_kick.notify_one()`; the second sample lands within
   3 s (the hidden wait is 30 s).
-- `the_floor_is_read_from_the_settings_watch`: hold set, figure 2 GiB;
-  `settings_tx.send` floor 4096 MB, barrier, no wake; send 1024 MB, kick,
-  wake.
+- `the_floor_is_read_from_the_settings_watch`: hold set, figure 2 GiB.
+  Order is the contract: `settings_tx.send` floor 4096 MB (receiver from
+  `test_core` alive) BEFORE `run_sampler` is spawned, because the first
+  sample is taken at once (`wait = Duration::ZERO`, system.rs:179) and a
+  wake at the default 1536 MB floor would store a permit no later
+  assertion can remove. Then spawn, barrier, no wake; then send 1024 MB,
+  kick, wake.
 
 ### driver_loop.rs
 
 - `harness()` builds its `Core` with `test_core` and keeps the receiver
   (`Harness._settings_rx`). `Harness` gains `memory: Arc<FakeMemory>`;
-  `driver_for` passes it, and `harness()` seeds it with `Some(u64::MAX)`,
-  so no existing test depends on this machine's free commit. `Recorder`
+  `driver_for` passes it, and `harness()` builds it with `FakeMemory::new()`
+  (`Some(u64::MAX)`), so no driver_loop test depends on this machine's free
+  commit. The same holds for the driver.rs unit tests: tests/common is not
+  reachable from `#[cfg(test)]` code in src, so driver.rs's test module
+  defines a local `AmpleMemory` probe (`Some(u64::MAX)`), and all seven
+  `Driver::new` sites (driver.rs:1109, 1123, 1147, 1168, 1219, 1264, 1312)
+  pass it. Three of them drive automatic triggers (Timer at 1199 and 1323,
+  Presence at 1208); with `RealMemoryProbe` and the 1536 MB default floor a
+  low-commit moment would turn them into holds. `Recorder`
   gains `memory_holds` and `settings_applied` (`AtomicUsize`) and `peaks:
   Mutex<Vec<Option<ChildPeak>>>`.
 - Settings changes go through `core_set_settings(&h.core, &s)` (already
@@ -931,17 +979,24 @@ grow (the second sample proves the first one's step finished); then assert
     `["active", "idle", "active"]`, status gate Active. Then script ample
     and call `memory_recovered()`: both accounts poll, `gates` ends with
     `"idle"`, the hold clears.
-  - `a_cycle_stops_before_the_next_spawn_when_memory_drops`: two accounts,
-    script `[ample (decide), low (before account 2)]`; after the cycle
+  - `a_cycle_stops_before_the_next_spawn_when_memory_drops`: the
+    Startup-then-Presence setup above (so not a 10 s test) with two
+    accounts; after the Startup cycle, `running = true`, script
+    `[ample (decide), low (before account 2)]`, fire
+    `triggers.presence()`; after the cycle
     ends: one new `usage_updated`, `memory_hold.available_bytes` equals the
     low figure, `memory_holds == 1`, the gate is Active (opened by the
     Run), and `backoff_until` has no entry for account 2.
   - `a_manual_cycle_ignores_a_mid_cycle_drop`: same script, Manual
     trigger; both accounts poll.
-  - `a_cycle_reports_the_peak_of_its_polls` (`cfg(windows)`):
+  - `a_cycle_reports_a_peak` (`cfg(windows)`):
     `FAKE_CLAUDE_MODE=slow`, `FAKE_CLAUDE_SLEEP_SECS=2` (inside the 5 s
     timeout of `defaults()`); `peaks` holds one `Some` for the Startup
-    cycle.
+    cycle. This proves the wiring only: one account, and the env is
+    process-wide, so per-poll peaks cannot be made to differ and no
+    driver_loop test can tell a max fold from last-wins. The fold is
+    `run_cycle` calling `merge_peak` once per poll, and its semantics are
+    owned by the `merge_peak_*` unit tests in memory.rs.
 
 ### vitest (src/lib)
 
@@ -1116,3 +1171,16 @@ Inputs: review/spec-arch-r2.md (F), review/spec-test-r2.md (I/M).
 | test M-4 | `shellStyle(zoom)` pure and tested; `core_get_dashboard` assertion; literal updates noted; hook iteration is residue | §6, §10, §12 |
 | test M-5 | M5 needs gate Active, 60 s; M1 DEBUG on, 300 ms, click right after close | §10 Manual |
 | test M-6 | tests/common/mod.rs shared by both crates | §10 |
+
+## Revision 4 (2026-10-06)
+
+Inputs: review/spec-arch-r3.md (F), review/spec-test-r3.md (I/M).
+
+- arch F1 Important: scroll target is the outer `.row` (AccountRow.tsx:85) via a `rowRef` prop beside `zoom`; `closest(".row")` rejected; wrapper description corrected (§7).
+- arch F2 Minor: `read_memory(probe, lost)` is a free fn in memory.rs; `MemoryGuard { probe, floor_bytes, lost: Arc<AtomicBool> }` carries the Driver's shared flag into `run_cycle`; `read_memory_sets_and_clears_the_shared_flag` added (§4.1, §4.3, §4.3a, §10 memory.rs).
+- test I-1 Important: `the_floor_is_read_from_the_settings_watch` sends 4096 MB before `run_sampler` is spawned (§10 sampler_loop).
+- test M-1: driver.rs test module defines `AmpleMemory`; all seven `Driver::new` sites pass it (§10 driver_loop).
+- test M-2: `FakeMemory::new()` is the one constructor and `script` the only setter; no `dead_code` allow (§10 sampler_loop).
+- test M-3: renamed `a_cycle_reports_a_peak`; it proves wiring only, the fold is owned by the `merge_peak_*` unit tests (§10 driver_loop).
+- test M-4: `a_cycle_stops_before_the_next_spawn_when_memory_drops` uses the Startup-then-Presence setup (§10 driver_loop).
+- test M-5: one `EVT_*` const per event; `FRONTEND_EVENT_NAMES` and every emit site use them; §6 ring-variable pointer fixed (§4.3, §6).
