@@ -10,7 +10,7 @@ export const COLUMNS: Record<ColumnKey, ColumnDef> = {
   session: { label: "Session", width: "minmax(86px,1.5fr)" },
   week: { label: "Week (all)", width: "minmax(86px,1.5fr)" },
   model: { label: "Per model", width: "minmax(86px,1.5fr)" },
-  spark: { label: "24 hours", width: "76px" },
+  spark: { label: "24 hours", width: "minmax(76px,1fr)" },
   updated: { label: "Updated", width: "82px" },
 };
 
@@ -61,7 +61,7 @@ export function normalizeColumnOrder(v: unknown): ColumnKey[] | null {
 export const ALWAYS_VISIBLE: readonly ColumnKey[] = ["account"];
 
 /** `.row-grid` / `.thead` gap in styles.css; gridMinWidth depends on it. */
-export const GRID_GAP = 10;
+export const GRID_GAP = 8;
 
 export function visibleColumns(order: readonly ColumnKey[], hidden: readonly ColumnKey[]): ColumnKey[] {
   return order.filter((k) => ALWAYS_VISIBLE.includes(k) || !hidden.includes(k));

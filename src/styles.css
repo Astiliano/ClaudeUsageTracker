@@ -37,8 +37,8 @@ body { margin: 0; background: var(--bg); color: var(--fg); font-size: 14px; }
 input, select, button { font-family: inherit; }
 
 /* ---- shell ---- */
-.app { min-height: 100vh; padding: 28px 22px 48px; display: flex; justify-content: center; font-family: var(--ui); }
-.app-inner { width: 100%; max-width: 1120px; display: flex; flex-direction: column; gap: 14px; }
+.app { min-height: 100vh; padding: var(--gutter); display: flex; font-family: var(--ui); }
+.app-inner { width: 100%; display: flex; flex-direction: column; gap: var(--gutter); }
 
 /* ---- header ---- */
 .header { display: flex; flex-direction: column; gap: 10px; }
@@ -98,11 +98,11 @@ input, select, button { font-family: inherit; }
 .banner-warn { background: rgba(216, 169, 79, 0.12); border: 1px solid var(--warn); color: var(--warn); }
 
 /* ---- table / panel ---- */
-.panel { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); overflow: hidden; }
+.panel { border: var(--panel-border) solid var(--line); border-radius: 14px; background: var(--panel); overflow: hidden; }
 .thead-wrap { position: relative; }
 .thead {
-  display: grid; gap: 10px; align-items: center;
-  padding: 11px 16px;
+  display: grid; gap: var(--grid-gap); align-items: center;
+  padding: 6px var(--row-pad-x);
   border-bottom: 1px solid var(--line-head);
   background: var(--panel-head);
 }
@@ -139,7 +139,7 @@ input, select, button { font-family: inherit; }
   z-index: 20;
 }
 .row-parked { opacity: 0.72; }
-.row-grid { display: grid; gap: 10px; padding: 14px 16px; height: 66px; align-items: center; }
+.row-grid { display: grid; gap: var(--grid-gap); padding: 0 var(--row-pad-x); height: var(--row-h); align-items: center; }
 .grip {
   width: 16px; display: flex; flex-direction: column; gap: 3px;
   padding: 6px 2px; cursor: grab; border-radius: 5px;

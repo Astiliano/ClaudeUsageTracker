@@ -1,4 +1,4 @@
-import type { CSSProperties, JSX } from "react";
+import type { JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AccountCard } from "./components/AccountCard";
 import { AccountsTable } from "./components/AccountsTable";
@@ -12,7 +12,7 @@ import { useViewport } from "./hooks/useViewport";
 import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
 import { errorMessage } from "./lib/errors";
-import { autoHiddenColumns, layoutFor } from "./lib/layout";
+import { autoHiddenColumns, layoutFor, shellStyle } from "./lib/layout";
 import { SIZES } from "./lib/theme";
 import "./styles.css";
 
@@ -52,18 +52,18 @@ export default function App(): JSX.Element {
     return () => { cancelled = true; };
   }, [prefs.alwaysOnTop, showError]);
 
-  const shellStyle = { zoom } as CSSProperties;
+  const style = shellStyle(zoom);
 
   if (dashboard === null) {
     return (
-      <main className="app" style={shellStyle}>
+      <main className="app" style={style}>
         <div className="app-inner"><p className="loading">{error ?? "loading…"}</p></div>
       </main>
     );
   }
 
   return (
-    <main className="app" style={shellStyle}>
+    <main className="app" style={style}>
       <div className="app-inner">
         <Header
           dashboard={dashboard}

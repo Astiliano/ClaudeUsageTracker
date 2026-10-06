@@ -4,6 +4,7 @@ import { backend } from "../lib/backend";
 import { COLUMNS, type ColumnKey, gridTemplate } from "../lib/columns";
 import { type Rect, colDragTarget, colLineX, rowDragTarget, settlePendingRows, toLocal } from "../lib/drag";
 import { errorMessage } from "../lib/errors";
+import { ROW_HEIGHT } from "../lib/layout";
 import { moveItem } from "../lib/reorder";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
 import { AccountRow } from "./AccountRow";
@@ -23,8 +24,6 @@ interface Props {
   onError: (message: string) => void;
   onShowFailure: (snapshotId: number) => void;
 }
-
-const DEFAULT_ROW_H = 66;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -50,7 +49,7 @@ export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, on
   const orderRef = useRef(order);
   const dragRef = useRef<RowDragState | null>(null);
   const colDragRef = useRef<ColDragState | null>(null);
-  const rowH = useRef(DEFAULT_ROW_H);
+  const rowH = useRef(ROW_HEIGHT);
   const colRects = useRef<Rect[]>([]);
   const wrapLeft = useRef(0);
   const onColumnMoveRef = useRef(onColumnMove);
@@ -175,7 +174,7 @@ export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, on
   const startRowDrag = (e: ReactPointerEvent<HTMLDivElement>, index: number): void => {
     e.preventDefault();
     const grid = e.currentTarget.parentElement;
-    rowH.current = grid !== null ? grid.offsetHeight + 1 : DEFAULT_ROW_H;
+    rowH.current = grid !== null ? grid.offsetHeight + 1 : ROW_HEIGHT;
     beginBodyDrag();
     setChartId(null);
     setEditingId(null);
