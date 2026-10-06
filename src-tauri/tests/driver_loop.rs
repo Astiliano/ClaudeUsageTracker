@@ -813,7 +813,9 @@ async fn a_memory_wake_after_recovery_runs_the_held_refresh() {
 async fn a_memory_wake_without_a_hold_is_ignored() {
     let mut env = EnvGuard::new().await;
     emit_ok_report(&mut env);
-    let h = harness(false);
+    // Claude is running, so Startup opens the gate. A wake handled without
+    // the hold check would reach (Active, running) and Run a second cycle.
+    let h = harness(true);
     add_account(&h, ".claude");
     let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
     let handle = tokio::spawn(driver.run());
@@ -961,6 +963,14 @@ async fn a_held_final_poll_keeps_the_gate_active_until_it_runs() {
 /// idle), then Claude starts and memory reads ample once and low after: the
 /// presence decision passes, and the re-check before account 2 sees the drop.
 async fn two_accounts_then_a_drop(h: &Harness) -> tokio::task::JoinHandle<()> {
+    two_accounts_then_script(h, &[Some(u64::MAX), Some(LOW)]).await
+}
+
+/// As above, with the probe script after Claude starts chosen by the test.
+async fn two_accounts_then_script(
+    h: &Harness,
+    script: &[Option<u64>],
+) -> tokio::task::JoinHandle<()> {
     add_account(h, ".claude");
     add_account(h, ".claude-b");
     let driver = driver_for(h, Arc::new(FakeBinary(fake_claude())));
@@ -968,7 +978,7 @@ async fn two_accounts_then_a_drop(h: &Harness) -> tokio::task::JoinHandle<()> {
     wait_for_cycles(h, 1).await;
     assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
     h.process.running.store(true, Ordering::SeqCst);
-    h.memory.script(&[Some(u64::MAX), Some(LOW)]);
+    h.memory.script(script);
     handle
 }
 
@@ -1006,7 +1016,10 @@ async fn a_manual_cycle_ignores_a_mid_cycle_drop() {
     let mut env = EnvGuard::new().await;
     emit_ok_report(&mut env);
     let h = harness(false);
-    let handle = two_accounts_then_a_drop(&h).await;
+    // A Manual decide does not read the probe, so the first read of this
+    // cycle would be the mid-cycle re-check: it must see LOW if a guard were
+    // wrongly attached, and the test then fails.
+    let handle = two_accounts_then_script(&h, &[Some(LOW)]).await;
 
     h.core.triggers.manual();
     wait_for_cycles(&h, 2).await;
