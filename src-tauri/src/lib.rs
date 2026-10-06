@@ -14,13 +14,17 @@ pub mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, RunEvent, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
-use crate::commands::{lock_binary, Core, SharedCore, SystemSlot};
+use crate::commands::{
+    begin_create, lock_binary, window_created, window_destroyed, Core, SharedCore, SystemSlot,
+};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
@@ -29,19 +33,63 @@ use crate::scheduler::machine::DriverStatus;
 use crate::scheduler::triggers::Triggers;
 use crate::store::Store;
 use crate::tray::{
-    apply_tray, should_hide_on_close, TauriEvents, MENU_LOGS, MENU_OPEN, MENU_QUIT, MENU_REFRESH,
+    apply_tray, exit_action, ExitAction, TauriEvents, MENU_LOGS, MENU_OPEN, MENU_QUIT,
+    MENU_REFRESH,
 };
 
 /// Set once the shutdown sequence has finished, so the second
 /// `ExitRequested` is allowed through.
 static EXIT_APPROVED: AtomicBool = AtomicBool::new(false);
 
+/// Shows the main window, rebuilding it from the config when closing to the
+/// tray destroyed it. Safe to call from the tray, menu and single-instance
+/// callbacks: those run on the main thread, where `WebviewWindowBuilder::build`
+/// deadlocks, so the build always runs on the async runtime.
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        return;
     }
+    let Some(core) = app.try_state::<SharedCore>().map(|c| Arc::clone(c.inner())) else {
+        error!("window create skipped: the app state is not ready");
+        return;
+    };
+    // Single flight: a second tray click or launch while a build runs is a
+    // no-op. The guard moves into the task, so `creating` resets on every
+    // path out of it, panics included.
+    let Some(guard) = begin_create(&core) else {
+        debug!("window create already running");
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _guard = guard;
+        let started = Instant::now();
+        let Some(cfg) = app.config().app.windows.first().cloned() else {
+            error!("window create failed: no window in the config");
+            return;
+        };
+        let built = tauri::WebviewWindowBuilder::from_config(&app, &cfg)
+            .and_then(|b| b.visible(false).build());
+        match built {
+            Ok(w) => {
+                let _ = w.show();
+                let _ = w.set_focus();
+                window_created(&core);
+                let (x, y) = w.outer_position().map(|p| (p.x, p.y)).unwrap_or_default();
+                let (width, height) =
+                    w.outer_size().map(|s| (s.width, s.height)).unwrap_or_default();
+                let maximized = w.is_maximized().unwrap_or_default();
+                info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    x, y, width, height, maximized, "window created"
+                );
+            }
+            Err(e) => error!(error = %e, "window create failed"),
+        }
+    });
 }
 
 /// Entry point called by `main.rs`.
@@ -55,6 +103,13 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -256,20 +311,21 @@ pub fn run() {
                 shutdown.clone(),
             ));
 
+            // The config window is created hidden (so the window-state
+            // plugin restores its geometry before the first paint); show it.
+            show_main_window(app.handle());
+
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let app = window.app_handle();
-                // Atomic only: a synchronous store read here would freeze
-                // the window for as long as the connection mutex is held.
-                let close_to_tray = app
-                    .try_state::<SharedCore>()
-                    .map(|c| c.close_to_tray.load(Ordering::SeqCst))
-                    .unwrap_or(true);
-                if should_hide_on_close(close_to_tray) {
-                    api.prevent_close();
-                    let _ = window.hide();
+            // A close is not intercepted: the window and its WebView2 are
+            // destroyed, and `ExitRequested` (below) keeps the process alive.
+            if let WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    if let Some(core) = window.app_handle().try_state::<SharedCore>() {
+                        window_destroyed(&core);
+                    }
+                    info!("window destroyed");
                 }
             }
         })
@@ -284,9 +340,21 @@ pub fn run() {
     };
 
     app.run(move |app_handle, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
-            if EXIT_APPROVED.load(Ordering::SeqCst) {
-                return;
+        if let RunEvent::ExitRequested { code, api, .. } = event {
+            // Atomic only: a synchronous store read here would freeze the
+            // event loop for as long as the connection mutex is held.
+            let close_to_tray = app_handle
+                .try_state::<SharedCore>()
+                .map(|c| c.close_to_tray.load(Ordering::SeqCst))
+                .unwrap_or(true);
+            match exit_action(code, close_to_tray, EXIT_APPROVED.load(Ordering::SeqCst)) {
+                ExitAction::Allow => return,
+                ExitAction::KeepRunning => {
+                    api.prevent_exit();
+                    info!("window closed to tray");
+                    return;
+                }
+                ExitAction::Shutdown => {}
             }
             api.prevent_exit();
             info!("exit requested; shutting the poller down");

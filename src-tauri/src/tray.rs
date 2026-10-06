@@ -164,9 +164,28 @@ pub fn icon_rgba(level: Level, size: u32) -> Vec<u8> {
     buf
 }
 
-/// Window close hides to the tray unless the user turned that off.
-pub fn should_hide_on_close(close_to_tray: bool) -> bool {
-    close_to_tray
+/// What the `ExitRequested` handler does with an exit request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitAction {
+    /// The shutdown sequence already finished; let the exit through.
+    Allow,
+    /// The last window is gone and the app lives in the tray: stay running.
+    KeepRunning,
+    /// Run the shutdown sequence (Quit, or a close with close-to-tray off).
+    Shutdown,
+}
+
+/// Decides an exit request. `code` is `None` when the last window went away
+/// and `Some(n)` for `AppHandle::exit(n)`; `approved` is set once the
+/// shutdown sequence has finished.
+pub fn exit_action(code: Option<i32>, close_to_tray: bool, approved: bool) -> ExitAction {
+    if approved {
+        ExitAction::Allow
+    } else if code.is_none() && close_to_tray {
+        ExitAction::KeepRunning
+    } else {
+        ExitAction::Shutdown
+    }
 }
 
 use std::collections::HashMap;
@@ -578,9 +597,25 @@ mod tests {
     }
 
     #[test]
-    fn close_to_tray_decides_whether_a_window_close_hides_or_quits() {
-        assert!(should_hide_on_close(true));
-        assert!(!should_hide_on_close(false));
+    fn exit_action_allows_keeps_running_or_shuts_down() {
+        // (code, close_to_tray, approved, expected)
+        let table = [
+            (None, false, false, ExitAction::Shutdown),
+            (None, true, false, ExitAction::KeepRunning),
+            (Some(0), false, false, ExitAction::Shutdown),
+            (Some(0), true, false, ExitAction::Shutdown),
+            (None, false, true, ExitAction::Allow),
+            (None, true, true, ExitAction::Allow),
+            (Some(0), false, true, ExitAction::Allow),
+            (Some(0), true, true, ExitAction::Allow),
+        ];
+        for (code, close_to_tray, approved, expected) in table {
+            assert_eq!(
+                exit_action(code, close_to_tray, approved),
+                expected,
+                "code={code:?} close_to_tray={close_to_tray} approved={approved}"
+            );
+        }
     }
 
     #[test]
