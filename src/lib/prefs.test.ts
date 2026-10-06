@@ -17,13 +17,17 @@ describe("parsePrefs", () => {
     expect(parsePrefs("42")).toEqual(DEFAULT_PREFS);
   });
   it("keeps valid fields and defaults invalid ones independently", () => {
-    const parsed = parsePrefs(JSON.stringify({ font: "plex", size: "huge", columnOrder: ["account"] }));
-    expect(parsed).toEqual({ font: "plex", size: "md", columnOrder: [...DEFAULT_ORDER], hiddenColumns: [], alwaysOnTop: false });
+    const parsed = parsePrefs(JSON.stringify({ size: "huge", columnOrder: ["account"] }));
+    expect(parsed).toEqual({ size: "md", columnOrder: [...DEFAULT_ORDER], hiddenColumns: [], alwaysOnTop: false });
   });
   it("accepts a full valid record", () => {
     const order = [...DEFAULT_ORDER].reverse();
-    const raw = JSON.stringify({ font: "jetbrains", size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
-    expect(parsePrefs(raw)).toEqual({ font: "jetbrains", size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
+    const raw = JSON.stringify({ size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
+    expect(parsePrefs(raw)).toEqual({ size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
+  });
+  it("ignores a stored font key", () => {
+    const parsed = parsePrefs(JSON.stringify({ font: "plex" }));
+    expect("font" in parsed).toBe(false);
   });
   it("never aliases the default column order array", () => {
     const a = parsePrefs(null);
@@ -68,7 +72,7 @@ describe("parsePrefs", () => {
 describe("loadPrefs / savePrefs", () => {
   it("round-trips through a store under the versioned key", () => {
     const store = new MemoryStore();
-    const prefs = { font: "plex" as const, size: "lg" as const, columnOrder: [...DEFAULT_ORDER], hiddenColumns: ["updated" as const], alwaysOnTop: true };
+    const prefs = { size: "lg" as const, columnOrder: [...DEFAULT_ORDER], hiddenColumns: ["updated" as const], alwaysOnTop: true };
     savePrefs(store, prefs);
     expect(store.data.has(PREFS_KEY)).toBe(true);
     expect(loadPrefs(store)).toEqual(prefs);

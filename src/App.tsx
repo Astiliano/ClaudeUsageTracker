@@ -13,7 +13,7 @@ import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
 import { errorMessage } from "./lib/errors";
 import { autoHiddenColumns, layoutFor } from "./lib/layout";
-import { FONTS, SIZES } from "./lib/theme";
+import { SIZES } from "./lib/theme";
 import "./styles.css";
 
 export default function App(): JSX.Element {
@@ -52,13 +52,7 @@ export default function App(): JSX.Element {
     return () => { cancelled = true; };
   }, [prefs.alwaysOnTop, showError]);
 
-  const font = FONTS[prefs.font];
-  // Custom properties are not in CSSProperties; this is the one typed seam.
-  const shellStyle = {
-    "--ui": font.ui,
-    "--mono": font.mono,
-    zoom,
-  } as CSSProperties;
+  const shellStyle = { zoom } as CSSProperties;
 
   if (dashboard === null) {
     return (

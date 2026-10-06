@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  FONTS, FONT_KEYS, SIZES, SIZE_KEYS, THEME, THRESHOLDS,
-  isFontKey, isSizeKey, metricColor, metricTone,
+  SIZES, SIZE_KEYS, THEME, THRESHOLDS,
+  isSizeKey, metricColor, metricTone,
 } from "./theme";
 
 describe("metricTone", () => {
@@ -25,17 +25,12 @@ describe("metricTone", () => {
   });
 });
 
-describe("font and size keys", () => {
+describe("size keys", () => {
   it("lists every key of the maps in a stable order", () => {
-    expect(FONT_KEYS).toEqual(["system", "plex", "jetbrains"]);
     expect(SIZE_KEYS).toEqual(["sm", "md", "lg", "xl"]);
-    expect(Object.keys(FONTS).sort()).toEqual([...FONT_KEYS].sort());
     expect(Object.keys(SIZES).sort()).toEqual([...SIZE_KEYS].sort());
   });
   it("guards accept only known keys", () => {
-    expect(isFontKey("plex")).toBe(true);
-    expect(isFontKey("comic")).toBe(false);
-    expect(isFontKey(3)).toBe(false);
     expect(isSizeKey("xl")).toBe(true);
     expect(isSizeKey("xxl")).toBe(false);
     expect(isSizeKey(null)).toBe(false);

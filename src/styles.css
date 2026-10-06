@@ -29,8 +29,8 @@
   --danger-border: #3a2a28;
   --danger-hover-bg: #241a19;
   --ok: #7aa2f7; --warn: #d8a94f; --crit: #e0705f; --live: #5fb98a; --idle: #4b5359;
-  --ui: ui-sans-serif, 'Segoe UI', Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace;
+  --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font-size: 14px; }
