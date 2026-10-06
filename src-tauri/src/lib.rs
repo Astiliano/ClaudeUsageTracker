@@ -59,8 +59,12 @@ const DRIVER_STOP_MAX: Duration = Duration::from_millis(2500);
 /// How the wait for the driver's shutdown ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopOutcome {
-    /// The driver finished (or its task ended) within the bound.
+    /// The driver finished its shutdown and signalled within the bound.
     Stopped,
+    /// The driver task ended without signalling (a panic), and the whole bound
+    /// was then waited out so a cycle task it no longer supervises can kill
+    /// its child before the process exits.
+    DriverGone,
     /// The bound elapsed first; exit proceeds anyway.
     TimedOut,
     /// No driver was ever started, so there is nothing to wait for.
@@ -75,12 +79,29 @@ pub(crate) async fn await_driver_stop(
     let Some(done) = done else {
         return StopOutcome::NoDriver;
     };
-    // `Ok` is the signal; `Err` means the sender was dropped, i.e. the driver
-    // task ended without reaching its send (a panic), which is also stopped.
+    let started = tokio::time::Instant::now();
     match tokio::time::timeout(max, done).await {
-        Ok(_) => StopOutcome::Stopped,
+        Ok(Ok(())) => StopOutcome::Stopped,
+        // The sender was dropped: the driver task ended without reaching its
+        // send (a panic), so its own cycle wait never ran. A cycle task it
+        // spawned is still cancelling and killing its child; give it the rest
+        // of the bound rather than exiting under it.
+        Ok(Err(_)) => {
+            warn!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "driver task ended without stopping; waiting out the bound"
+            );
+            tokio::time::sleep_until(started + max).await;
+            StopOutcome::DriverGone
+        }
         Err(_) => StopOutcome::TimedOut,
     }
+}
+
+/// Marks shutdown as begun; true only for the first caller. The flag is set
+/// before this returns, so the caller cancels the token after it is visible.
+fn begin_shutdown(shutting_down: &AtomicBool) -> bool {
+    !shutting_down.swap(true, Ordering::SeqCst)
 }
 
 /// What the window-state plugin persists: geometry only, never visibility
@@ -447,7 +468,7 @@ pub fn run() {
             api.prevent_exit();
             // A second request while the first is waiting must not start a
             // second wait: the receiver is taken once.
-            if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+            if !begin_shutdown(&SHUTTING_DOWN) {
                 debug!("exit requested again; shutdown already running");
                 return;
             }
@@ -464,7 +485,7 @@ pub fn run() {
                 let started = Instant::now();
                 let outcome = await_driver_stop(driver_done, DRIVER_STOP_MAX).await;
                 let elapsed_ms = started.elapsed().as_millis() as u64;
-                if outcome == StopOutcome::TimedOut {
+                if matches!(outcome, StopOutcome::TimedOut | StopOutcome::DriverGone) {
                     warn!(?outcome, elapsed_ms, "driver stop awaited");
                 } else {
                     info!(?outcome, elapsed_ms, "driver stop awaited");
@@ -531,12 +552,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_dropped_sender_counts_as_stopped() {
+    async fn a_dropped_sender_waits_out_the_whole_bound() {
+        // A panicked driver no longer supervises its cycle task, which still
+        // needs time to kill its child; the exit must not run ahead of it.
         let (tx, rx) = oneshot::channel::<()>();
         drop(tx);
         let start = tokio::time::Instant::now();
-        assert_eq!(await_driver_stop(Some(rx), MAX).await, StopOutcome::Stopped);
-        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(
+            await_driver_stop(Some(rx), MAX).await,
+            StopOutcome::DriverGone
+        );
+        assert_eq!(start.elapsed(), MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sender_dropped_mid_wait_still_ends_at_the_bound_from_the_start() {
+        let (tx, rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(tx);
+        });
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            await_driver_stop(Some(rx), MAX).await,
+            StopOutcome::DriverGone
+        );
+        assert_eq!(start.elapsed(), MAX);
+    }
+
+    #[test]
+    fn the_first_shutdown_request_wins_and_sets_the_flag() {
+        let flag = AtomicBool::new(false);
+        assert!(begin_shutdown(&flag));
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_repeat_shutdown_request_is_refused() {
+        let flag = AtomicBool::new(false);
+        assert!(begin_shutdown(&flag));
+        assert!(!begin_shutdown(&flag));
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]
