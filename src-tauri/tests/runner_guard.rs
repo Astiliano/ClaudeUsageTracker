@@ -197,6 +197,43 @@ async fn a_timeout_kills_the_child_and_records_the_limit() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn a_finished_run_reports_a_peak() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let r = run_with(
+        "slow",
+        &[("FAKE_CLAUDE_SLEEP_SECS", "2")],
+        Duration::from_secs(10),
+        tmp.path(),
+        tmp.path(),
+    )
+    .await;
+    assert!(
+        !matches!(r.outcome, PollOutcome::Timeout(_) | PollOutcome::SpawnError(_)),
+        "the child must run to completion: {:?}",
+        r.outcome
+    );
+    let p = r.peak.expect("a finished run on windows reports a peak");
+    assert!(p.working_set_bytes > 0, "{p:?}");
+    assert!(p.commit_bytes > 0, "{p:?}");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_finished_run_reports_no_peak() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let r = run_with(
+        "slow",
+        &[("FAKE_CLAUDE_SLEEP_SECS", "2")],
+        Duration::from_secs(10),
+        tmp.path(),
+        tmp.path(),
+    )
+    .await;
+    assert!(r.peak.is_none(), "{:?}", r.peak);
+}
+
 #[tokio::test]
 async fn a_non_zero_exit_is_a_spawn_error_carrying_the_stderr_tail() {
     let tmp = tempfile::tempdir().expect("tempdir");

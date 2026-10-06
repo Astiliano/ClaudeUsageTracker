@@ -18,7 +18,7 @@ use cut_core::commands::{
     core_clear_halt, core_get_dashboard, core_poll_now, core_set_settings, core_update_account, lock_binary,
     lock_status, Core,
 };
-use cut_core::memory::MemoryProbe;
+use cut_core::memory::{ChildPeak, MemoryProbe};
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
 use cut_core::store::settings::UserSettings;
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,7 @@ impl Drop for EnvGuard {
 struct Recorder {
     usage_updated: Mutex<Vec<String>>,
     cycles: AtomicUsize,
+    peaks: Mutex<Vec<Option<ChildPeak>>>,
     gates: Mutex<Vec<String>>,
     stalls: AtomicUsize,
     memory_holds: AtomicUsize,
@@ -74,7 +75,10 @@ impl EventSink for Recorder {
             v.push(account_id.to_string());
         }
     }
-    fn cycle_finished(&self) {
+    fn cycle_finished(&self, peak: Option<ChildPeak>) {
+        if let Ok(mut v) = self.peaks.lock() {
+            v.push(peak);
+        }
         self.cycles.fetch_add(1, Ordering::SeqCst);
     }
     fn gate_changed(&self, gate: &str) {
@@ -692,6 +696,27 @@ async fn held_driver(h: &Harness) -> tokio::task::JoinHandle<()> {
     h.core.triggers.presence();
     wait_for_hold(h).await;
     handle
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cycle_reports_a_peak() {
+    let mut env = EnvGuard::new().await;
+    env.set("FAKE_CLAUDE_MODE", "slow");
+    env.set("FAKE_CLAUDE_SLEEP_SECS", "2");
+    let h = harness(false);
+    add_account(&h, ".claude");
+
+    let driver = driver_for(&h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+
+    wait_for_cycles(&h, 1).await;
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let peaks = h.events.peaks.lock().expect("lock").clone();
+    assert_eq!(peaks.len(), 1, "{peaks:?}");
+    assert!(peaks[0].is_some(), "the cycle must carry its child's peak: {peaks:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

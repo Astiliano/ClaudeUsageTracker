@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::AppResult;
-use crate::memory::{floor_bytes, read_memory, MemoryGuard, MemoryProbe};
+use crate::memory::{floor_bytes, merge_peak, read_memory, ChildPeak, MemoryGuard, MemoryProbe};
 use crate::scheduler::machine::{
     begin_cycle, hold_change, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate,
     HoldChange, Machine, MemoryHold, Recorded, SharedMachine, Trigger,
@@ -28,7 +28,9 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 /// payloads and re-reads state through commands.
 pub trait EventSink: Send + Sync {
     fn usage_updated(&self, account_id: &str);
-    fn cycle_finished(&self);
+    /// `peak` is the highest child memory seen across the cycle's polls, or
+    /// `None` when none was sampled.
+    fn cycle_finished(&self, peak: Option<ChildPeak>);
     fn gate_changed(&self, gate: &str);
     fn poller_stalled(&self, at: i64, cycle_age_ms: u64);
     fn refresh_tray(&self);
@@ -296,6 +298,7 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
 
     let total = accounts.len();
     let mut first_poll_logged_env = false;
+    let mut cycle_peak: Option<ChildPeak> = None;
     for (i, account_id) in accounts.into_iter().enumerate() {
         if cancel.is_cancelled() {
             debug!("cycle cancelled before finishing");
@@ -358,6 +361,7 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         )
         .await;
         first_poll_logged_env = true;
+        cycle_peak = merge_peak(cycle_peak, result.peak);
 
         if cancel.is_cancelled() {
             debug!(account_id = %account_id, "cycle cancelled mid-poll; result discarded");
@@ -389,7 +393,7 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
             arm_and_perform_halt(&core, sink, taken_at, envelope, reason).await;
             events.usage_updated(&account_id);
             events.refresh_tray();
-            events.cycle_finished();
+            events.cycle_finished(cycle_peak);
             warn!("cycle abandoned after a guard trip");
             return;
         }
@@ -422,6 +426,8 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
                 duration_ms = result.duration_ms,
                 trigger = trigger.as_str(),
                 error = ?outcome.error_text(),
+                peak_working_set_bytes = result.peak.map(|p| p.working_set_bytes),
+                peak_commit_bytes = result.peak.map(|p| p.commit_bytes),
                 "poll finished"
             );
         } else {
@@ -431,6 +437,8 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
                 outcome = kind.as_str(),
                 duration_ms = result.duration_ms,
                 trigger = trigger.as_str(),
+                peak_working_set_bytes = result.peak.map(|p| p.working_set_bytes),
+                peak_commit_bytes = result.peak.map(|p| p.commit_bytes),
                 "poll finished"
             );
         }
@@ -439,8 +447,13 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
         events.refresh_tray();
     }
 
-    events.cycle_finished();
-    info!(trigger = trigger.as_str(), "cycle finished");
+    events.cycle_finished(cycle_peak);
+    info!(
+        trigger = trigger.as_str(),
+        peak_working_set_bytes = cycle_peak.map(|p| p.working_set_bytes),
+        peak_commit_bytes = cycle_peak.map(|p| p.commit_bytes),
+        "cycle finished"
+    );
 }
 
 pub struct Driver {
@@ -1200,7 +1213,7 @@ mod tests {
     struct SilentEvents;
     impl EventSink for SilentEvents {
         fn usage_updated(&self, _account_id: &str) {}
-        fn cycle_finished(&self) {}
+        fn cycle_finished(&self, _peak: Option<ChildPeak>) {}
         fn gate_changed(&self, _gate: &str) {}
         fn poller_stalled(&self, _at: i64, _cycle_age_ms: u64) {}
         fn refresh_tray(&self) {}

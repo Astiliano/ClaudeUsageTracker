@@ -257,6 +257,7 @@ pub async fn apply_tray(app: &tauri::AppHandle, core: &Core) {
 use serde::Serialize;
 use tauri::Emitter;
 
+use crate::memory::ChildPeak;
 use crate::scheduler::driver::EventSink;
 
 pub const EVT_USAGE_UPDATED: &str = "usage:updated";
@@ -310,7 +311,7 @@ impl EventSink for TauriEvents {
     fn usage_updated(&self, account_id: &str) {
         let _ = self.app.emit(EVT_USAGE_UPDATED, AccountEvent { account_id });
     }
-    fn cycle_finished(&self) {
+    fn cycle_finished(&self, _peak: Option<ChildPeak>) {
         let _ = self.app.emit(EVT_CYCLE_FINISHED, ());
     }
     fn gate_changed(&self, gate: &str) {

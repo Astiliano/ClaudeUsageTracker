@@ -130,6 +130,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use super::{parser::parse_usage, PollOutcome};
+use crate::memory::ChildPeak;
 
 /// Longest stderr / stdout tail kept in a spawn error message.
 const TAIL_BYTES: usize = 2048;
@@ -140,6 +141,10 @@ pub struct RunResult {
     /// D8: kept for every outcome, success or failure.
     pub raw: Option<String>,
     pub duration_ms: u32,
+    /// Highest working set and commit sampled while the child ran (spec 4.5).
+    /// `None` before a spawn, on non-Windows targets, or when no sample
+    /// succeeded.
+    pub peak: Option<ChildPeak>,
 }
 
 /// Decode a child's captured pipe bytes losslessly-where-possible: invalid
@@ -161,6 +166,48 @@ fn tail(s: &str) -> String {
         .find(|i| *i >= s.len() - TAIL_BYTES)
         .unwrap_or(0);
     s[start..].trim().to_string()
+}
+
+/// Paces the child-memory samples: one per second on Windows. Other targets
+/// have no reader, so their ticker never fires and `peak` stays `None`.
+/// (tokio's `select!` has no `#[cfg]` on a branch, so the arm itself is
+/// target-independent and only this type and `sample_peak` differ.)
+#[cfg(windows)]
+struct SampleTicker(tokio::time::Interval);
+
+#[cfg(windows)]
+impl SampleTicker {
+    fn new() -> Self {
+        SampleTicker(tokio::time::interval(Duration::from_secs(1)))
+    }
+    async fn tick(&mut self) {
+        self.0.tick().await;
+    }
+}
+
+#[cfg(not(windows))]
+struct SampleTicker;
+
+#[cfg(not(windows))]
+impl SampleTicker {
+    fn new() -> Self {
+        SampleTicker
+    }
+    async fn tick(&mut self) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Folds one reading of the child's peak memory into `peak`.
+#[cfg(windows)]
+fn sample_peak(child: &tokio::process::Child, peak: Option<ChildPeak>) -> Option<ChildPeak> {
+    let sample = child.raw_handle().and_then(crate::memory::process_peak);
+    crate::memory::merge_peak(peak, sample)
+}
+
+#[cfg(not(windows))]
+fn sample_peak(_child: &tokio::process::Child, peak: Option<ChildPeak>) -> Option<ChildPeak> {
+    peak
 }
 
 #[cfg(windows)]
@@ -189,10 +236,14 @@ pub async fn run_usage(
     let started = Instant::now();
     let timeout_secs = timeout.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
 
-    let finish = |outcome: PollOutcome, raw: Option<String>, started: Instant| RunResult {
+    let finish = |outcome: PollOutcome,
+                  raw: Option<String>,
+                  started: Instant,
+                  peak: Option<ChildPeak>| RunResult {
         outcome,
         raw,
         duration_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+        peak,
     };
 
     if let Err(e) = crate::paths::ensure_dir(cwd) {
@@ -200,6 +251,7 @@ pub async fn run_usage(
             PollOutcome::SpawnError(format!("could not prepare poll cwd: {e}")),
             None,
             started,
+            None,
         );
     }
 
@@ -242,6 +294,7 @@ pub async fn run_usage(
                 )),
                 None,
                 started,
+                None,
             )
         }
     };
@@ -264,9 +317,23 @@ pub async fn run_usage(
         (decode_lossy(&out), decode_lossy(&err))
     });
 
-    let waited = tokio::select! {
-        r = tokio::time::timeout(timeout, child.wait()) => Some(r),
-        _ = cancel.cancelled() => None,
+    // The deadline is fixed once, before the loop, so the 1 s sampling tick
+    // can never restart the timeout (spec 4.5). `Child::wait` is cancel safe,
+    // so polling it afresh on each iteration loses nothing.
+    let deadline = tokio::time::sleep_until(tokio::time::Instant::now() + timeout);
+    tokio::pin!(deadline);
+    let mut peak: Option<ChildPeak> = None;
+    let mut ticker = SampleTicker::new();
+    // `waited` keeps the shape the arms below consume: `None` is a
+    // cancellation, `Some(Err(()))` the timeout, `Some(Ok(r))` the wait result.
+    let waited = loop {
+        tokio::select! {
+            r = child.wait() => break Some(Ok(r)),
+            _ = &mut deadline => break Some(Err(())),
+            _ = cancel.cancelled() => break None,
+            // The first tick is immediate: one read just after spawn.
+            _ = ticker.tick() => peak = sample_peak(&child, peak),
+        }
     };
 
     let status = match waited {
@@ -279,14 +346,15 @@ pub async fn run_usage(
                 PollOutcome::SpawnError("cancelled during shutdown".into()),
                 None,
                 started,
+                peak,
             );
         }
-        Some(Err(_elapsed)) => {
+        Some(Err(())) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
             pid_slot.store(0, Ordering::SeqCst);
             reader.abort();
-            return finish(PollOutcome::Timeout(timeout_secs), None, started);
+            return finish(PollOutcome::Timeout(timeout_secs), None, started, peak);
         }
         Some(Ok(Err(e))) => {
             pid_slot.store(0, Ordering::SeqCst);
@@ -295,6 +363,7 @@ pub async fn run_usage(
                 PollOutcome::SpawnError(format!("could not wait for child: {e}")),
                 None,
                 started,
+                peak,
             );
         }
         Some(Ok(Ok(s))) => s,
@@ -323,6 +392,7 @@ pub async fn run_usage(
             PollOutcome::SpawnError(format!("exit {code}: {detail}")),
             Some(stdout.trim().to_string()),
             started,
+            peak,
         );
     }
 
@@ -338,14 +408,14 @@ pub async fn run_usage(
         // trip log site is `StoreHalt::log_envelope` in the driver, which
         // receives this exact stdout through `RunResult::raw`.
         GuardVerdict::Tripped(reason) => {
-            finish(PollOutcome::GuardTripped(reason), raw, started)
+            finish(PollOutcome::GuardTripped(reason), raw, started, peak)
         }
         GuardVerdict::Shape(reason) => {
-            finish(PollOutcome::SpawnError(reason), raw, started)
+            finish(PollOutcome::SpawnError(reason), raw, started, peak)
         }
         GuardVerdict::Usage(text) => {
             debug!(result_len = text.len(), "usage envelope accepted");
-            finish(parse_usage(&text, now), raw, started)
+            finish(parse_usage(&text, now), raw, started, peak)
         }
     }
 }
