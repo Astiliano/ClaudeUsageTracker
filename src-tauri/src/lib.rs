@@ -16,11 +16,12 @@ pub mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -50,6 +51,36 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// False once shutdown has begun.
 fn may_build_window(shutting_down: &AtomicBool) -> bool {
     !shutting_down.load(Ordering::SeqCst)
+}
+
+/// How long Quit waits for the driver to stop before exiting anyway.
+const DRIVER_STOP_MAX: Duration = Duration::from_millis(2500);
+
+/// How the wait for the driver's shutdown ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    /// The driver finished (or its task ended) within the bound.
+    Stopped,
+    /// The bound elapsed first; exit proceeds anyway.
+    TimedOut,
+    /// No driver was ever started, so there is nothing to wait for.
+    NoDriver,
+}
+
+/// Waits until the driver task signals completion, at most `max`.
+pub(crate) async fn await_driver_stop(
+    done: Option<oneshot::Receiver<()>>,
+    max: Duration,
+) -> StopOutcome {
+    let Some(done) = done else {
+        return StopOutcome::NoDriver;
+    };
+    // `Ok` is the signal; `Err` means the sender was dropped, i.e. the driver
+    // task ended without reaching its send (a panic), which is also stopped.
+    match tokio::time::timeout(max, done).await {
+        Ok(_) => StopOutcome::Stopped,
+        Err(_) => StopOutcome::TimedOut,
+    }
 }
 
 /// What the window-state plugin persists: geometry only, never visibility
@@ -142,6 +173,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     let shutdown = CancellationToken::new();
     let shutdown_for_event = shutdown.clone();
+    // The driver task sends on `driver_done_tx` once `Driver::run` has killed
+    // and reaped its children; the exit handler waits on the receiver.
+    let (driver_done_tx, driver_done_rx) = oneshot::channel::<()>();
+    let mut driver_done_rx = Some(driver_done_rx);
 
     let result = tauri::Builder::default()
         // Single instance must be registered first so a second launch is
@@ -341,7 +376,11 @@ pub fn run() {
                 shutdown.clone(),
                 Arc::clone(&pid_slot),
             );
-            tauri::async_runtime::spawn(driver.run());
+            tauri::async_runtime::spawn(async move {
+                driver.run().await;
+                // The receiver is gone only if the app already exited.
+                let _ = driver_done_tx.send(());
+            });
             tauri::async_runtime::spawn(system::run_sampler(
                 Arc::clone(&core),
                 events,
@@ -406,16 +445,30 @@ pub fn run() {
                 ExitAction::Shutdown => {}
             }
             api.prevent_exit();
+            // A second request while the first is waiting must not start a
+            // second wait: the receiver is taken once.
+            if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+                debug!("exit requested again; shutdown already running");
+                return;
+            }
             info!("exit requested; shutting the poller down");
-            SHUTTING_DOWN.store(true, Ordering::SeqCst);
             shutdown_for_event.cancel();
 
+            let driver_done = driver_done_rx.take();
             let handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 // `app.exit()` ends in `process::exit`, which skips
                 // destructors, so the driver's own shutdown path must have
-                // killed and waited on any child before we get here.
-                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                // killed and waited on any child before we get here. Wait for
+                // that signal; the bound only caps a driver that hangs.
+                let started = Instant::now();
+                let outcome = await_driver_stop(driver_done, DRIVER_STOP_MAX).await;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                if outcome == StopOutcome::TimedOut {
+                    warn!(?outcome, elapsed_ms, "driver stop awaited");
+                } else {
+                    info!(?outcome, elapsed_ms, "driver stop awaited");
+                }
                 EXIT_APPROVED.store(true, Ordering::SeqCst);
                 handle.exit(0);
             });
@@ -433,6 +486,57 @@ mod tests {
         assert!(may_build_window(&flag));
         flag.store(true, Ordering::SeqCst);
         assert!(!may_build_window(&flag));
+    }
+
+    const MAX: Duration = Duration::from_millis(2500);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signal_sent_before_the_wait_resolves_at_once() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).expect("receiver alive");
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(Some(rx), MAX).await, StopOutcome::Stopped);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signal_during_the_wait_resolves_when_it_arrives() {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = tx.send(());
+        });
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(Some(rx), MAX).await, StopOutcome::Stopped);
+        assert_eq!(start.elapsed(), Duration::from_millis(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_signal_times_out_at_exactly_the_bound() {
+        // Keep the sender alive: dropping it would count as a stop.
+        let (_tx, rx) = oneshot::channel::<()>();
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            await_driver_stop(Some(rx), MAX).await,
+            StopOutcome::TimedOut
+        );
+        assert_eq!(start.elapsed(), MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_receiver_means_no_driver_and_no_wait() {
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(None, MAX).await, StopOutcome::NoDriver);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_sender_counts_as_stopped() {
+        let (tx, rx) = oneshot::channel::<()>();
+        drop(tx);
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(Some(rx), MAX).await, StopOutcome::Stopped);
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 
     #[test]
