@@ -99,6 +99,12 @@ fn show_main_window(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _guard = guard;
+        // Quit may have begun after the pre-spawn check and before this task
+        // got to run. Returning drops `_guard`, so `creating` resets.
+        if !may_build_window(&SHUTTING_DOWN) {
+            info!("window create skipped: shutting down");
+            return;
+        }
         let started = Instant::now();
         let Some(cfg) = app.config().app.windows.first().cloned() else {
             error!("window create failed: no window in the config");

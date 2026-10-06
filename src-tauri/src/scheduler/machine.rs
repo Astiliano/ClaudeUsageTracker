@@ -377,8 +377,9 @@ impl Machine {
     /// Runs the rules, then applies the hold's lifetime to the result in this
     /// one place, so no early return inside the rules can miss it (spec 4.2):
     /// a `Run` that polls every enabled account clears the hold, but an
-    /// `AccountChanged` Run polls only a subset, so the held full refresh is
-    /// still owed and the hold stays; a `Timer` skip other than `LowMemory`
+    /// `AccountChanged` Run that leaves an enabled account out (a strict
+    /// subset) does not discharge the held full refresh, so the hold stays;
+    /// one that covers every enabled account clears it; a `Timer` skip other than `LowMemory`
     /// clears it (that decision is the current verdict and memory no longer
     /// explains it); every other skip leaves it.
     pub fn decide(&mut self, trigger: Trigger, facts: &Facts<'_>) -> Decision {
@@ -388,11 +389,16 @@ impl Machine {
                 false
             }
         };
-        let subset = matches!(trigger, Trigger::AccountChanged(_));
+        let account_changed = matches!(trigger, Trigger::AccountChanged(_));
         let decision = self.decide_rules(trigger, facts);
         match &decision {
-            Decision::Run { .. } => {
-                if !subset {
+            Decision::Run { accounts, .. } => {
+                // Only an AccountChanged Run can be partial, and only when it
+                // leaves an enabled account out. One that covers every enabled
+                // account is a full refresh and discharges the hold.
+                let strict_subset =
+                    account_changed && !facts.enabled.iter().all(|e| accounts.contains(e));
+                if !strict_subset {
                     self.hold = None;
                 }
             }
@@ -1679,6 +1685,39 @@ mod tests {
         );
         assert_eq!(run_accounts(&d), ids(&["a"]), "got {d:?}");
         assert_eq!(m.memory_hold(), Some(the_hold(NOW)));
+    }
+
+    #[test]
+    fn an_account_changed_run_covering_every_enabled_account_clears_the_hold() {
+        // One enabled account: AccountChanged(["a"]) polls everything, so the
+        // held full refresh is discharged and the banner must not linger.
+        let only_a = ids(&["a"]);
+        let mut m = Machine::new();
+        let held = m.decide(
+            Trigger::Timer,
+            &mem_facts(Some(true), Some(LOW), &only_a, NOW),
+        );
+        assert_eq!(held, Decision::Skip(SkipReason::LowMemory));
+        assert_eq!(m.memory_hold(), Some(the_hold(NOW)));
+        let d = m.decide(
+            Trigger::AccountChanged(ids(&["a"])),
+            &mem_facts(Some(true), Some(LOW), &only_a, NOW + 1000),
+        );
+        assert_eq!(run_accounts(&d), ids(&["a"]), "got {d:?}");
+        assert_eq!(m.memory_hold(), None);
+    }
+
+    #[test]
+    fn an_account_changed_run_naming_every_enabled_account_clears_the_hold() {
+        // Order and ids outside the enabled set do not matter: what counts is
+        // that every enabled account is in the Run.
+        let mut m = held_machine();
+        let d = m.decide(
+            Trigger::AccountChanged(ids(&["b", "zzz", "a"])),
+            &mem_facts(Some(true), Some(LOW), &accounts(), NOW + 1000),
+        );
+        assert_eq!(run_accounts(&d), ids(&["a", "b"]), "got {d:?}");
+        assert_eq!(m.memory_hold(), None);
     }
 
     #[test]
