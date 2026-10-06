@@ -21,9 +21,7 @@ pub fn defaults() -> UserSettings {
     }
 }
 
-pub fn test_core(
-    dir: &std::path::Path,
-) -> (Arc<Core>, tokio::sync::watch::Receiver<UserSettings>) {
+pub fn test_core(dir: &std::path::Path) -> (Arc<Core>, tokio::sync::watch::Receiver<UserSettings>) {
     let store = Arc::new(Store::open_in_memory().expect("open"));
     let (settings_tx, settings_rx) = tokio::sync::watch::channel(defaults());
     store.save_settings(&defaults()).expect("save settings");

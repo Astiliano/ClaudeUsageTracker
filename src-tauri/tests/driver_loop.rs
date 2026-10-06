@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cut_core::commands::{
-    core_clear_halt, core_get_dashboard, core_poll_now, core_set_settings, core_update_account, lock_binary,
-    lock_status, Core,
+    core_clear_halt, core_get_dashboard, core_poll_now, core_set_settings, core_update_account,
+    lock_binary, lock_status, Core,
 };
 use cut_core::memory::{ChildPeak, MemoryProbe};
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
@@ -142,7 +142,6 @@ impl BinaryProbe for NoBinary {
         None
     }
 }
-
 
 fn fake_claude() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_claude"))
@@ -720,7 +719,10 @@ async fn a_cycle_reports_a_peak() {
 
     let peaks = h.events.peaks.lock().expect("lock").clone();
     assert_eq!(peaks.len(), 1, "{peaks:?}");
-    assert!(peaks[0].is_some(), "the cycle must carry its child's peak: {peaks:?}");
+    assert!(
+        peaks[0].is_some(),
+        "the cycle must carry its child's peak: {peaks:?}"
+    );
 }
 
 /// Two accounts, the first child holds 200 MiB and the second holds none.
@@ -988,7 +990,10 @@ async fn a_held_final_poll_keeps_the_gate_active_until_it_runs() {
     })
     .await;
     wait_for_idle(&h).await;
-    assert_eq!(*h.events.gates.lock().expect("lock"), vec!["active", "idle"]);
+    assert_eq!(
+        *h.events.gates.lock().expect("lock"),
+        vec!["active", "idle"]
+    );
     assert_eq!(lock_status(&h.core.status).memory_hold, None);
 
     h.shutdown.cancel();
@@ -1119,7 +1124,12 @@ async fn a_cut_closing_cycle_keeps_the_gate_active() {
     .await;
     wait_for_idle(&h).await;
     assert_eq!(
-        h.events.gates.lock().expect("lock").last().map(String::as_str),
+        h.events
+            .gates
+            .lock()
+            .expect("lock")
+            .last()
+            .map(String::as_str),
         Some("idle")
     );
     assert_eq!(lock_status(&h.core.status).memory_hold, None);

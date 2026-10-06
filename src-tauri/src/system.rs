@@ -266,7 +266,11 @@ pub async fn run_sampler(
             break;
         }
 
-        let Sampled { stats, elapsed_ms, did_prime } = sampled;
+        let Sampled {
+            stats,
+            elapsed_ms,
+            did_prime,
+        } = sampled;
         if presence_edge(prev_count, stats.claude_count) {
             info!("presence wake");
             core.triggers.presence();
@@ -289,9 +293,18 @@ pub async fn run_sampler(
         let held = lock_status(&core.status).memory_hold.is_some();
         let floor = floor_bytes(core.settings_tx.borrow().min_free_memory_mb);
         let available = memory.available_commit_bytes();
-        let step = sampler_step(held, available, floor, core.window_open.load(Ordering::SeqCst));
+        let step = sampler_step(
+            held,
+            available,
+            floor,
+            core.window_open.load(Ordering::SeqCst),
+        );
         if step.wake {
-            debug!(available_bytes = available, floor_bytes = floor, "memory recovered; waking driver");
+            debug!(
+                available_bytes = available,
+                floor_bytes = floor,
+                "memory recovered; waking driver"
+            );
             core.triggers.memory_recovered();
         }
         wait = step.wait;
@@ -318,12 +331,20 @@ mod tests {
     }
 
     fn exclusion() -> Exclusion {
-        Exclusion { self_pid: 100, self_started_at: 5_000, poll_child: None }
+        Exclusion {
+            self_pid: 100,
+            self_started_at: 5_000,
+            poll_child: None,
+        }
     }
 
     #[test]
     fn count_claude_counts_only_the_views_the_exclusion_accepts() {
-        let procs = vec![view(200, "claude.exe"), view(201, "claude.exe"), view(202, "code.exe")];
+        let procs = vec![
+            view(200, "claude.exe"),
+            view(201, "claude.exe"),
+            view(202, "code.exe"),
+        ];
         assert_eq!(count_claude(&procs, &exclusion()), 2);
     }
 
@@ -334,7 +355,11 @@ mod tests {
 
     #[test]
     fn cpu_share_clamps_and_never_publishes_a_non_finite_value() {
-        assert_eq!(cpu_share(f32::NAN), 0.0, "a PDH hiccup must not become NaN on the wire");
+        assert_eq!(
+            cpu_share(f32::NAN),
+            0.0,
+            "a PDH hiccup must not become NaN on the wire"
+        );
         assert_eq!(cpu_share(f32::INFINITY), 0.0);
         assert_eq!(cpu_share(-1.0), 0.0);
         assert_eq!(cpu_share(150.0), 100.0);
@@ -374,10 +399,22 @@ mod tests {
 
     #[test]
     fn sampler_step_waits_by_window_state() {
-        assert_eq!(sampler_step(false, None, 0, true).wait, Duration::from_secs(5));
-        assert_eq!(sampler_step(false, None, 0, false).wait, Duration::from_secs(30));
-        assert_eq!(sampler_step(true, Some(u64::MAX), 0, true).wait, Duration::from_secs(5));
-        assert_eq!(sampler_step(true, Some(u64::MAX), 0, false).wait, Duration::from_secs(30));
+        assert_eq!(
+            sampler_step(false, None, 0, true).wait,
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            sampler_step(false, None, 0, false).wait,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            sampler_step(true, Some(u64::MAX), 0, true).wait,
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            sampler_step(true, Some(u64::MAX), 0, false).wait,
+            Duration::from_secs(30)
+        );
     }
 
     #[test]
@@ -386,7 +423,11 @@ mod tests {
             assert_eq!(after_panic(panics, true), Some(Duration::from_secs(5)));
             assert_eq!(after_panic(panics, false), Some(Duration::from_secs(30)));
         }
-        assert_eq!(after_panic(3, true), None, "three in a row stops the sampler");
+        assert_eq!(
+            after_panic(3, true),
+            None,
+            "three in a row stops the sampler"
+        );
         assert_eq!(after_panic(3, false), None);
     }
 
@@ -397,7 +438,10 @@ mod tests {
     fn sample_primes_once_and_returns_usable_figures() {
         let mut sampler = Sampler::new(Arc::new(AtomicU32::new(0)));
         let first = sampler.sample(1_700_000_000_000);
-        assert!(first.did_prime, "the first call runs the priming collection");
+        assert!(
+            first.did_prime,
+            "the first call runs the priming collection"
+        );
         assert!(first.stats.mem_total_bytes > 0);
         assert!(first.stats.mem_used_bytes <= first.stats.mem_total_bytes);
         assert!(first.stats.cpu_pct.is_finite());

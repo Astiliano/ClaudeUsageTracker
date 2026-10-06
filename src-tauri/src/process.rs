@@ -4,10 +4,8 @@ use tracing::debug;
 
 use crate::error::AppResult;
 
-const NPM_PACKAGE_FRAGMENTS: [&str; 2] = [
-    "@anthropic-ai/claude-code",
-    "@anthropic-ai\\claude-code",
-];
+const NPM_PACKAGE_FRAGMENTS: [&str; 2] =
+    ["@anthropic-ai/claude-code", "@anthropic-ai\\claude-code"];
 
 /// Pure matcher for a running Claude Code process (spec 6.2).
 /// Native install: process name is `claude` or `claude.exe`.
@@ -198,7 +196,10 @@ mod tests {
         // matches_claude is name/cmd only; exclusion happens in
         // is_claude_running. This test documents the split so the pid rule
         // is never pushed down into the pure matcher.
-        assert!(matches_claude("claude.exe", &cmd(&["claude.exe", "-p", "/usage"])));
+        assert!(matches_claude(
+            "claude.exe",
+            &cmd(&["claude.exe", "-p", "/usage"])
+        ));
     }
 
     fn view(pid: u32, parent: Option<u32>, start_time: u64, name: &str, cmd: &[&str]) -> ProcView {
@@ -212,7 +213,11 @@ mod tests {
     }
 
     fn exclusion(poll_child: Option<u32>) -> Exclusion {
-        Exclusion { self_pid: 100, self_started_at: 5_000, poll_child }
+        Exclusion {
+            self_pid: 100,
+            self_started_at: 5_000,
+            poll_child,
+        }
     }
 
     #[test]
@@ -228,7 +233,10 @@ mod tests {
             Some(1),
             6_000,
             "node.exe",
-            &["node.exe", "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js"],
+            &[
+                "node.exe",
+                "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js",
+            ],
         );
         assert!(exclusion(None).counts(&v));
     }
@@ -259,7 +267,11 @@ mod tests {
 
     #[test]
     fn a_zero_self_started_at_falls_back_to_the_plain_parent_check() {
-        let e = Exclusion { self_pid: 100, self_started_at: 0, poll_child: None };
+        let e = Exclusion {
+            self_pid: 100,
+            self_started_at: 0,
+            poll_child: None,
+        };
         let child = view(303, Some(100), 1, "claude.exe", &["claude.exe"]);
         let other = view(304, Some(7), 1, "claude.exe", &["claude.exe"]);
         assert!(!e.counts(&child));

@@ -2,8 +2,8 @@ pub mod commands;
 pub mod discovery;
 pub mod error;
 pub mod logging;
-pub mod memory;
 pub mod login;
+pub mod memory;
 pub mod paths;
 pub mod process;
 pub mod scheduler;
@@ -27,16 +27,15 @@ use tracing::{debug, error, info, warn};
 use crate::commands::{
     begin_create, lock_binary, window_created, window_destroyed, Core, SharedCore, SystemSlot,
 };
+use crate::memory::{MemoryProbe, RealMemoryProbe};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
-use crate::memory::{MemoryProbe, RealMemoryProbe};
 use crate::scheduler::machine::DriverStatus;
 use crate::scheduler::triggers::Triggers;
 use crate::store::Store;
 use crate::tray::{
-    apply_tray, exit_action, ExitAction, TauriEvents, MENU_LOGS, MENU_OPEN, MENU_QUIT,
-    MENU_REFRESH,
+    apply_tray, exit_action, ExitAction, TauriEvents, MENU_LOGS, MENU_OPEN, MENU_QUIT, MENU_REFRESH,
 };
 
 /// Set once the shutdown sequence has finished, so the second
@@ -200,10 +199,8 @@ pub fn run() {
             // Seed accounts on first start (spec 6.1).
             let home = paths::home_dir()?;
             let candidates = discovery::enumerate_profiles(&home);
-            let seeded = store.seed_accounts_if_empty(
-                &candidates,
-                chrono::Utc::now().timestamp_millis(),
-            )?;
+            let seeded =
+                store.seed_accounts_if_empty(&candidates, chrono::Utc::now().timestamp_millis())?;
             info!(seeded, discovered = candidates.len(), "accounts loaded");
 
             // D10: prune once at startup; the driver repeats it every 24 h.
@@ -262,10 +259,8 @@ pub fn run() {
             // while the real, interactive one never changes. This builder is
             // the sole creator of the tray.
             let open = MenuItem::with_id(app, MENU_OPEN, "Open", true, None::<&str>)?;
-            let refresh =
-                MenuItem::with_id(app, MENU_REFRESH, "Refresh now", true, None::<&str>)?;
-            let logs =
-                MenuItem::with_id(app, MENU_LOGS, "Open log folder", true, None::<&str>)?;
+            let refresh = MenuItem::with_id(app, MENU_REFRESH, "Refresh now", true, None::<&str>)?;
+            let logs = MenuItem::with_id(app, MENU_LOGS, "Open log folder", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &refresh, &logs, &quit])?;
 
@@ -283,10 +278,9 @@ pub fn run() {
                         // this handler runs on the UI thread.
                         let poll_core = Arc::clone(&menu_core);
                         tauri::async_runtime::spawn(async move {
-                            let result = commands::blocking(move || {
-                                commands::core_poll_now(&poll_core)
-                            })
-                            .await;
+                            let result =
+                                commands::blocking(move || commands::core_poll_now(&poll_core))
+                                    .await;
                             match result {
                                 Ok(s) => info!(result = %s, "tray refresh"),
                                 Err(e) => error!(error = %e, "tray refresh failed"),
@@ -439,7 +433,10 @@ mod tests {
     fn a_failed_window_call_is_logged_and_becomes_none() {
         let log = crate::test_log::captured(|| {
             assert_eq!(ok_or_warn("show", Ok::<u8, String>(7)), Some(7));
-            assert_eq!(ok_or_warn("outer_size", Err::<u8, String>("gone".into())), None);
+            assert_eq!(
+                ok_or_warn("outer_size", Err::<u8, String>("gone".into())),
+                None
+            );
         });
         assert!(log.contains("WARN"), "{log}");
         assert!(log.contains("outer_size"), "{log}");

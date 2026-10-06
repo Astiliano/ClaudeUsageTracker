@@ -81,10 +81,7 @@ pub fn check_envelope(stdout: &str) -> GuardVerdict {
     }
     if let Some(m) = v.get("modelUsage").and_then(Value::as_object) {
         if !m.is_empty() {
-            return GuardVerdict::Tripped(format!(
-                "modelUsage is non-empty ({} entries)",
-                m.len()
-            ));
+            return GuardVerdict::Tripped(format!("modelUsage is non-empty ({} entries)", m.len()));
         }
     }
 
@@ -288,10 +285,7 @@ pub async fn run_usage(
         Ok(c) => c,
         Err(e) => {
             return finish(
-                PollOutcome::SpawnError(format!(
-                    "could not spawn {}: {e}",
-                    binary.display()
-                )),
+                PollOutcome::SpawnError(format!("could not spawn {}: {e}", binary.display())),
                 None,
                 started,
                 None,
@@ -379,7 +373,9 @@ pub async fn run_usage(
     // exclude-hint for the process gate, and a pid that has already exited
     // can be recycled by the OS for an unrelated process, so it must not
     // linger published after run_usage has finished with it.
-    let (stdout, stderr) = reader.await.unwrap_or_else(|_| (String::new(), String::new()));
+    let (stdout, stderr) = reader
+        .await
+        .unwrap_or_else(|_| (String::new(), String::new()));
     pid_slot.store(0, Ordering::SeqCst);
 
     if !status.success() {
@@ -414,9 +410,7 @@ pub async fn run_usage(
         GuardVerdict::Tripped(reason) => {
             finish(PollOutcome::GuardTripped(reason), raw, started, peak)
         }
-        GuardVerdict::Shape(reason) => {
-            finish(PollOutcome::SpawnError(reason), raw, started, peak)
-        }
+        GuardVerdict::Shape(reason) => finish(PollOutcome::SpawnError(reason), raw, started, peak),
         GuardVerdict::Usage(text) => {
             debug!(result_len = text.len(), "usage envelope accepted");
             finish(parse_usage(&text, now), raw, started, peak)

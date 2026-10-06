@@ -20,10 +20,8 @@ fn patterns() -> Option<&'static Patterns> {
     P.get_or_init(|| {
         Some(Patterns {
             detect: Regex::new(r"^Current (session|week)\b").ok()?,
-            session: Regex::new(
-                r"^Current session: (\d{1,3})% used(?: · resets (.+?) \((.+)\))?$",
-            )
-            .ok()?,
+            session: Regex::new(r"^Current session: (\d{1,3})% used(?: · resets (.+?) \((.+)\))?$")
+                .ok()?,
             week_all: Regex::new(
                 r"^Current week \(all models\): (\d{1,3})% used(?: · resets (.+?) \((.+)\))?$",
             )
@@ -376,7 +374,10 @@ mod tests {
             include_str!("../../tests/fixtures/duplicate_session.txt"),
             now_sep_2026(),
         );
-        assert_eq!(out, PollOutcome::ParseError("duplicate session line".into()));
+        assert_eq!(
+            out,
+            PollOutcome::ParseError("duplicate session line".into())
+        );
     }
 
     #[test]
@@ -404,7 +405,10 @@ mod tests {
 
     #[test]
     fn crlf_input_parses() {
-        let p = parsed(include_str!("../../tests/fixtures/crlf.txt"), now_sep_2026());
+        let p = parsed(
+            include_str!("../../tests/fixtures/crlf.txt"),
+            now_sep_2026(),
+        );
         assert_eq!(p.session.pct, 15);
         assert_eq!(p.week_all.pct, 4);
         assert_eq!(p.session.resets_at, Some(ms(2026, 9, 16, 10, 30)));

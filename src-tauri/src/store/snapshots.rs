@@ -66,7 +66,9 @@ fn row_to_dto(row: &Row<'_>) -> Result<SnapshotDto, rusqlite::Error> {
         week_all: window_from_cols(row.get("week_all_pct")?, row.get("week_all_resets_at")?),
         week_models,
         error: row.get("error")?,
-        duration_ms: row.get::<_, i64>("duration_ms")?.clamp(0, i64::from(u32::MAX)) as u32,
+        duration_ms: row
+            .get::<_, i64>("duration_ms")?
+            .clamp(0, i64::from(u32::MAX)) as u32,
     })
 }
 
@@ -235,13 +237,13 @@ impl Store {
     pub fn prune(&self, now: i64) -> AppResult<usize> {
         let cutoff = now - RETENTION_MS;
         let removed = self.with_conn(|c| {
-            Ok(c.execute(
-                "DELETE FROM snapshots WHERE taken_at < ?1",
-                params![cutoff],
-            )?)
+            Ok(c.execute("DELETE FROM snapshots WHERE taken_at < ?1", params![cutoff])?)
         })?;
         if removed > 0 {
-            warn!(removed, cutoff, "pruned snapshots older than the retention window");
+            warn!(
+                removed,
+                cutoff, "pruned snapshots older than the retention window"
+            );
         }
         self.with_conn(|c| {
             c.execute_batch("PRAGMA incremental_vacuum;")?;
@@ -253,8 +255,7 @@ impl Store {
     /// Backing store for `get_snapshot_raw`: `(raw, error)`.
     pub fn snapshot_raw(&self, snapshot_id: i64) -> AppResult<(Option<String>, Option<String>)> {
         self.with_conn(|c| {
-            let mut stmt =
-                c.prepare("SELECT raw, error FROM snapshots WHERE id = ?1")?;
+            let mut stmt = c.prepare("SELECT raw, error FROM snapshots WHERE id = ?1")?;
             let mut rows = stmt.query(params![snapshot_id])?;
             match rows.next()? {
                 Some(row) => Ok((row.get(0)?, row.get(1)?)),
@@ -288,22 +289,45 @@ mod tests {
 
     fn ok_outcome(session: u8, week: u8) -> PollOutcome {
         PollOutcome::Ok(Parsed {
-            session: Window { pct: session, resets_at: Some(NOW + HOUR) },
-            week_all: Window { pct: week, resets_at: Some(NOW + 6 * HOUR) },
+            session: Window {
+                pct: session,
+                resets_at: Some(NOW + HOUR),
+            },
+            week_all: Window {
+                pct: week,
+                resets_at: Some(NOW + 6 * HOUR),
+            },
             week_models: vec![(
                 "Fable".to_string(),
-                Window { pct: 5, resets_at: Some(NOW + 6 * HOUR) },
+                Window {
+                    pct: 5,
+                    resets_at: Some(NOW + 6 * HOUR),
+                },
             )],
         })
     }
 
     fn ok_with_models(session: u8, week: u8, models: &[(&str, u8)]) -> PollOutcome {
         PollOutcome::Ok(Parsed {
-            session: Window { pct: session, resets_at: None },
-            week_all: Window { pct: week, resets_at: None },
+            session: Window {
+                pct: session,
+                resets_at: None,
+            },
+            week_all: Window {
+                pct: week,
+                resets_at: None,
+            },
             week_models: models
                 .iter()
-                .map(|(l, p)| ((*l).to_string(), Window { pct: *p, resets_at: None }))
+                .map(|(l, p)| {
+                    (
+                        (*l).to_string(),
+                        Window {
+                            pct: *p,
+                            resets_at: None,
+                        },
+                    )
+                })
                 .collect(),
         })
     }
@@ -315,7 +339,10 @@ mod tests {
         assert_eq!(v["minBucketMs"], MIN_BUCKET_MS);
         assert_eq!(v["maxBuckets"], MAX_BUCKETS);
         assert_eq!(v["maxRangeMs"], MAX_RANGE_MS);
-        assert_eq!(MAX_RANGE_MS, RETENTION_MS, "the chart can reach exactly as far as retention");
+        assert_eq!(
+            MAX_RANGE_MS, RETENTION_MS,
+            "the chart can reach exactly as far as retention"
+        );
     }
 
     #[test]
@@ -326,7 +353,12 @@ mod tests {
             serde_json::from_str(r#"{"kind":"model","label":"Fable"}"#).expect("model");
         assert_eq!(w, HistoryMetric::WeekAll);
         assert_eq!(s, HistoryMetric::Session);
-        assert_eq!(m, HistoryMetric::Model { label: "Fable".into() });
+        assert_eq!(
+            m,
+            HistoryMetric::Model {
+                label: "Fable".into()
+            }
+        );
         assert!(serde_json::from_str::<HistoryMetric>(r#"{"kind":"nope"}"#).is_err());
     }
 
@@ -336,18 +368,32 @@ mod tests {
         // `since` deliberately NOT on an hour boundary: buckets start at since.
         let since = NOW + 12_345;
         let bucket = 15 * 60_000; // 15 minutes
-        store.insert_snapshot(&acct, since + 1_000, &ok_outcome(1, 4), None, 1).expect("a");
-        store.insert_snapshot(&acct, since + 2_000, &ok_outcome(1, 9), None, 1).expect("b");
-        store.insert_snapshot(&acct, since + bucket + 1, &ok_outcome(1, 6), None, 1).expect("c");
-        store.insert_snapshot(&acct, since - 1, &ok_outcome(1, 99), None, 1).expect("before since");
+        store
+            .insert_snapshot(&acct, since + 1_000, &ok_outcome(1, 4), None, 1)
+            .expect("a");
+        store
+            .insert_snapshot(&acct, since + 2_000, &ok_outcome(1, 9), None, 1)
+            .expect("b");
+        store
+            .insert_snapshot(&acct, since + bucket + 1, &ok_outcome(1, 6), None, 1)
+            .expect("c");
+        store
+            .insert_snapshot(&acct, since - 1, &ok_outcome(1, 99), None, 1)
+            .expect("before since");
 
         let points = store
             .history(&acct, since, bucket, &HistoryMetric::WeekAll)
             .expect("history");
-        assert_eq!(points, vec![
-            HistoryPoint { t: since, pct: 9 },
-            HistoryPoint { t: since + bucket, pct: 6 },
-        ]);
+        assert_eq!(
+            points,
+            vec![
+                HistoryPoint { t: since, pct: 9 },
+                HistoryPoint {
+                    t: since + bucket,
+                    pct: 6
+                },
+            ]
+        );
     }
 
     #[test]
@@ -355,11 +401,17 @@ mod tests {
         let (_tmp, store, acct) = store_with_account();
         let since = NOW;
         let bucket = 3_600_000;
-        store.insert_snapshot(&acct, since + 1000, &ok_outcome(1, 4), None, 1).expect("a");
+        store
+            .insert_snapshot(&acct, since + 1000, &ok_outcome(1, 4), None, 1)
+            .expect("a");
         // Skip three hours entirely, as the process gate does overnight.
-        store.insert_snapshot(&acct, since + 4 * bucket + 1000, &ok_outcome(1, 7), None, 1).expect("b");
+        store
+            .insert_snapshot(&acct, since + 4 * bucket + 1000, &ok_outcome(1, 7), None, 1)
+            .expect("b");
 
-        let points = store.history(&acct, since, bucket, &HistoryMetric::WeekAll).expect("history");
+        let points = store
+            .history(&acct, since, bucket, &HistoryMetric::WeekAll)
+            .expect("history");
         assert_eq!(points.len(), 2, "no zero-filling of the gap");
         assert_eq!(points[0].t, since);
         assert_eq!(points[1].t, since + 4 * bucket);
@@ -368,23 +420,38 @@ mod tests {
     #[test]
     fn history_ignores_non_ok_rows_for_every_metric() {
         let (_tmp, store, acct) = store_with_account();
-        store.insert_snapshot(&acct, NOW + 1000, &PollOutcome::Timeout(30), None, 1).expect("a");
-        store.insert_snapshot(&acct, NOW + 2000, &PollOutcome::NoUsageData, None, 1).expect("b");
+        store
+            .insert_snapshot(&acct, NOW + 1000, &PollOutcome::Timeout(30), None, 1)
+            .expect("a");
+        store
+            .insert_snapshot(&acct, NOW + 2000, &PollOutcome::NoUsageData, None, 1)
+            .expect("b");
         for metric in [
             HistoryMetric::WeekAll,
             HistoryMetric::Session,
-            HistoryMetric::Model { label: "Fable".into() },
+            HistoryMetric::Model {
+                label: "Fable".into(),
+            },
         ] {
-            assert!(store.history(&acct, NOW, 60_000, &metric).expect("history").is_empty());
+            assert!(store
+                .history(&acct, NOW, 60_000, &metric)
+                .expect("history")
+                .is_empty());
         }
     }
 
     #[test]
     fn history_session_metric_reads_session_pct() {
         let (_tmp, store, acct) = store_with_account();
-        store.insert_snapshot(&acct, NOW + 1000, &ok_outcome(37, 4), None, 1).expect("a");
-        store.insert_snapshot(&acct, NOW + 2000, &ok_outcome(52, 9), None, 1).expect("b");
-        let points = store.history(&acct, NOW, 60_000, &HistoryMetric::Session).expect("history");
+        store
+            .insert_snapshot(&acct, NOW + 1000, &ok_outcome(37, 4), None, 1)
+            .expect("a");
+        store
+            .insert_snapshot(&acct, NOW + 2000, &ok_outcome(52, 9), None, 1)
+            .expect("b");
+        let points = store
+            .history(&acct, NOW, 60_000, &HistoryMetric::Session)
+            .expect("history");
         assert_eq!(points, vec![HistoryPoint { t: NOW, pct: 52 }]);
     }
 
@@ -392,22 +459,54 @@ mod tests {
     fn history_model_metric_matches_the_label_exactly_and_ignores_other_models() {
         let (_tmp, store, acct) = store_with_account();
         store
-            .insert_snapshot(&acct, NOW + 1000, &ok_with_models(1, 1, &[("Fable", 40), ("Opus", 90)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 1000,
+                &ok_with_models(1, 1, &[("Fable", 40), ("Opus", 90)]),
+                None,
+                1,
+            )
             .expect("a");
         store
-            .insert_snapshot(&acct, NOW + 2000, &ok_with_models(1, 1, &[("Fable", 45)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 2000,
+                &ok_with_models(1, 1, &[("Fable", 45)]),
+                None,
+                1,
+            )
             .expect("b");
         store
-            .insert_snapshot(&acct, NOW + 3000, &ok_with_models(1, 1, &[("Opus", 95)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 3000,
+                &ok_with_models(1, 1, &[("Opus", 95)]),
+                None,
+                1,
+            )
             .expect("c: no Fable at all");
 
         let fable = store
-            .history(&acct, NOW, 60_000, &HistoryMetric::Model { label: "Fable".into() })
+            .history(
+                &acct,
+                NOW,
+                60_000,
+                &HistoryMetric::Model {
+                    label: "Fable".into(),
+                },
+            )
             .expect("fable");
         assert_eq!(fable, vec![HistoryPoint { t: NOW, pct: 45 }]);
 
         let lower = store
-            .history(&acct, NOW, 60_000, &HistoryMetric::Model { label: "fable".into() })
+            .history(
+                &acct,
+                NOW,
+                60_000,
+                &HistoryMetric::Model {
+                    label: "fable".into(),
+                },
+            )
             .expect("case differs");
         assert!(lower.is_empty(), "label match is exact");
     }
@@ -416,7 +515,13 @@ mod tests {
     fn history_model_metric_tolerates_a_malformed_json_row_and_a_real_pct() {
         let (_tmp, store, acct) = store_with_account();
         store
-            .insert_snapshot(&acct, NOW + 1000, &ok_with_models(1, 1, &[("Fable", 40)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 1000,
+                &ok_with_models(1, 1, &[("Fable", 40)]),
+                None,
+                1,
+            )
             .expect("good row");
         store
             .with_conn(|c| {
@@ -447,10 +552,23 @@ mod tests {
             .expect("raw inserts");
 
         let points = store
-            .history(&acct, NOW, 60_000, &HistoryMetric::Model { label: "Fable".into() })
+            .history(
+                &acct,
+                NOW,
+                60_000,
+                &HistoryMetric::Model {
+                    label: "Fable".into(),
+                },
+            )
             .expect("malformed and odd-shaped rows must not fail the query");
-        assert_eq!(points, vec![HistoryPoint { t: NOW, pct: 48 }], "47.6 rounds to 48; text pct ignored");
-        let labels = store.history_models(&acct, NOW).expect("labels must not fail either");
+        assert_eq!(
+            points,
+            vec![HistoryPoint { t: NOW, pct: 48 }],
+            "47.6 rounds to 48; text pct ignored"
+        );
+        let labels = store
+            .history_models(&acct, NOW)
+            .expect("labels must not fail either");
         assert_eq!(labels, vec!["Fable".to_string()]);
     }
 
@@ -458,20 +576,44 @@ mod tests {
     fn history_models_lists_distinct_sorted_labels_within_the_window() {
         let (_tmp, store, acct) = store_with_account();
         store
-            .insert_snapshot(&acct, NOW + 1000, &ok_with_models(1, 1, &[("Opus", 1), ("Fable", 2)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 1000,
+                &ok_with_models(1, 1, &[("Opus", 1), ("Fable", 2)]),
+                None,
+                1,
+            )
             .expect("a");
         store
-            .insert_snapshot(&acct, NOW + 2000, &ok_with_models(1, 1, &[("Fable", 3)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 2000,
+                &ok_with_models(1, 1, &[("Fable", 3)]),
+                None,
+                1,
+            )
             .expect("b");
         store
-            .insert_snapshot(&acct, NOW - 10, &ok_with_models(1, 1, &[("Ancient", 3)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW - 10,
+                &ok_with_models(1, 1, &[("Ancient", 3)]),
+                None,
+                1,
+            )
             .expect("before since");
         store
             .insert_snapshot(&acct, NOW + 3000, &PollOutcome::Timeout(30), None, 1)
             .expect("failure row has no models");
         let long = "x".repeat(65);
         store
-            .insert_snapshot(&acct, NOW + 4000, &ok_with_models(1, 1, &[(long.as_str(), 1), (" \t ", 1)]), None, 1)
+            .insert_snapshot(
+                &acct,
+                NOW + 4000,
+                &ok_with_models(1, 1, &[(long.as_str(), 1), (" \t ", 1)]),
+                None,
+                1,
+            )
             .expect("unusable labels");
 
         let labels = store.history_models(&acct, NOW).expect("labels");
@@ -489,10 +631,19 @@ mod tests {
         let latest = store.latest_per_account().expect("latest");
         let dto = latest.get(&acct).expect("row for account");
         assert_eq!(dto.outcome, "ok");
-        assert_eq!(dto.session, Some(Window { pct: 15, resets_at: Some(NOW + HOUR) }));
+        assert_eq!(
+            dto.session,
+            Some(Window {
+                pct: 15,
+                resets_at: Some(NOW + HOUR)
+            })
+        );
         assert_eq!(
             dto.week_all,
-            Some(Window { pct: 4, resets_at: Some(NOW + 6 * HOUR) })
+            Some(Window {
+                pct: 4,
+                resets_at: Some(NOW + 6 * HOUR)
+            })
         );
         assert_eq!(dto.week_models.len(), 1);
         assert_eq!(dto.week_models[0].label, "Fable");

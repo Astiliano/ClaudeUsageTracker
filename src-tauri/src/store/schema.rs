@@ -109,9 +109,8 @@ mod tests {
     fn table_names(store: &Store) -> Vec<String> {
         store
             .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-                )?;
+                let mut stmt =
+                    c.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
                 let rows = stmt
                     .query_map([], |r| r.get::<_, String>(0))?
                     .collect::<Result<Vec<String>, rusqlite::Error>>()?;
@@ -209,7 +208,10 @@ mod tests {
                 Ok(names.iter().any(|n| n == "sort_order"))
             })
             .expect("table_info");
-        assert!(has_column, "sort_order column must exist after a fresh migration");
+        assert!(
+            has_column,
+            "sort_order column must exist after a fresh migration"
+        );
     }
 
     #[test]
@@ -217,7 +219,8 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
         apply_pragmas(&conn).expect("pragmas");
         conn.execute_batch(V1).expect("create v1 schema by hand");
-        conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+        conn.execute_batch("PRAGMA user_version=1;")
+            .expect("set v1");
 
         // Two accounts, inserted in an order that is NOT D17 order, exactly
         // as a real V1 database (pre-sort_order) would contain them.
@@ -278,10 +281,7 @@ mod tests {
             let store = Store::open(&path).expect("open");
             store
                 .with_conn(|c| {
-                    c.execute(
-                        "INSERT INTO settings(key, value) VALUES('probe','yes')",
-                        [],
-                    )?;
+                    c.execute("INSERT INTO settings(key, value) VALUES('probe','yes')", [])?;
                     Ok(())
                 })
                 .expect("insert");
@@ -289,16 +289,20 @@ mod tests {
         let store = Store::open(&path).expect("reopen");
         let v: String = store
             .with_conn(|c| {
-                Ok(c.query_row("SELECT value FROM settings WHERE key='probe'", [], |r| {
-                    r.get(0)
-                })?)
+                Ok(
+                    c.query_row("SELECT value FROM settings WHERE key='probe'", [], |r| {
+                        r.get(0)
+                    })?,
+                )
             })
             .expect("read back");
         assert_eq!(v, "yes");
     }
 
     fn column_names(conn: &rusqlite::Connection) -> Vec<String> {
-        let mut stmt = conn.prepare("PRAGMA table_info(accounts)").expect("prepare");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(accounts)")
+            .expect("prepare");
         stmt.query_map([], |r| r.get::<_, String>(1))
             .expect("query")
             .collect::<Result<Vec<String>, rusqlite::Error>>()
@@ -309,13 +313,20 @@ mod tests {
     fn a_fresh_database_has_no_is_default_column_and_can_insert_an_account() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in_memory().expect("open");
-        let names = store.with_conn(|c| Ok(column_names(c))).expect("table_info");
-        assert!(!names.iter().any(|n| n == "is_default"), "V3 must drop is_default: {names:?}");
+        let names = store
+            .with_conn(|c| Ok(column_names(c)))
+            .expect("table_info");
+        assert!(
+            !names.iter().any(|n| n == "is_default"),
+            "V3 must drop is_default: {names:?}"
+        );
         assert!(names.iter().any(|n| n == "sort_order"));
 
         let dir = tmp.path().join(".claude3");
         std::fs::create_dir_all(&dir).expect("mkdir");
-        store.add_account(&dir, true, None, 1).expect("insert must work without is_default");
+        store
+            .add_account(&dir, true, None, 1)
+            .expect("insert must work without is_default");
     }
 
     #[test]
@@ -323,7 +334,8 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
         apply_pragmas(&conn).expect("pragmas");
         conn.execute_batch(V1).expect("create v1 schema by hand");
-        conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+        conn.execute_batch("PRAGMA user_version=1;")
+            .expect("set v1");
         conn.execute(
             "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
              VALUES ('bravo', 'Bravo', '/bravo', 1, NULL, 0, 100)",
@@ -339,7 +351,9 @@ mod tests {
 
         migrate(&mut conn).expect("migrate v1 -> v3");
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).expect("version");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
         assert_eq!(version, 3);
         assert!(!column_names(&conn).iter().any(|n| n == "is_default"));
 
@@ -352,7 +366,10 @@ mod tests {
             .expect("collect");
         // The V2 backfill ran while is_default still existed, so alpha (the
         // old default) keeps sort_order 0 after V3 drops the column.
-        assert_eq!(ordered, vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]);
+        assert_eq!(
+            ordered,
+            vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]
+        );
     }
 
     #[test]
@@ -363,7 +380,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).expect("open");
             apply_pragmas(&conn).expect("pragmas");
             conn.execute_batch(V1).expect("create v1 schema by hand");
-            conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+            conn.execute_batch("PRAGMA user_version=1;")
+                .expect("set v1");
             conn.execute(
                 "INSERT INTO accounts(id, label, config_dir, enabled, disabled_reason, is_default, created_at)
                  VALUES ('bravo', 'Bravo', '/bravo', 1, NULL, 0, 100)",
@@ -386,8 +404,13 @@ mod tests {
             .expect("read user_version");
         assert_eq!(version, SCHEMA_VERSION);
 
-        let names = store.with_conn(|c| Ok(column_names(c))).expect("table_info");
-        assert!(!names.iter().any(|n| n == "is_default"), "V3 must drop is_default: {names:?}");
+        let names = store
+            .with_conn(|c| Ok(column_names(c)))
+            .expect("table_info");
+        assert!(
+            !names.iter().any(|n| n == "is_default"),
+            "V3 must drop is_default: {names:?}"
+        );
 
         let mode: String = store
             .with_conn(|c| Ok(c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?))
@@ -396,7 +419,8 @@ mod tests {
 
         let ordered: Vec<(String, i64)> = store
             .with_conn(|c| {
-                let mut stmt = c.prepare("SELECT id, sort_order FROM accounts ORDER BY sort_order ASC")?;
+                let mut stmt =
+                    c.prepare("SELECT id, sort_order FROM accounts ORDER BY sort_order ASC")?;
                 let rows = stmt
                     .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<Result<Vec<(String, i64)>, rusqlite::Error>>()?;
@@ -404,7 +428,10 @@ mod tests {
             })
             .expect("query rows");
         // 'alpha' is the default account, so the V2 backfill's D17 order puts it first.
-        assert_eq!(ordered, vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]);
+        assert_eq!(
+            ordered,
+            vec![("alpha".to_string(), 0), ("bravo".to_string(), 1)]
+        );
     }
 
     #[test]
@@ -414,13 +441,17 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
         apply_pragmas(&conn).expect("pragmas");
         conn.execute_batch(V1).expect("v1");
-        conn.execute_batch("PRAGMA user_version=1;").expect("set v1");
+        conn.execute_batch("PRAGMA user_version=1;")
+            .expect("set v1");
         conn.execute_batch(V2_ALTER).expect("v2 alter");
         conn.execute_batch(V2_BACKFILL).expect("v2 backfill");
-        conn.execute_batch("PRAGMA user_version=2;").expect("set v2");
+        conn.execute_batch("PRAGMA user_version=2;")
+            .expect("set v2");
         migrate(&mut conn).expect("migrate v2 -> v3");
         assert!(!column_names(&conn).iter().any(|n| n == "is_default"));
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).expect("version");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
         assert_eq!(version, 3);
     }
 }

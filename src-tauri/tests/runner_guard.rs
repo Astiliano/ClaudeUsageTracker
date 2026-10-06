@@ -34,7 +34,9 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn acquire() -> Self {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         EnvGuard {
             _lock,
             keys: Vec::new(),
@@ -73,7 +75,17 @@ async fn run_with(
     }
     let pid = AtomicU32::new(0);
     let cancel = CancellationToken::new();
-    run_usage(&fake(), config_dir, cwd, timeout, now(), &pid, &cancel, true).await
+    run_usage(
+        &fake(),
+        config_dir,
+        cwd,
+        timeout,
+        now(),
+        &pid,
+        &cancel,
+        true,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -210,7 +222,10 @@ async fn a_finished_run_reports_a_peak() {
     )
     .await;
     assert!(
-        !matches!(r.outcome, PollOutcome::Timeout(_) | PollOutcome::SpawnError(_)),
+        !matches!(
+            r.outcome,
+            PollOutcome::Timeout(_) | PollOutcome::SpawnError(_)
+        ),
         "the child must run to completion: {:?}",
         r.outcome
     );
@@ -237,8 +252,15 @@ async fn a_timeout_reads_the_peak_before_the_kill() {
             tmp.path(),
         )
         .await;
-        assert!(matches!(r.outcome, PollOutcome::Timeout(_)), "run {i}: {:?}", r.outcome);
-        assert!(r.peak.is_some(), "run {i}: a timeout must carry the peak read before the kill");
+        assert!(
+            matches!(r.outcome, PollOutcome::Timeout(_)),
+            "run {i}: {:?}",
+            r.outcome
+        );
+        assert!(
+            r.peak.is_some(),
+            "run {i}: a timeout must carry the peak read before the kill"
+        );
     }
 }
 
@@ -268,7 +290,10 @@ async fn a_cancel_reads_the_peak_before_the_kill() {
             PollOutcome::SpawnError(m) => assert!(m.contains("cancelled"), "run {i}: {m}"),
             other => panic!("run {i}: expected a cancelled SpawnError, got {other:?}"),
         }
-        assert!(r.peak.is_some(), "run {i}: a cancel must carry the peak read before the kill");
+        assert!(
+            r.peak.is_some(),
+            "run {i}: a cancel must carry the peak read before the kill"
+        );
     }
 }
 
@@ -292,7 +317,10 @@ async fn a_non_zero_exit_is_a_spawn_error_carrying_the_stderr_tail() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let r = run_with(
         "exit-nonzero",
-        &[("FAKE_CLAUDE_EXIT", "7"), ("FAKE_CLAUDE_STDERR", "auth failed")],
+        &[
+            ("FAKE_CLAUDE_EXIT", "7"),
+            ("FAKE_CLAUDE_STDERR", "auth failed"),
+        ],
         Duration::from_secs(20),
         tmp.path(),
         tmp.path(),

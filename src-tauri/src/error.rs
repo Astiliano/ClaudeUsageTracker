@@ -87,7 +87,10 @@ mod tests {
             (AppError::NotFound("a".into()), "not_found"),
             (AppError::Duplicate("a".into()), "duplicate"),
             (AppError::OutOfRange("a".into()), "out_of_range"),
-            (AppError::TerminalUnavailable("a".into()), "terminal_unavailable"),
+            (
+                AppError::TerminalUnavailable("a".into()),
+                "terminal_unavailable",
+            ),
             (AppError::Db("a".into()), "db"),
             (AppError::Io("a".into()), "io"),
             (AppError::Internal("a".into()), "internal"),
@@ -114,8 +117,7 @@ mod tests {
 
     #[test]
     fn io_error_maps_to_io() {
-        let e: AppError =
-            std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into();
+        let e: AppError = std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into();
         assert_eq!(e.code(), "io");
         assert_eq!(e.to_string(), "missing");
     }
