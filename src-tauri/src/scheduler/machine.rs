@@ -146,6 +146,16 @@ struct CycleInfo {
     started_at: i64,
 }
 
+pub struct Facts<'a> {
+    pub claude_running: Option<bool>,
+    pub available_commit_bytes: Option<u64>,
+    pub memory_floor_bytes: u64,
+    pub binary_present: bool,
+    pub halted: bool,
+    pub enabled: &'a [String],
+    pub now: i64,
+}
+
 pub struct Machine {
     gate: Gate,
     cycle: Option<CycleInfo>,
@@ -284,17 +294,9 @@ impl Machine {
 
     /// Pure in its arguments and the machine's fields; performs no I/O.
     /// Rules are evaluated in spec 6.5 order.
-    pub fn decide(
-        &mut self,
-        trigger: Trigger,
-        claude_running: Option<bool>,
-        binary_present: bool,
-        halted: bool,
-        enabled: &[String],
-        now: i64,
-    ) -> Decision {
+    pub fn decide(&mut self, trigger: Trigger, facts: &Facts<'_>) -> Decision {
         // 0. A global guard halt beats every trigger, including Manual.
-        if halted {
+        if facts.halted {
             return Decision::Skip(SkipReason::Halted);
         }
         // 1. One cycle at a time (D7).
@@ -302,10 +304,10 @@ impl Machine {
             return Decision::Skip(SkipReason::Busy);
         }
         // 2/3. Nothing to spawn, or nothing to poll.
-        if !binary_present {
+        if !facts.binary_present {
             return Decision::Skip(SkipReason::NoBinary);
         }
-        if enabled.is_empty() {
+        if facts.enabled.is_empty() {
             return Decision::Skip(SkipReason::NoEnabledAccounts);
         }
 
@@ -313,7 +315,7 @@ impl Machine {
         let mut next_gate = self.gate;
         let candidates: Vec<String> = match &trigger {
             Trigger::Timer | Trigger::Presence => {
-                let running = match claude_running {
+                let running = match facts.claude_running {
                     Some(r) => r,
                     None => {
                         debug_assert!(
@@ -333,24 +335,25 @@ impl Machine {
                     (_, Gate::Active, false) => next_gate = Gate::Idle,
                     (_, Gate::Active, true) => {}
                 }
-                enabled.to_vec()
+                facts.enabled.to_vec()
             }
             Trigger::Manual | Trigger::Startup => {
-                match (self.gate, claude_running) {
+                match (self.gate, facts.claude_running) {
                     (Gate::Idle, Some(true)) => next_gate = Gate::Active,
                     (Gate::Active, Some(false)) => next_gate = Gate::Idle,
                     _ => {}
                 }
-                enabled.to_vec()
+                facts.enabled.to_vec()
             }
             Trigger::AccountChanged(ids) => {
                 // A subset poll may open the gate but never close it: the
                 // run that closes it is the final poll, and the final poll
                 // covers every enabled account not in cooldown.
-                if let (Gate::Idle, Some(true)) = (self.gate, claude_running) {
+                if let (Gate::Idle, Some(true)) = (self.gate, facts.claude_running) {
                     next_gate = Gate::Active;
                 }
-                enabled
+                facts
+                    .enabled
                     .iter()
                     .filter(|e| ids.iter().any(|i| i == *e))
                     .cloned()
@@ -376,7 +379,7 @@ impl Machine {
             let filtered: Vec<String> = candidates
                 .into_iter()
                 .filter(|id| match self.backoff.get(id) {
-                    Some(b) if b.consecutive_failures > 0 => b.next_allowed <= now,
+                    Some(b) if b.consecutive_failures > 0 => b.next_allowed <= facts.now,
                     _ => true,
                 })
                 .collect();
@@ -497,6 +500,24 @@ mod tests {
         PollOutcome::SpawnError(format!("{UNEXPECTED_ENVELOPE_PREFIX}no `type` field"))
     }
 
+    fn facts(
+        claude_running: Option<bool>,
+        binary_present: bool,
+        halted: bool,
+        enabled: &[String],
+        now: i64,
+    ) -> Facts<'_> {
+        Facts {
+            claude_running,
+            available_commit_bytes: None,
+            memory_floor_bytes: 0,
+            binary_present,
+            halted,
+            enabled,
+            now,
+        }
+    }
+
     fn accounts() -> Vec<String> {
         ids(&["a", "b"])
     }
@@ -538,7 +559,7 @@ mod tests {
             Trigger::Startup,
             Trigger::AccountChanged(ids(&["a"])),
         ] {
-            let d = m.decide(t, Some(true), true, true, &accounts(), NOW);
+            let d = m.decide(t, &facts(Some(true), true, true, &accounts(), NOW));
             assert_eq!(d, Decision::Skip(SkipReason::Halted));
         }
     }
@@ -550,7 +571,7 @@ mod tests {
         let mut m = lock_machine(&shared);
         // claude_running is None, which would be a bug for a Timer — busy
         // must win before that is ever consulted.
-        let d = m.decide(Trigger::Timer, None, true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Timer, &facts(None, true, false, &accounts(), NOW));
         assert_eq!(d, Decision::Skip(SkipReason::Busy));
     }
 
@@ -563,7 +584,7 @@ mod tests {
             Trigger::Startup,
             Trigger::AccountChanged(ids(&["a"])),
         ] {
-            let d = m.decide(t, Some(true), false, false, &accounts(), NOW);
+            let d = m.decide(t, &facts(Some(true), false, false, &accounts(), NOW));
             assert_eq!(d, Decision::Skip(SkipReason::NoBinary));
         }
     }
@@ -572,7 +593,7 @@ mod tests {
     fn no_enabled_accounts_skips_every_trigger() {
         let mut m = Machine::new();
         for t in [Trigger::Timer, Trigger::Manual, Trigger::Startup] {
-            let d = m.decide(t, Some(true), true, false, &[], NOW);
+            let d = m.decide(t, &facts(Some(true), true, false, &[], NOW));
             assert_eq!(d, Decision::Skip(SkipReason::NoEnabledAccounts));
         }
     }
@@ -582,14 +603,14 @@ mod tests {
         // Idle + not running: stay idle, skip.
         let mut m = Machine::new();
         assert_eq!(
-            m.decide(Trigger::Timer, Some(false), true, false, &accounts(), NOW),
+            m.decide(Trigger::Timer, &facts(Some(false), true, false, &accounts(), NOW)),
             Decision::Skip(SkipReason::GateIdle)
         );
         assert_eq!(m.gate(), Gate::Idle);
 
         // Idle + running: run and switch to active.
         let mut m = Machine::new();
-        let d = m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), accounts());
         assert!(matches!(
             d,
@@ -598,12 +619,12 @@ mod tests {
         assert_eq!(m.gate(), Gate::Active);
 
         // Active + running: run, no transition.
-        let d = m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW));
         assert!(matches!(d, Decision::Run { gate_transition: None, .. }));
         assert_eq!(m.gate(), Gate::Active);
 
         // Active + not running: the final poll, then back to idle.
-        let d = m.decide(Trigger::Timer, Some(false), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Timer, &facts(Some(false), true, false, &accounts(), NOW));
         assert!(matches!(
             d,
             Decision::Run { gate_transition: Some(Gate::Idle), .. }
@@ -619,11 +640,11 @@ mod tests {
         }
         let mut m = Machine::new();
         assert_eq!(
-            m.decide(Trigger::Timer, None, true, false, &accounts(), NOW),
+            m.decide(Trigger::Timer, &facts(None, true, false, &accounts(), NOW)),
             Decision::Skip(SkipReason::GateIdle)
         );
         assert_eq!(
-            m.decide(Trigger::Presence, None, true, false, &accounts(), NOW),
+            m.decide(Trigger::Presence, &facts(None, true, false, &accounts(), NOW)),
             Decision::Skip(SkipReason::GateIdle)
         );
     }
@@ -635,7 +656,7 @@ mod tests {
         // running, then stopped, then stopped again.
         for running in [true, false, false] {
             if let Decision::Run { .. } =
-                m.decide(Trigger::Timer, Some(running), true, false, &accounts(), NOW)
+                m.decide(Trigger::Timer, &facts(Some(running), true, false, &accounts(), NOW))
             {
                 runs += 1;
             }
@@ -647,35 +668,21 @@ mod tests {
     #[test]
     fn account_changed_runs_the_intersection_with_enabled() {
         let mut m = Machine::new();
-        let d = m.decide(
-            Trigger::AccountChanged(ids(&["b", "zzz"])),
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW,
-        );
+        let d = m.decide(Trigger::AccountChanged(ids(&["b", "zzz"])), &facts(Some(false), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), ids(&["b"]));
     }
 
     #[test]
     fn account_changed_with_an_empty_intersection_skips_as_no_enabled_accounts() {
         let mut m = Machine::new();
-        let d = m.decide(
-            Trigger::AccountChanged(ids(&["zzz"])),
-            Some(true),
-            true,
-            false,
-            &accounts(),
-            NOW,
-        );
+        let d = m.decide(Trigger::AccountChanged(ids(&["zzz"])), &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(d, Decision::Skip(SkipReason::NoEnabledAccounts));
     }
 
     #[test]
     fn a_startup_cycle_with_claude_running_lands_on_active() {
         let mut m = Machine::new();
-        let d = m.decide(Trigger::Startup, Some(true), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Startup, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), accounts());
         assert!(matches!(
             d,
@@ -687,10 +694,10 @@ mod tests {
     #[test]
     fn a_manual_cycle_with_claude_gone_lands_on_idle() {
         let mut m = Machine::new();
-        m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
+        m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(m.gate(), Gate::Active);
 
-        let d = m.decide(Trigger::Manual, Some(false), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Manual, &facts(Some(false), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), accounts());
         assert!(matches!(
             d,
@@ -699,7 +706,7 @@ mod tests {
         assert_eq!(m.gate(), Gate::Idle);
 
         assert_eq!(
-            m.decide(Trigger::Timer, Some(false), true, false, &accounts(), NOW),
+            m.decide(Trigger::Timer, &facts(Some(false), true, false, &accounts(), NOW)),
             Decision::Skip(SkipReason::GateIdle),
             "the manual run was the final poll, so the timer must not poll again"
         );
@@ -708,7 +715,7 @@ mod tests {
     #[test]
     fn a_manual_cycle_with_claude_gone_while_idle_stays_idle() {
         let mut m = Machine::new();
-        let d = m.decide(Trigger::Manual, Some(false), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Manual, &facts(Some(false), true, false, &accounts(), NOW));
         assert!(matches!(d, Decision::Run { gate_transition: None, .. }));
         assert_eq!(m.gate(), Gate::Idle);
     }
@@ -716,12 +723,12 @@ mod tests {
     #[test]
     fn manual_and_startup_without_a_process_answer_keep_the_gate() {
         let mut m = Machine::new();
-        let d = m.decide(Trigger::Manual, None, true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Manual, &facts(None, true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), accounts());
         assert!(matches!(d, Decision::Run { gate_transition: None, .. }));
         assert_eq!(m.gate(), Gate::Idle, "no answer never moves the gate");
 
-        let d = m.decide(Trigger::Startup, None, true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Startup, &facts(None, true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), accounts());
         assert!(matches!(d, Decision::Run { gate_transition: None, .. }));
         assert_eq!(m.gate(), Gate::Idle);
@@ -730,14 +737,7 @@ mod tests {
     #[test]
     fn account_changed_opens_the_gate_but_never_closes_it() {
         let mut m = Machine::new();
-        let d = m.decide(
-            Trigger::AccountChanged(ids(&["a"])),
-            Some(true),
-            true,
-            false,
-            &accounts(),
-            NOW,
-        );
+        let d = m.decide(Trigger::AccountChanged(ids(&["a"])), &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), ids(&["a"]));
         assert!(matches!(
             d,
@@ -745,14 +745,7 @@ mod tests {
         ));
         assert_eq!(m.gate(), Gate::Active);
 
-        let d = m.decide(
-            Trigger::AccountChanged(ids(&["a"])),
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW,
-        );
+        let d = m.decide(Trigger::AccountChanged(ids(&["a"])), &facts(Some(false), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), ids(&["a"]));
         assert!(matches!(d, Decision::Run { gate_transition: None, .. }));
         assert_eq!(
@@ -765,17 +758,10 @@ mod tests {
     #[test]
     fn an_account_changed_that_finds_claude_gone_does_not_consume_the_final_poll() {
         let mut m = Machine::new();
-        m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
-        m.decide(
-            Trigger::AccountChanged(ids(&["a"])),
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW,
-        );
+        m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW));
+        m.decide(Trigger::AccountChanged(ids(&["a"])), &facts(Some(false), true, false, &accounts(), NOW));
 
-        let d = m.decide(Trigger::Timer, Some(false), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Timer, &facts(Some(false), true, false, &accounts(), NOW));
         assert_eq!(
             run_accounts(&d),
             accounts(),
@@ -791,7 +777,7 @@ mod tests {
     fn presence_runs_only_from_idle_with_claude_running() {
         // Idle + running: run everything and open the gate.
         let mut m = Machine::new();
-        let d = m.decide(Trigger::Presence, Some(true), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Presence, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(run_accounts(&d), accounts());
         assert!(matches!(
             d,
@@ -800,16 +786,16 @@ mod tests {
         assert_eq!(m.gate(), Gate::Active);
 
         // Active + running, and Active + not running: nothing to do.
-        let d = m.decide(Trigger::Presence, Some(true), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Presence, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(d, Decision::Skip(SkipReason::AlreadyActive));
         assert_eq!(m.gate(), Gate::Active);
-        let d = m.decide(Trigger::Presence, Some(false), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Presence, &facts(Some(false), true, false, &accounts(), NOW));
         assert_eq!(d, Decision::Skip(SkipReason::AlreadyActive));
         assert_eq!(m.gate(), Gate::Active, "a skip never moves the gate");
 
         // Idle + not running: the sampler and the fresh probe disagreed.
         let mut m = Machine::new();
-        let d = m.decide(Trigger::Presence, Some(false), true, false, &accounts(), NOW);
+        let d = m.decide(Trigger::Presence, &facts(Some(false), true, false, &accounts(), NOW));
         assert_eq!(d, Decision::Skip(SkipReason::GateIdle));
         assert_eq!(m.gate(), Gate::Idle);
     }
@@ -819,14 +805,7 @@ mod tests {
         let mut m = Machine::new();
         m.record("a", &plain_failure(), NOW);
         m.record("b", &plain_failure(), NOW);
-        let d = m.decide(
-            Trigger::Presence,
-            Some(true),
-            true,
-            false,
-            &accounts(),
-            NOW + 1000,
-        );
+        let d = m.decide(Trigger::Presence, &facts(Some(true), true, false, &accounts(), NOW + 1000));
         assert_eq!(d, Decision::Skip(SkipReason::AllBackedOff));
         assert_eq!(m.gate(), Gate::Idle, "a skipped presence never opens the gate");
     }
@@ -965,7 +944,7 @@ mod tests {
     #[test]
     fn status_reports_the_active_gate_after_a_timer_run() {
         let mut m = Machine::new();
-        m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
+        m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(m.status(NOW).gate, Gate::Active);
     }
 
@@ -1033,14 +1012,7 @@ mod tests {
     fn a_timer_drops_backed_off_accounts() {
         let mut m = Machine::new();
         m.record("a", &plain_failure(), NOW);
-        let d = m.decide(
-            Trigger::Timer,
-            Some(true),
-            true,
-            false,
-            &accounts(),
-            NOW + 1000,
-        );
+        let d = m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW + 1000));
         assert_eq!(run_accounts(&d), ids(&["b"]));
     }
 
@@ -1049,14 +1021,7 @@ mod tests {
         let mut m = Machine::new();
         m.record("a", &plain_failure(), NOW);
         m.record("b", &plain_failure(), NOW);
-        let d = m.decide(
-            Trigger::Timer,
-            Some(true),
-            true,
-            false,
-            &accounts(),
-            NOW + 1000,
-        );
+        let d = m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW + 1000));
         assert_eq!(d, Decision::Skip(SkipReason::AllBackedOff));
     }
 
@@ -1065,14 +1030,7 @@ mod tests {
         let mut m = Machine::new();
         m.record("a", &plain_failure(), NOW);
         m.record("b", &plain_failure(), NOW);
-        let d = m.decide(
-            Trigger::Manual,
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW + 1000,
-        );
+        let d = m.decide(Trigger::Manual, &facts(Some(false), true, false, &accounts(), NOW + 1000));
         assert_eq!(run_accounts(&d), accounts());
         assert_eq!(m.backoff_until("a"), None);
         assert_eq!(m.backoff_until("b"), None);
@@ -1083,14 +1041,7 @@ mod tests {
         let mut m = Machine::new();
         m.record("a", &plain_failure(), NOW);
         m.record("b", &plain_failure(), NOW);
-        let d = m.decide(
-            Trigger::AccountChanged(ids(&["a"])),
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW + 1000,
-        );
+        let d = m.decide(Trigger::AccountChanged(ids(&["a"])), &facts(Some(false), true, false, &accounts(), NOW + 1000));
         assert_eq!(run_accounts(&d), ids(&["a"]));
         assert_eq!(m.backoff_until("a"), None);
         assert_eq!(
@@ -1179,19 +1130,12 @@ mod tests {
     fn the_gate_does_not_move_on_a_skipped_decision() {
         let mut m = Machine::new();
         // Get to Active.
-        m.decide(Trigger::Timer, Some(true), true, false, &accounts(), NOW);
+        m.decide(Trigger::Timer, &facts(Some(true), true, false, &accounts(), NOW));
         assert_eq!(m.gate(), Gate::Active);
         // Everything is in cooldown when the final poll would be due.
         m.record("a", &plain_failure(), NOW);
         m.record("b", &plain_failure(), NOW);
-        let d = m.decide(
-            Trigger::Timer,
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW + 1000,
-        );
+        let d = m.decide(Trigger::Timer, &facts(Some(false), true, false, &accounts(), NOW + 1000));
         assert_eq!(d, Decision::Skip(SkipReason::AllBackedOff));
         assert_eq!(
             m.gate(),
@@ -1199,14 +1143,7 @@ mod tests {
             "the promised final poll must not be lost to backoff"
         );
         // Once the cooldown expires the final poll still happens.
-        let d = m.decide(
-            Trigger::Timer,
-            Some(false),
-            true,
-            false,
-            &accounts(),
-            NOW + 61_000,
-        );
+        let d = m.decide(Trigger::Timer, &facts(Some(false), true, false, &accounts(), NOW + 61_000));
         assert!(matches!(
             d,
             Decision::Run { gate_transition: Some(Gate::Idle), .. }

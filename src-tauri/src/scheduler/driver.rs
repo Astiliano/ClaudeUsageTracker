@@ -9,8 +9,8 @@ use tracing::{debug, error, info, warn};
 use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::AppResult;
 use crate::scheduler::machine::{
-    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Gate, Machine, Recorded,
-    SharedMachine, Trigger,
+    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate, Machine,
+    Recorded, SharedMachine, Trigger,
 };
 use crate::store::settings::UserSettings;
 use crate::usage::runner::run_usage;
@@ -723,12 +723,17 @@ impl Driver {
 
         let decision = lock_machine(&self.machine).decide(
             trigger,
-            claude_running,
-            binary_path.is_some(),
-            halted,
-            &enabled,
-            now,
+            &Facts {
+                claude_running,
+                available_commit_bytes: None,
+                memory_floor_bytes: 0,
+                binary_present: binary_path.is_some(),
+                halted,
+                enabled: &enabled,
+                now,
+            },
         );
+        // memory fields wired in the decide-time guard (optimize plan Task 9)
         // Spec 5.1: publish after every decide, so a skipped Manual trigger
         // and a gate transition are both visible to commands at once.
         self.publish();
@@ -1587,11 +1592,15 @@ mod tests {
         lock_machine(&machine).record("a", &PollOutcome::Timeout(30), now);
         lock_machine(&machine).decide(
             Trigger::Timer,
-            Some(true),
-            true,
-            false,
-            &["b".to_string()],
-            now,
+            &Facts {
+                claude_running: Some(true),
+                available_commit_bytes: None,
+                memory_floor_bytes: 0,
+                binary_present: true,
+                halted: false,
+                enabled: &["b".to_string()],
+                now,
+            },
         );
 
         publish_status(&machine, &slot, now);
