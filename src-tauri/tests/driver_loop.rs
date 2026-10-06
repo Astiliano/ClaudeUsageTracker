@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use cut_core::commands::{
     core_clear_halt, core_poll_now, core_set_settings, core_update_account, lock_binary,
-    lock_status, Core, SystemSlot,
+    lock_status, Core,
 };
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
-use cut_core::scheduler::machine::DriverStatus;
-use cut_core::scheduler::triggers::Triggers;
 use cut_core::store::settings::UserSettings;
-use cut_core::store::Store;
 use tokio_util::sync::CancellationToken;
+
+mod common;
+use common::{defaults, test_core};
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -130,16 +130,6 @@ impl BinaryProbe for NoBinary {
     }
 }
 
-fn defaults() -> UserSettings {
-    UserSettings {
-        interval_secs: 10,
-        timeout_secs: 5,
-        claude_binary: String::new(),
-        close_to_tray: true,
-        launch_at_login: false,
-        log_level: "info".to_string(),
-    }
-}
 
 fn fake_claude() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_claude"))
@@ -151,32 +141,19 @@ struct Harness {
     events: Arc<Recorder>,
     process: Arc<FixedProcess>,
     shutdown: CancellationToken,
+    _settings_rx: tokio::sync::watch::Receiver<UserSettings>,
 }
 
 fn harness(running: bool) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let store = Arc::new(Store::open_in_memory().expect("open"));
-    let (settings_tx, _rx) = tokio::sync::watch::channel(defaults());
-    store.save_settings(&defaults()).expect("save settings");
-    let core = Arc::new(Core {
-        store,
-        triggers: Arc::new(Triggers::new()),
-        status: Arc::new(Mutex::new(DriverStatus::default())),
-        system: Arc::new(Mutex::new(SystemSlot::default())),
-        binary: Arc::new(Mutex::new(None)),
-        halt_latched: AtomicBool::new(false),
-        close_to_tray: AtomicBool::new(true),
-        settings_tx,
-        log: None,
-        app_data_dir: tmp.path().to_path_buf(),
-        log_dir: tmp.path().join("logs"),
-    });
+    let (core, settings_rx) = test_core(tmp.path());
     Harness {
         _tmp: tmp,
         core,
         events: Arc::new(Recorder::default()),
         process: Arc::new(FixedProcess::new(running)),
         shutdown: CancellationToken::new(),
+        _settings_rx: settings_rx,
     }
 }
 
