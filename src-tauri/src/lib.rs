@@ -2,6 +2,7 @@ pub mod commands;
 pub mod discovery;
 pub mod error;
 pub mod logging;
+pub mod memory;
 pub mod login;
 pub mod paths;
 pub mod process;
