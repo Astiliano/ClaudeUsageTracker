@@ -134,6 +134,9 @@ pub fn run() {
                 // Seeded here so the window-close handler never reads the
                 // store; `core_set_settings` keeps it in step.
                 close_to_tray: AtomicBool::new(stored.close_to_tray),
+                window_open: AtomicBool::new(true),
+                creating: AtomicBool::new(false),
+                sampler_kick: tokio::sync::Notify::new(),
                 settings_tx,
                 log,
                 app_data_dir,

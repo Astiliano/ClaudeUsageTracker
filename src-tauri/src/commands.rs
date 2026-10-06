@@ -66,15 +66,58 @@ pub struct Core {
     /// never landed. Every halted check is `latch || stored`, and only
     /// `core_clear_halt` lowers it.
     pub halt_latched: AtomicBool,
-    /// Cache of `UserSettings::close_to_tray`, seeded at setup and rewritten
-    /// by `core_set_settings`. The window-close handler runs on the UI thread
-    /// and must never take the store's connection mutex, which parks for up
-    /// to `busy_timeout` under contention.
+    /// Cache of `UserSettings::close_to_tray` (whether closing the window
+    /// keeps the app running in the tray), seeded at setup and rewritten by
+    /// `core_set_settings`. It is read on the UI thread and must never take
+    /// the store's connection mutex, which parks for up to `busy_timeout`
+    /// under contention.
     pub close_to_tray: AtomicBool,
+    /// Whether the main window currently exists. Seeded `true` (the config
+    /// creates it at launch); `window_created` and `window_destroyed` are the
+    /// only writers.
+    pub window_open: AtomicBool,
+    /// Set while a window build is in flight, so a second tray click or a
+    /// second launch cannot start a second build. Taken by `begin_create`.
+    pub creating: AtomicBool,
+    /// Wakes the sampler when the window appears or disappears. `notify_one`
+    /// stores a permit when nobody is waiting, so a kick is never lost.
+    pub sampler_kick: tokio::sync::Notify,
     pub settings_tx: watch::Sender<UserSettings>,
     pub log: Option<Arc<LogHandle>>,
     pub app_data_dir: PathBuf,
     pub log_dir: PathBuf,
+}
+
+/// Proof that the caller owns the single in-flight window build. Dropping it
+/// (on success, error or panic) lowers `Core::creating`.
+pub struct CreateGuard(Arc<Core>);
+
+impl Drop for CreateGuard {
+    fn drop(&mut self) {
+        self.0.creating.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Claims the right to build the main window. `None` means a build is already
+/// running.
+pub fn begin_create(core: &Arc<Core>) -> Option<CreateGuard> {
+    if core.creating.swap(true, Ordering::SeqCst) {
+        None
+    } else {
+        Some(CreateGuard(Arc::clone(core)))
+    }
+}
+
+/// Records that the main window now exists and wakes the sampler.
+pub fn window_created(core: &Core) {
+    core.window_open.store(true, Ordering::SeqCst);
+    core.sampler_kick.notify_one();
+}
+
+/// Records that the main window is gone and wakes the sampler.
+pub fn window_destroyed(core: &Core) {
+    core.window_open.store(false, Ordering::SeqCst);
+    core.sampler_kick.notify_one();
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -668,6 +711,9 @@ mod tests {
             binary: Arc::new(std::sync::Mutex::new(None)),
             halt_latched: AtomicBool::new(false),
             close_to_tray: AtomicBool::new(true),
+            window_open: AtomicBool::new(true),
+            creating: AtomicBool::new(false),
+            sampler_kick: tokio::sync::Notify::new(),
             settings_tx,
             log: None,
             app_data_dir: tmp.path().to_path_buf(),
@@ -1279,5 +1325,43 @@ exit 0
             .insert_snapshot(&a.id, now - crate::store::RETENTION_MS - 1, &ok_week(1), None, 1)
             .expect("too old (would already be pruned in production)");
         assert_eq!(core_get_history_models(&core, &a.id, now).expect("labels"), vec!["Fable".to_string()]);
+    }
+
+    #[test]
+    fn begin_create_is_single_flight_and_resets_on_drop() {
+        let (_tmp, c) = core();
+        let g = begin_create(&c);
+        assert!(g.is_some(), "the first create takes the guard");
+        assert!(begin_create(&c).is_none(), "a second create while one runs is refused");
+        drop(g);
+        assert!(begin_create(&c).is_some(), "dropping the guard releases it");
+    }
+
+    #[tokio::test]
+    async fn window_destroyed_clears_open_and_kicks_the_sampler() {
+        let (_tmp, c) = core();
+        assert!(c.window_open.load(Ordering::SeqCst), "seeded open");
+        window_destroyed(&c);
+        assert!(!c.window_open.load(Ordering::SeqCst));
+        let kicked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            c.sampler_kick.notified(),
+        )
+        .await;
+        assert!(kicked.is_ok(), "the sampler must be woken");
+    }
+
+    #[tokio::test]
+    async fn window_created_sets_open_and_kicks_the_sampler() {
+        let (_tmp, c) = core();
+        c.window_open.store(false, Ordering::SeqCst);
+        window_created(&c);
+        assert!(c.window_open.load(Ordering::SeqCst));
+        let kicked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            c.sampler_kick.notified(),
+        )
+        .await;
+        assert!(kicked.is_ok(), "the sampler must be woken");
     }
 }
