@@ -242,7 +242,7 @@ pub fn run() {
                 Arc::clone(&core),
                 Arc::clone(&events),
                 process,
-                memory,
+                Arc::clone(&memory),
                 binary,
                 shutdown.clone(),
                 Arc::clone(&pid_slot),
@@ -251,6 +251,7 @@ pub fn run() {
             tauri::async_runtime::spawn(system::run_sampler(
                 Arc::clone(&core),
                 events,
+                Arc::clone(&memory),
                 pid_slot,
                 shutdown.clone(),
             ));
