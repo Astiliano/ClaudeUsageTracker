@@ -152,8 +152,9 @@ pub fn run() {
 
             // Tray. `tauri.conf.json` must NOT declare `app.trayIcon`: Tauri's
             // own `Builder::build` unconditionally creates a tray from that
-            // config entry (tauri-2.11.5 src/app.rs, "initialize default tray
-            // icon if defined") before this `setup` closure ever runs, and
+            // config entry (tauri-2.12.1 src/app.rs:2585, "initialize default
+            // tray icon if defined") before this `setup` closure ever runs
+            // (app.rs:2697 runs it, after the config windows at 2691), and
             // `AppHandle::tray_by_id` resolves the first match in insertion
             // order (src/manager/tray.rs `find_map`). A config-declared tray
             // with the same id "main" would therefore win every `tray_by_id`
