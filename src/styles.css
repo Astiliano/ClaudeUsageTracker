@@ -223,7 +223,7 @@ button.pill { cursor: pointer; background: transparent; }
 .drawer-label { text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); }
 .drawer-stats { display: flex; gap: 14px; color: var(--muted); }
 .chart {
-  position: relative; height: 148px; border: 1px solid var(--line-head); border-radius: 0;
+  position: relative; border: 1px solid var(--line-head); border-radius: 0;
   background: var(--chart); padding: 6px 8px;
 }
 .chart svg { width: 100%; height: 100%; overflow: visible; }

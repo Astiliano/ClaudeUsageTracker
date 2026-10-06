@@ -59,6 +59,9 @@ describe("styles.css reads the shell variables (D9)", () => {
   it(".chart has no border-radius (flat look)", () => {
     expect(decl(rule(".chart"), "border-radius")).toBe("0");
   });
+  it(".chart declares no height (useChartHeight sizes it inline)", () => {
+    expect(decl(rule(".chart"), "height")).toBeUndefined();
+  });
   it(".banner has no border-radius (flat look)", () => {
     expect(decl(rule(".banner"), "border-radius")).toBe("0");
   });
