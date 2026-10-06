@@ -18,7 +18,7 @@ function decl(body: string, prop: string): string | undefined {
 }
 
 /** Every custom property the assertions below expect the stylesheet to read. */
-const ASSERTED_VARS = ["--gutter", "--row-h", "--row-pad-x", "--grid-gap", "--panel-border"] as const;
+const ASSERTED_VARS = ["--gutter", "--row-h", "--row-pad-x", "--grid-gap", "--panel-border", "--ring-min", "--ring-max"] as const;
 
 describe("styles.css reads the shell variables (D9)", () => {
   it("the stylesheet was read", () => {
@@ -67,5 +67,30 @@ describe("styles.css reads the shell variables (D9)", () => {
   });
   it(".modal-body has no border-radius (flat look)", () => {
     expect(decl(rule(".modal-body"), "border-radius")).toBe("0");
+  });
+  it(".ring width clamps between the ring variables", () => {
+    const w = decl(rule(".ring"), "width");
+    expect(w).toContain("var(--ring-min)");
+    expect(w).toContain("var(--ring-max)");
+  });
+  it(".card-rings is an inline-size container", () => {
+    expect(decl(rule(".card-rings"), "container-type")).toBe("inline-size");
+  });
+  it(".ring-label may use the full ring width", () => {
+    expect(decl(rule(".ring-label"), "max-width")).toBe("100%");
+  });
+  it(".ring-sm is a fixed 20px glyph", () => {
+    const body = rule(".ring-sm");
+    expect(decl(body, "width")).toBe("20px");
+    expect(decl(body, "height")).toBe("20px");
+  });
+  it(".ring svg fills its wrapper", () => {
+    const body = rule(".ring svg, .ring-sm svg");
+    expect(decl(body, "width")).toBe("100%");
+    expect(decl(body, "height")).toBe("auto");
+    expect(decl(body, "aspect-ratio")).toBe("1");
+  });
+  it(".spark fills its grid cell", () => {
+    expect(decl(rule(".spark"), "width")).toBe("100%");
   });
 });

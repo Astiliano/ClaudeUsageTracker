@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RING, RING_SIZES, ringDash } from "./gauge";
+import { RING, RING_SIZES, ringDash, ringViewBox } from "./gauge";
 
 describe("ringDash", () => {
   const c = 2 * Math.PI * RING.radius;
@@ -30,5 +30,12 @@ describe("RING_SIZES.sm", () => {
     expect(ringDash(50, r).offset).toBeCloseTo(full / 2, 5);
     expect(ringDash(100, r).offset).toBeCloseTo(0, 5);
     expect(ringDash(null, r).offset).toBeCloseTo(full, 5);
+  });
+});
+
+describe("ringViewBox", () => {
+  it("is the geometry box, so the stroke scales with the element", () => {
+    expect(ringViewBox(RING_SIZES.md)).toBe("0 0 44 44");
+    expect(ringViewBox(RING_SIZES.sm)).toBe("0 0 20 20");
   });
 });
