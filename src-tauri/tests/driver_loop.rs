@@ -15,15 +15,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cut_core::commands::{
-    core_clear_halt, core_poll_now, core_set_settings, core_update_account, lock_binary,
+    core_clear_halt, core_get_dashboard, core_poll_now, core_set_settings, core_update_account, lock_binary,
     lock_status, Core,
 };
+use cut_core::memory::MemoryProbe;
 use cut_core::scheduler::driver::{BinaryProbe, Driver, EventSink, ProcessProbe};
 use cut_core::store::settings::UserSettings;
 use tokio_util::sync::CancellationToken;
 
 mod common;
-use common::{defaults, test_core};
+use common::{defaults, test_core, FakeMemory};
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -148,6 +149,7 @@ struct Harness {
     core: Arc<Core>,
     events: Arc<Recorder>,
     process: Arc<FixedProcess>,
+    memory: Arc<FakeMemory>,
     shutdown: CancellationToken,
     _settings_rx: tokio::sync::watch::Receiver<UserSettings>,
 }
@@ -160,6 +162,7 @@ fn harness(running: bool) -> Harness {
         core,
         events: Arc::new(Recorder::default()),
         process: Arc::new(FixedProcess::new(running)),
+        memory: Arc::new(FakeMemory::new()),
         shutdown: CancellationToken::new(),
         _settings_rx: settings_rx,
     }
@@ -180,6 +183,7 @@ fn driver_for(h: &Harness, binary: Arc<dyn BinaryProbe>) -> Driver {
         Arc::clone(&h.core),
         Arc::clone(&h.events) as Arc<dyn EventSink>,
         Arc::clone(&h.process) as Arc<dyn ProcessProbe>,
+        Arc::clone(&h.memory) as Arc<dyn MemoryProbe>,
         binary,
         h.shutdown.clone(),
         Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -637,6 +641,102 @@ async fn the_driver_publishes_gate_busy_and_backoff_into_shared_state() {
     assert!(
         published.backoff_until.contains_key(&a),
         "record must be followed by a publish: {published:?}"
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+const LOW: u64 = 512 * 1_048_576;
+
+/// Blocks until the driver has finished `want` cycles and published idle.
+async fn wait_for_cycles(h: &Harness, want: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if h.events.cycles.load(Ordering::SeqCst) >= want && !lock_status(&h.core.status).busy {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {want} finished cycles, still at {}",
+            h.events.cycles.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Blocks until the published status carries a memory hold.
+async fn wait_for_hold(h: &Harness) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if lock_status(&h.core.status).memory_hold.is_some() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the driver never published a memory hold"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The hold setup of spec section 10: Startup polls with ample memory, then a
+/// presence arrives below the floor, so no test waits on the Timer.
+async fn held_driver(h: &Harness) -> tokio::task::JoinHandle<()> {
+    add_account(h, ".claude");
+    let driver = driver_for(h, Arc::new(FakeBinary(fake_claude())));
+    let handle = tokio::spawn(driver.run());
+    wait_for_cycles(h, 1).await;
+    h.process.running.store(true, Ordering::SeqCst);
+    h.memory.script(&[Some(LOW)]);
+    h.core.triggers.presence();
+    wait_for_hold(h).await;
+    handle
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_presence_below_the_floor_spawns_nothing_and_publishes_the_hold() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    let status = lock_status(&h.core.status).clone();
+    let hold = status.memory_hold.expect("hold");
+    assert_eq!(hold.available_bytes, LOW);
+    assert_eq!(
+        h.events.usage_updated.lock().expect("lock").len(),
+        1,
+        "only the Startup cycle may have polled"
+    );
+    assert_eq!(h.events.cycles.load(Ordering::SeqCst), 1);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 1);
+    assert_eq!(status.gate.as_str(), "idle");
+    assert_eq!(
+        core_get_dashboard(&h.core).expect("dashboard").memory_hold,
+        status.memory_hold
+    );
+
+    h.shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_refresh_runs_while_held_and_clears_the_hold() {
+    let mut env = EnvGuard::new().await;
+    emit_ok_report(&mut env);
+    let h = harness(false);
+    let handle = held_driver(&h).await;
+
+    h.core.triggers.manual();
+    wait_for_cycles(&h, 2).await;
+
+    assert_eq!(h.events.usage_updated.lock().expect("lock").len(), 2);
+    assert_eq!(lock_status(&h.core.status).memory_hold, None);
+    assert_eq!(h.events.memory_holds.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        core_get_dashboard(&h.core).expect("dashboard").memory_hold,
+        None
     );
 
     h.shutdown.cancel();

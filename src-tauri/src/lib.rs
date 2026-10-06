@@ -24,6 +24,7 @@ use crate::commands::{lock_binary, Core, SharedCore, SystemSlot};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
+use crate::memory::{MemoryProbe, RealMemoryProbe};
 use crate::scheduler::machine::DriverStatus;
 use crate::scheduler::triggers::Triggers;
 use crate::store::Store;
@@ -236,10 +237,12 @@ pub fn run() {
             let process: Arc<dyn ProcessProbe> = Arc::new(SysinfoProbe::new()?);
             let binary: Arc<dyn BinaryProbe> = Arc::new(RealBinaryProbe);
             let pid_slot = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let memory: Arc<dyn MemoryProbe> = Arc::new(RealMemoryProbe);
             let driver = Driver::new(
                 Arc::clone(&core),
                 Arc::clone(&events),
                 process,
+                memory,
                 binary,
                 shutdown.clone(),
                 Arc::clone(&pid_slot),

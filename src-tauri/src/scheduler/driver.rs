@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -8,9 +8,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::{blocking, lock_binary, lock_status, Core};
 use crate::error::AppResult;
+use crate::memory::{floor_bytes, read_memory, MemoryProbe};
 use crate::scheduler::machine::{
-    begin_cycle, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate, Machine,
-    Recorded, SharedMachine, Trigger,
+    begin_cycle, hold_change, lock_machine, CycleToken, Decision, DriverStatus, Facts, Gate,
+    HoldChange, Machine, MemoryHold, Recorded, SharedMachine, Trigger,
 };
 use crate::store::settings::UserSettings;
 use crate::usage::runner::run_usage;
@@ -407,9 +408,13 @@ pub struct Driver {
     core: Arc<Core>,
     events: Arc<dyn EventSink>,
     process: Arc<dyn ProcessProbe>,
+    memory: Arc<dyn MemoryProbe>,
     binary: Arc<dyn BinaryProbe>,
     shutdown: CancellationToken,
     pid_slot: Arc<AtomicU32>,
+    /// True while the last probe read returned no figure. Shared by every
+    /// read so each transition is logged once (spec 4.3).
+    memory_reading_lost: Arc<AtomicBool>,
     /// Labels each cycle so a late "cycle finished" message can be matched
     /// against the cycle actually in flight.
     cycle_generation: AtomicU64,
@@ -448,6 +453,7 @@ impl Driver {
         core: Arc<Core>,
         events: Arc<dyn EventSink>,
         process: Arc<dyn ProcessProbe>,
+        memory: Arc<dyn MemoryProbe>,
         binary: Arc<dyn BinaryProbe>,
         shutdown: CancellationToken,
         pid_slot: Arc<AtomicU32>,
@@ -456,9 +462,11 @@ impl Driver {
             core,
             events,
             process,
+            memory,
             binary,
             shutdown,
             pid_slot,
+            memory_reading_lost: Arc::new(AtomicBool::new(false)),
             cycle_generation: AtomicU64::new(0),
             machine: Arc::new(Mutex::new(Machine::new())),
         }
@@ -726,22 +734,35 @@ impl Driver {
         let halted = self.halted().await;
         let now = chrono::Utc::now().timestamp_millis();
 
-        let decision = lock_machine(&self.machine).decide(
-            trigger,
-            &Facts {
-                claude_running,
-                available_commit_bytes: None,
-                memory_floor_bytes: 0,
-                binary_present: binary_path.is_some(),
-                halted,
-                enabled: &enabled,
-                now,
-            },
-        );
-        // memory fields wired in the decide-time guard (optimize plan Task 9)
+        // Only automatic triggers read the probe; the `None` a bypass trigger
+        // carries is not a read and must not touch the reading-lost flag.
+        let available = if trigger.is_automatic() {
+            read_memory(&*self.memory, &self.memory_reading_lost)
+        } else {
+            None
+        };
+        let floor = floor_bytes(settings.min_free_memory_mb);
+        let (before, decision, after) = {
+            let mut machine = lock_machine(&self.machine);
+            let before = machine.memory_hold();
+            let decision = machine.decide(
+                trigger.clone(),
+                &Facts {
+                    claude_running,
+                    available_commit_bytes: available,
+                    memory_floor_bytes: floor,
+                    binary_present: binary_path.is_some(),
+                    halted,
+                    enabled: &enabled,
+                    now,
+                },
+            );
+            (before, decision, machine.memory_hold())
+        };
         // Spec 5.1: publish after every decide, so a skipped Manual trigger
         // and a gate transition are both visible to commands at once.
         self.publish();
+        self.log_hold_change(&trigger, before, after, available, floor, now);
 
         match decision {
             Decision::Skip(reason) => {
@@ -768,6 +789,55 @@ impl Driver {
                 let binary = binary_path?;
                 Some(self.start_cycle(accounts, reason, binary, settings, done_tx))
             }
+        }
+    }
+
+    /// Logs and announces a hold transition. Runs after `publish`, so the
+    /// refetch the event triggers sees the new hold (spec 4.3).
+    fn log_hold_change(
+        &self,
+        trigger: &Trigger,
+        before: Option<MemoryHold>,
+        after: Option<MemoryHold>,
+        available: Option<u64>,
+        floor: u64,
+        now: i64,
+    ) {
+        let change = hold_change(before, after);
+        match (change, before, after) {
+            (HoldChange::Started, _, Some(hold)) => info!(
+                available_bytes = hold.available_bytes,
+                floor_bytes = floor,
+                trigger = trigger.as_str(),
+                "memory hold"
+            ),
+            (HoldChange::Refreshed, _, Some(hold)) => debug!(
+                available_bytes = hold.available_bytes,
+                floor_bytes = floor,
+                "memory hold"
+            ),
+            (HoldChange::Released, Some(prior), _) => match available {
+                Some(figure) => info!(
+                    available_bytes = figure,
+                    floor_bytes = floor,
+                    held_ms = now - prior.since,
+                    trigger = trigger.as_str(),
+                    "memory hold released"
+                ),
+                None => info!(
+                    floor_bytes = floor,
+                    held_ms = now - prior.since,
+                    trigger = trigger.as_str(),
+                    "memory hold released"
+                ),
+            },
+            _ => {}
+        }
+        match change {
+            HoldChange::Started | HoldChange::Refreshed | HoldChange::Released => {
+                self.events.memory_hold_changed()
+            }
+            HoldChange::Unchanged => {}
         }
     }
 
@@ -1038,6 +1108,14 @@ mod tests {
 
     // ---- shared fixtures for the loop-level tests -------------------------
 
+    /// Ample commit, so no unit test depends on this machine's free memory.
+    struct AmpleMemory;
+    impl MemoryProbe for AmpleMemory {
+        fn available_commit_bytes(&self) -> Option<u64> {
+            Some(u64::MAX)
+        }
+    }
+
     struct SilentEvents;
     impl EventSink for SilentEvents {
         fn usage_updated(&self, _account_id: &str) {}
@@ -1127,6 +1205,7 @@ mod tests {
             core,
             Arc::new(SilentEvents),
             Arc::new(IdleProcess),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1141,6 +1220,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1165,6 +1245,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             shutdown.clone(),
             Arc::new(AtomicU32::new(0)),
@@ -1186,6 +1267,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(IdleProcess),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1237,6 +1319,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(IdleProcess),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             shutdown.clone(),
             Arc::new(AtomicU32::new(0)),
@@ -1282,6 +1365,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),
@@ -1330,6 +1414,7 @@ mod tests {
             Arc::clone(&core),
             Arc::new(SilentEvents),
             Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
             Arc::new(AtomicU32::new(0)),

@@ -1,7 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use cut_core::commands::{Core, SystemSlot};
+use cut_core::memory::MemoryProbe;
 use cut_core::scheduler::machine::DriverStatus;
 use cut_core::scheduler::triggers::Triggers;
 use cut_core::store::settings::UserSettings;
@@ -42,4 +44,34 @@ pub fn test_core(
         log_dir: dir.join("logs"),
     });
     (core, settings_rx)
+}
+
+/// A scripted commit-headroom probe. Reads `Some(u64::MAX)` until a test
+/// scripts it, so no test depends on this machine's free commit.
+pub struct FakeMemory(Mutex<VecDeque<Option<u64>>>);
+
+impl FakeMemory {
+    pub fn new() -> FakeMemory {
+        FakeMemory(Mutex::new(VecDeque::from([Some(u64::MAX)])))
+    }
+
+    /// Replaces the queue. Each read pops one reading and repeats the last.
+    pub fn script(&self, readings: &[Option<u64>]) {
+        let mut q = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        *q = readings.iter().copied().collect();
+        if q.is_empty() {
+            q.push_back(Some(u64::MAX));
+        }
+    }
+}
+
+impl MemoryProbe for FakeMemory {
+    fn available_commit_bytes(&self) -> Option<u64> {
+        let mut q = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() > 1 {
+            q.pop_front().flatten()
+        } else {
+            q.front().copied().flatten()
+        }
+    }
 }
