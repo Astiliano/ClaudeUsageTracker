@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use crate::discovery::{enumerate_profiles, find_claude_binary};
 use crate::error::{AppError, AppResult};
 use crate::logging::LogHandle;
-use crate::scheduler::machine::{preview_manual, DriverStatus};
+use crate::scheduler::machine::{preview_manual, DriverStatus, MemoryHold};
 use crate::scheduler::triggers::Triggers;
 use crate::store::settings::{polling_relevant_changed, validate_settings, UserSettings};
 use crate::store::{HistoryMetric, HistoryPoint, Store, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS, RETENTION_MS};
@@ -142,6 +142,7 @@ pub struct Dashboard {
     pub stalled_at: Option<i64>,
     pub binary: BinaryInfo,
     pub interval_secs: u32,
+    pub memory_hold: Option<MemoryHold>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,6 +202,7 @@ pub fn core_get_dashboard(core: &Core) -> AppResult<Dashboard> {
         stalled_at: status.stalled_at,
         binary,
         interval_secs: settings.interval_secs,
+        memory_hold: status.memory_hold,
     })
 }
 
@@ -1109,9 +1111,22 @@ exit 0
             st.gate = Gate::Active;
             st.busy = true;
             st.stalled_at = Some(4242);
+            st.memory_hold = Some(MemoryHold {
+                available_bytes: 512 * 1_048_576,
+                floor_bytes: 1536 * 1_048_576,
+                since: 4000,
+            });
         }
 
         let dash = core_get_dashboard(&core).expect("dashboard");
+        assert_eq!(
+            dash.memory_hold,
+            Some(MemoryHold {
+                available_bytes: 512 * 1_048_576,
+                floor_bytes: 1536 * 1_048_576,
+                since: 4000,
+            })
+        );
         assert_eq!(dash.gate, "active");
         assert!(dash.busy);
         assert_eq!(dash.halted, None);

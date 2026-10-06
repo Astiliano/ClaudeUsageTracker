@@ -748,7 +748,8 @@ impl Driver {
                 match reason {
                     crate::scheduler::machine::SkipReason::GateIdle
                     | crate::scheduler::machine::SkipReason::Busy
-                    | crate::scheduler::machine::SkipReason::AlreadyActive => {
+                    | crate::scheduler::machine::SkipReason::AlreadyActive
+                    | crate::scheduler::machine::SkipReason::LowMemory => {
                         debug!(reason = reason.as_str(), "decision skipped")
                     }
                     _ => warn!(reason = reason.as_str(), "decision skipped"),
