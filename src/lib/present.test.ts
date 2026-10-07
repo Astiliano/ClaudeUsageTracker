@@ -113,21 +113,17 @@ describe("chipFor", () => {
 
 describe("countPlacement", () => {
   it("leaves the count to the system line on a held chip", () => {
-    expect(countPlacement("held", false)).toBe("line");
-    expect(countPlacement("held", true)).toBe("line");
+    expect(countPlacement("held")).toBe("line");
   });
 
-  it("uses the chip only for active and idle at full width", () => {
-    expect(countPlacement("active", false)).toBe("chip");
-    expect(countPlacement("idle", false)).toBe("chip");
+  it("uses the chip only for active and idle", () => {
+    expect(countPlacement("active")).toBe("chip");
+    expect(countPlacement("idle")).toBe("chip");
   });
 
-  it("falls back to the line in cards and for every other chip kind", () => {
-    expect(countPlacement("active", true)).toBe("line");
-    expect(countPlacement("idle", true)).toBe("line");
+  it("falls back to the line for every other chip kind", () => {
     for (const kind of ["halted", "stalled", "no_binary", "no_accounts", "held"] as const) {
-      expect(countPlacement(kind, false)).toBe("line");
-      expect(countPlacement(kind, true)).toBe("line");
+      expect(countPlacement(kind)).toBe("line");
     }
   });
 });

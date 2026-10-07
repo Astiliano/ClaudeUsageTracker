@@ -1,6 +1,5 @@
 import type { JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AccountCard } from "./components/AccountCard";
 import { AccountsTable } from "./components/AccountsTable";
 import { FailureDetail } from "./components/FailureDetail";
 import { Header } from "./components/Header";
@@ -12,7 +11,7 @@ import { useViewport } from "./hooks/useViewport";
 import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
 import { errorMessage } from "./lib/errors";
-import { autoHiddenColumns, layoutFor, shellStyle, windowZoom } from "./lib/layout";
+import { shellStyle, windowZoom } from "./lib/layout";
 import "./styles.css";
 
 export default function App(): JSX.Element {
@@ -21,9 +20,7 @@ export default function App(): JSX.Element {
   const { prefs, update } = usePrefs();
   const viewport = useViewport();
   const zoom = windowZoom(viewport.width, viewport.height, null);
-  const layout = layoutFor(viewport.width, zoom);
-  const effectiveHidden = [...prefs.hiddenColumns, ...autoHiddenColumns(layout)];
-  const visible = visibleColumns(prefs.columnOrder, effectiveHidden);
+  const visible = visibleColumns(prefs.columnOrder, prefs.hiddenColumns);
   const [showSettings, setShowSettings] = useState(false);
   const [failureId, setFailureId] = useState<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -67,7 +64,6 @@ export default function App(): JSX.Element {
         <Header
           dashboard={dashboard}
           settingsOpen={showSettings}
-          compact={layout === "cards"}
           system={system}
           systemError={systemError}
           now={now}
@@ -77,31 +73,22 @@ export default function App(): JSX.Element {
           onChanged={refetch}
           onError={showError}
         />
-        {layout === "cards" ? (
-          <div className="cards" role="list" aria-label="Accounts">
-            {dashboard.accounts.map((row) => (
-              <AccountCard key={row.account.id} row={row} now={now} onShowFailure={(id) => setFailureId(id)} />
-            ))}
-          </div>
-        ) : (
-          <AccountsTable
-            rows={dashboard.accounts}
-            history={history}
-            now={now}
-            cycle={cycle}
-            zoom={zoom}
-            columnOrder={visible}
-            onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, effectiveHidden, from, to) })}
-            onChanged={refetch}
-            onError={showError}
-            onShowFailure={(id) => setFailureId(id)}
-          />
-        )}
+        <AccountsTable
+          rows={dashboard.accounts}
+          history={history}
+          now={now}
+          cycle={cycle}
+          zoom={zoom}
+          columnOrder={visible}
+          onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, prefs.hiddenColumns, from, to) })}
+          onChanged={refetch}
+          onError={showError}
+          onShowFailure={(id) => setFailureId(id)}
+        />
         {showSettings && (
           <Settings
             binary={dashboard.binary}
             prefs={prefs}
-            layout={layout}
             onPrefs={update}
             onClose={() => setShowSettings(false)}
             onChanged={refetch}

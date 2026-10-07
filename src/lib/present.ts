@@ -79,11 +79,10 @@ export function chipFor(dashboard: Dashboard, claudeProcesses: number | null = n
 
 /**
  * Where the Claude process count goes, so it is shown exactly once. The chip
- * only carries it when it has room (not cards) and its text is about polling
- * at all; every other chip leaves it to the system line, so a halted or
- * stalled header still says how many Claude processes exist.
+ * only carries it when its text is about polling at all; every other chip
+ * leaves it to the system line, so a halted or stalled header still says how
+ * many Claude processes exist.
  */
-export function countPlacement(kind: BannerKind, compact: boolean): "chip" | "line" {
-  if (compact) return "line";
+export function countPlacement(kind: BannerKind): "chip" | "line" {
   return kind === "active" || kind === "idle" ? "chip" : "line";
 }

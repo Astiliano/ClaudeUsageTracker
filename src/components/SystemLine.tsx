@@ -24,7 +24,7 @@ export function SystemLine({ system, error, showCount, now }: Props): JSX.Elemen
     >
       {items.map((item) => (
         <span className="sysline-item" key={item.key} title={item.title}>
-          {(item.key === "cpu" || item.key === "mem") && <Ring size="sm" pct={item.pct} />}
+          {(item.key === "cpu" || item.key === "mem") && <Ring pct={item.pct} />}
           <span className="sysline-text">{item.text}</span>
         </span>
       ))}

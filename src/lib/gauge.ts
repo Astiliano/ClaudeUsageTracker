@@ -1,9 +1,5 @@
-/** Ring gauge geometry (spec §5.4): 44px box, 5px stroke, arc from 12 o'clock. */
-export const RING = { size: 44, stroke: 5, radius: 19.5 } as const;
-
-/** The two ring sizes: 44px in the cards, 20px on the system line. */
+/** Ring gauge geometry: the 20px glyph on the system line, arc from 12 o'clock. */
 export const RING_SIZES = {
-  md: RING,
   sm: { size: 20, stroke: 3, radius: 8.5 },
 } as const;
 

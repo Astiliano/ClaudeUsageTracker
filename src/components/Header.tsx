@@ -9,7 +9,6 @@ import { SystemLine } from "./SystemLine";
 interface Props {
   dashboard: Dashboard;
   settingsOpen: boolean;
-  compact: boolean;
   system: SystemReport | null;
   systemError: string | null;
   now: number;
@@ -23,7 +22,6 @@ interface Props {
 export function Header({
   dashboard,
   settingsOpen,
-  compact,
   system,
   systemError,
   now,
@@ -35,7 +33,7 @@ export function Header({
 }: Props): JSX.Element {
   const banner = bannerFor(dashboard);
   const count = system?.stats?.claude_count ?? null;
-  const placement = countPlacement(banner?.kind ?? "idle", compact);
+  const placement = countPlacement(banner?.kind ?? "idle");
   const chip = chipFor(dashboard, placement === "chip" ? count : null);
 
   const run = async (command: string): Promise<void> => {
@@ -50,12 +48,10 @@ export function Header({
   return (
     <header className="header">
       <div className="topbar">
-        {!compact && (
-          <div className="topbar-left">
-            <h1 className="topbar-title">Usage Tracker</h1>
-            <span className="topbar-count">{accountCountLabel(dashboard.accounts.length)}</span>
-          </div>
-        )}
+        <div className="topbar-left">
+          <h1 className="topbar-title">Usage Tracker</h1>
+          <span className="topbar-count">{accountCountLabel(dashboard.accounts.length)}</span>
+        </div>
         <div className="topbar-actions">
           <div className="chip" title={banner?.text}>
             <span className={`chip-dot chip-dot-${chip.dot}`} />

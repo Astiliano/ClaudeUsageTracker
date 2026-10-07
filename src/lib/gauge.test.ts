@@ -1,25 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { RING, RING_SIZES, ringDash, ringViewBox } from "./gauge";
+import { RING_SIZES, ringDash, ringViewBox } from "./gauge";
 
 describe("ringDash", () => {
-  const c = 2 * Math.PI * RING.radius;
+  const c = 2 * Math.PI * RING_SIZES.sm.radius;
   it("hides the arc for null, shows it in proportion, and clamps at 100", () => {
-    expect(ringDash(null, RING.radius)).toEqual({ circumference: c, offset: c });
-    expect(ringDash(0, RING.radius).offset).toBeCloseTo(c);
-    expect(ringDash(50, RING.radius).offset).toBeCloseTo(c / 2);
-    expect(ringDash(100, RING.radius).offset).toBeCloseTo(0);
-    expect(ringDash(140, RING.radius).offset).toBeCloseTo(0);
-    expect(ringDash(-5, RING.radius).offset).toBeCloseTo(c);
-  });
-  it("ring geometry fits the 44px box with a 5px stroke", () => {
-    expect(RING).toEqual({ size: 44, stroke: 5, radius: 19.5 });
-    expect(RING.radius + RING.stroke / 2).toBeLessThanOrEqual(RING.size / 2);
+    expect(ringDash(null, RING_SIZES.sm.radius)).toEqual({ circumference: c, offset: c });
+    expect(ringDash(0, RING_SIZES.sm.radius).offset).toBeCloseTo(c);
+    expect(ringDash(50, RING_SIZES.sm.radius).offset).toBeCloseTo(c / 2);
+    expect(ringDash(100, RING_SIZES.sm.radius).offset).toBeCloseTo(0);
+    expect(ringDash(140, RING_SIZES.sm.radius).offset).toBeCloseTo(0);
+    expect(ringDash(-5, RING_SIZES.sm.radius).offset).toBeCloseTo(c);
   });
 });
 
 describe("RING_SIZES.sm", () => {
-  it("keeps the md geometry and adds a 20px variant", () => {
-    expect(RING_SIZES.md).toEqual({ size: 44, stroke: 5, radius: 19.5 });
+  it("sm is the 20px variant", () => {
     expect(RING_SIZES.sm).toEqual({ size: 20, stroke: 3, radius: 8.5 });
   });
 
@@ -35,7 +30,6 @@ describe("RING_SIZES.sm", () => {
 
 describe("ringViewBox", () => {
   it("is the geometry box, so the stroke scales with the element", () => {
-    expect(ringViewBox(RING_SIZES.md)).toBe("0 0 44 44");
     expect(ringViewBox(RING_SIZES.sm)).toBe("0 0 20 20");
   });
 });
