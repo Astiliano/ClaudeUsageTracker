@@ -229,8 +229,14 @@ mod tests {
     #[test]
     fn poll_outcome_reports_its_kind_and_error_text() {
         let ok = PollOutcome::Ok(Parsed {
-            session: Window { pct: 15, resets_at: Some(1_700_000_000_000) },
-            week_all: Window { pct: 4, resets_at: None },
+            session: Window {
+                pct: 15,
+                resets_at: Some(1_700_000_000_000),
+            },
+            week_all: Window {
+                pct: 4,
+                resets_at: None,
+            },
             week_models: vec![],
         });
         assert_eq!(ok.kind(), OutcomeKind::Ok);
@@ -238,10 +244,7 @@ mod tests {
 
         let pe = PollOutcome::ParseError("missing session line".into());
         assert_eq!(pe.kind(), OutcomeKind::ParseError);
-        assert_eq!(
-            pe.error_text(),
-            Some("missing session line".to_string())
-        );
+        assert_eq!(pe.error_text(), Some("missing session line".to_string()));
 
         assert_eq!(PollOutcome::NoUsageData.kind(), OutcomeKind::NoUsageData);
         assert_eq!(PollOutcome::NoUsageData.error_text(), None);
@@ -267,8 +270,14 @@ mod tests {
             account_id: "acct-1".into(),
             taken_at: 1_700_000_000_000,
             outcome: "ok",
-            session: Some(Window { pct: 15, resets_at: Some(1_700_003_600_000) }),
-            week_all: Some(Window { pct: 4, resets_at: None }),
+            session: Some(Window {
+                pct: 15,
+                resets_at: Some(1_700_003_600_000),
+            }),
+            week_all: Some(Window {
+                pct: 4,
+                resets_at: None,
+            }),
             week_models: vec![ModelWindow {
                 label: "Fable".into(),
                 pct: 5,
@@ -303,9 +312,7 @@ mod tests {
 
     #[test]
     fn only_a_shape_class_spawn_error_counts_as_an_unexpected_envelope() {
-        let shape = PollOutcome::SpawnError(format!(
-            "{UNEXPECTED_ENVELOPE_PREFIX}no `type` field"
-        ));
+        let shape = PollOutcome::SpawnError(format!("{UNEXPECTED_ENVELOPE_PREFIX}no `type` field"));
         assert!(shape
             .error_text()
             .map(|m| is_unexpected_envelope(&m))
@@ -322,7 +329,10 @@ mod tests {
     fn disabled_reason_uses_snake_case_wire_forms() {
         assert_eq!(DisabledReason::User.as_str(), "user");
         assert_eq!(DisabledReason::GuardTripped.as_str(), "guard_tripped");
-        assert_eq!(DisabledReason::from_wire("user"), Some(DisabledReason::User));
+        assert_eq!(
+            DisabledReason::from_wire("user"),
+            Some(DisabledReason::User)
+        );
         assert_eq!(
             DisabledReason::from_wire("guard_tripped"),
             Some(DisabledReason::GuardTripped)

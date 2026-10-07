@@ -328,7 +328,9 @@ impl TauriEvents {
 
 impl EventSink for TauriEvents {
     fn usage_updated(&self, account_id: &str) {
-        let _ = self.app.emit(EVT_USAGE_UPDATED, AccountEvent { account_id });
+        let _ = self
+            .app
+            .emit(EVT_USAGE_UPDATED, AccountEvent { account_id });
     }
     fn cycle_finished(&self, _peak: Option<ChildPeak>) {
         let _ = self.app.emit(EVT_CYCLE_FINISHED, ());
@@ -387,8 +389,14 @@ mod tests {
             account_id: "x".into(),
             taken_at: 0,
             outcome: "ok",
-            session: Some(Window { pct: session, resets_at: None }),
-            week_all: Some(Window { pct: week, resets_at: None }),
+            session: Some(Window {
+                pct: session,
+                resets_at: None,
+            }),
+            week_all: Some(Window {
+                pct: week,
+                resets_at: None,
+            }),
             week_models: models
                 .iter()
                 .map(|(l, p)| ModelWindow {
@@ -469,8 +477,14 @@ mod tests {
     #[test]
     fn the_worst_window_across_every_account_wins() {
         let rows = vec![
-            (account("claude", true), Some(ok_snapshot(10, 20, &[("Fable", 30)]))),
-            (account("claude3", true), Some(ok_snapshot(5, 5, &[("Opus", 95)]))),
+            (
+                account("claude", true),
+                Some(ok_snapshot(10, 20, &[("Fable", 30)])),
+            ),
+            (
+                account("claude3", true),
+                Some(ok_snapshot(5, 5, &[("Opus", 95)])),
+            ),
         ];
         let (level, _) = tray_state(&rows, false);
         assert_eq!(level, Level::Red, "a per-model line counts too");
@@ -490,7 +504,10 @@ mod tests {
     #[test]
     fn the_tooltip_lists_one_line_per_enabled_account() {
         let rows = vec![
-            (account("claude", true), Some(ok_snapshot(15, 4, &[("Fable", 5)]))),
+            (
+                account("claude", true),
+                Some(ok_snapshot(15, 4, &[("Fable", 5)])),
+            ),
             (account("claude3", true), Some(ok_snapshot(2, 1, &[]))),
         ];
         let (_, tooltip) = tray_state(&rows, false);
@@ -514,7 +531,10 @@ mod tests {
     fn a_failing_account_renders_as_err() {
         let rows = vec![
             (account("claude", true), Some(ok_snapshot(15, 4, &[]))),
-            (account("claude3", true), Some(failed_snapshot("spawn_error"))),
+            (
+                account("claude3", true),
+                Some(failed_snapshot("spawn_error")),
+            ),
         ];
         let (_, tooltip) = tray_state(&rows, false);
         assert_eq!(tooltip, "claude  S 15% · W 4%\nclaude3  err");
@@ -645,7 +665,10 @@ mod tests {
     fn every_frontend_event_name_is_listed_in_events_ts() {
         let ts = include_str!("../../src/lib/events.ts");
         for name in FRONTEND_EVENT_NAMES {
-            assert!(ts.contains(&format!("\"{name}\"")), "{name} missing from src/lib/events.ts");
+            assert!(
+                ts.contains(&format!("\"{name}\"")),
+                "{name} missing from src/lib/events.ts"
+            );
         }
     }
 }

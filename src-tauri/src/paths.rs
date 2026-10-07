@@ -22,9 +22,8 @@ pub fn login_script_dir(app_data_dir: &Path) -> PathBuf {
 }
 
 pub fn ensure_dir(dir: &Path) -> AppResult<()> {
-    std::fs::create_dir_all(dir).map_err(|e| {
-        AppError::Io(format!("could not create {}: {e}", dir.display()))
-    })
+    std::fs::create_dir_all(dir)
+        .map_err(|e| AppError::Io(format!("could not create {}: {e}", dir.display())))
 }
 
 /// Remove everything inside `dir`, creating `dir` if it does not exist.
@@ -50,8 +49,8 @@ pub fn empty_dir(dir: &Path) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
     use super::{db_path, empty_dir, ensure_dir, login_script_dir, poll_cwd};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn derived_paths_hang_off_the_app_data_dir() {
@@ -83,9 +82,7 @@ mod tests {
         empty_dir(&target).expect("empty");
 
         assert!(target.is_dir());
-        let left = std::fs::read_dir(&target)
-            .expect("read_dir")
-            .count();
+        let left = std::fs::read_dir(&target).expect("read_dir").count();
         assert_eq!(left, 0);
     }
 

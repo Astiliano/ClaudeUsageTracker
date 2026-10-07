@@ -1,9 +1,6 @@
 import type { CSSProperties } from "react";
-import { DEFAULT_ORDER, GRID_GAP, gridMinWidth, visibleColumns } from "./columns";
-import type { ColumnKey } from "./columns";
+import { GRID_GAP } from "./columns";
 import { toLocal } from "./drag";
-
-export type Layout = "full" | "narrow" | "cards";
 
 /**
  * Every shared length lives here (local, unzoomed px) and reaches styles.css
@@ -14,37 +11,14 @@ export type Layout = "full" | "narrow" | "cards";
 export const APP_GUTTER = 6;
 /** `.row-grid` height. */
 export const ROW_HEIGHT = 40;
-/** `.row` bottom border width (chartHeightPx adds it to ROW_HEIGHT). */
+/** `.row` bottom border width (the reorder drag stride adds it to ROW_HEIGHT). */
 export const ROW_BORDER = 1;
 /** `.row-grid` and `.thead` horizontal padding. */
 export const ROW_PAD_X = 8;
 /** `.panel` border width. */
 export const PANEL_BORDER = 1;
-/** Bounds of the card-layout ring (read by `.ring`). */
-export const RING_MIN_PX = 36;
-export const RING_MAX_PX = 120;
-
-/** Columns the narrow layout hides on top of the user's own hidden set. */
-const NARROW_HIDDEN: readonly ColumnKey[] = ["updated", "model"];
-
-/**
- * Horizontal px around the grid tracks that the table cannot use:
- * `.app` padding 2×APP_GUTTER + `.panel` border 2×PANEL_BORDER + `.row-grid`
- * padding 2×ROW_PAD_X + 17 for WebView2's classic vertical scrollbar
- * (window.innerWidth includes it).
- */
-export const SHELL_PADDING = 2 * APP_GUTTER + 2 * PANEL_BORDER + 2 * ROW_PAD_X + 17;
-
-/**
- * Local (unzoomed) px at which the table stops fitting. Computed, never typed:
- * a hand literal drifts from the CSS. NARROW_HIDDEN must be declared above
- * this line (a `const` read before its declaration is a TDZ error).
- */
-export const BREAKPOINTS: { readonly narrow: number; readonly cards: number } = {
-  narrow: gridMinWidth(DEFAULT_ORDER) + SHELL_PADDING,
-  cards: gridMinWidth(visibleColumns(DEFAULT_ORDER, NARROW_HIDDEN)) + SHELL_PADDING,
-};
-
+/** Local px height of the drawer's history chart (`.chart`); independent of the window, so the content height never depends on it. */
+export const CHART_HEIGHT = 220;
 /** The CSS custom properties the shell sets for styles.css to read. */
 export function shellVars(): Record<string, string> {
   return {
@@ -54,26 +28,47 @@ export function shellVars(): Record<string, string> {
     "--row-pad-x": `${ROW_PAD_X}px`,
     "--grid-gap": `${GRID_GAP}px`,
     "--panel-border": `${PANEL_BORDER}px`,
-    "--ring-min": `${RING_MIN_PX}px`,
-    "--ring-max": `${RING_MAX_PX}px`,
+    "--base-w": `${BASE_WIDTH}px`,
+    "--chart-h": `${CHART_HEIGHT}px`,
   };
 }
 
-/** The shell's inline style: the text-size zoom plus every shell variable. */
-export function shellStyle(zoom: number): CSSProperties {
+/**
+ * The shell's inline style: the window zoom, every shell variable, and
+ * `--viewport-h`, the window height in local px. styles.css never uses `vh`:
+ * Chromium multiplies viewport units by CSS zoom, so `100vh` under a zoom
+ * of 1.1 is 110% of the window and the page scrolls.
+ */
+export function shellStyle(zoom: number, viewportHeightPx: number): CSSProperties {
+  const h = toLocal(viewportHeightPx, zoom);
+  const viewportH = Number.isFinite(h) && h > 0 ? h : 0;
   // `zoom` and the custom properties are valid inline styles that
   // CSSProperties does not list; this is the one typed cast.
-  return { zoom, ...shellVars() } as CSSProperties;
+  return { zoom, ...shellVars(), "--viewport-h": `${viewportH}px` } as CSSProperties;
 }
 
-export function layoutFor(viewportWidthPx: number, zoom: number): Layout {
-  const w = toLocal(viewportWidthPx, zoom);
-  if (w < BREAKPOINTS.cards) return "cards";
-  if (w < BREAKPOINTS.narrow) return "narrow";
-  return "full";
-}
+/**
+ * The canvas the UI is designed for: the window configured in
+ * src-tauri/tauri.conf.json (layout.test.ts fails if the two drift).
+ */
+export const BASE_WIDTH = 980;
+/** Bounds of the window-derived zoom. */
+export const ZOOM_MIN = 0.75;
+export const ZOOM_MAX = 2.5;
 
-/** Columns the layout hides on top of the user's own hidden set. */
-export function autoHiddenColumns(layout: Layout): readonly ColumnKey[] {
-  return layout === "narrow" ? NARROW_HIDDEN : [];
+/**
+ * The CSS zoom for a window of the given size: `min(w / BASE_WIDTH, h / contentH)`,
+ * clamped to [ZOOM_MIN, ZOOM_MAX]. `contentH` is the content's height in local
+ * px; a null, non-finite or non-positive one leaves the width term alone. A
+ * non-finite or non-positive window dimension (jsdom reports 0 before mount)
+ * gives 1: a zoom of 0 or NaN would blank the page.
+ */
+export function windowZoom(widthPx: number, heightPx: number, contentH: number | null): number {
+  if (!Number.isFinite(widthPx) || !Number.isFinite(heightPx) || widthPx <= 0 || heightPx <= 0) {
+    return 1;
+  }
+  const widthTerm = widthPx / BASE_WIDTH;
+  const usable = contentH !== null && Number.isFinite(contentH) && contentH > 0;
+  const fit = usable ? Math.min(widthTerm, heightPx / contentH) : widthTerm;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fit));
 }

@@ -2,9 +2,10 @@ pub mod commands;
 pub mod discovery;
 pub mod error;
 pub mod logging;
-pub mod memory;
 pub mod login;
+pub mod memory;
 pub mod paths;
+pub mod platform;
 pub mod process;
 pub mod scheduler;
 pub mod store;
@@ -13,30 +14,31 @@ pub mod system;
 mod test_log;
 pub mod tray;
 pub mod usage;
+pub mod window_aspect;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::commands::{
     begin_create, lock_binary, window_created, window_destroyed, Core, SharedCore, SystemSlot,
 };
+use crate::memory::{MemoryProbe, RealMemoryProbe};
 use crate::scheduler::driver::{
     BinaryProbe, Driver, EventSink, ProcessProbe, RealBinaryProbe, SysinfoProbe,
 };
-use crate::memory::{MemoryProbe, RealMemoryProbe};
 use crate::scheduler::machine::DriverStatus;
 use crate::scheduler::triggers::Triggers;
 use crate::store::Store;
 use crate::tray::{
-    apply_tray, exit_action, ExitAction, TauriEvents, MENU_LOGS, MENU_OPEN, MENU_QUIT,
-    MENU_REFRESH,
+    apply_tray, exit_action, ExitAction, TauriEvents, MENU_LOGS, MENU_OPEN, MENU_QUIT, MENU_REFRESH,
 };
 
 /// Set once the shutdown sequence has finished, so the second
@@ -51,6 +53,57 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// False once shutdown has begun.
 fn may_build_window(shutting_down: &AtomicBool) -> bool {
     !shutting_down.load(Ordering::SeqCst)
+}
+
+/// How long Quit waits for the driver to stop before exiting anyway.
+const DRIVER_STOP_MAX: Duration = Duration::from_millis(2500);
+
+/// How the wait for the driver's shutdown ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    /// The driver finished its shutdown and signalled within the bound.
+    Stopped,
+    /// The driver task ended without signalling (a panic), and the whole bound
+    /// was then waited out so a cycle task it no longer supervises can kill
+    /// its child before the process exits.
+    DriverGone,
+    /// The bound elapsed first; exit proceeds anyway.
+    TimedOut,
+    /// No driver was ever started, so there is nothing to wait for.
+    NoDriver,
+}
+
+/// Waits until the driver task signals completion, at most `max`.
+pub(crate) async fn await_driver_stop(
+    done: Option<oneshot::Receiver<()>>,
+    max: Duration,
+) -> StopOutcome {
+    let Some(done) = done else {
+        return StopOutcome::NoDriver;
+    };
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(max, done).await {
+        Ok(Ok(())) => StopOutcome::Stopped,
+        // The sender was dropped: the driver task ended without reaching its
+        // send (a panic), so its own cycle wait never ran. A cycle task it
+        // spawned is still cancelling and killing its child; give it the rest
+        // of the bound rather than exiting under it.
+        Ok(Err(_)) => {
+            warn!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "driver task ended without stopping; waiting out the bound"
+            );
+            tokio::time::sleep_until(started + max).await;
+            StopOutcome::DriverGone
+        }
+        Err(_) => StopOutcome::TimedOut,
+    }
+}
+
+/// Marks shutdown as begun; true only for the first caller. The flag is set
+/// before this returns, so the caller cancels the token after it is visible.
+fn begin_shutdown(shutting_down: &AtomicBool) -> bool {
+    !shutting_down.swap(true, Ordering::SeqCst)
 }
 
 /// What the window-state plugin persists: geometry only, never visibility
@@ -100,6 +153,12 @@ fn show_main_window(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _guard = guard;
+        // Quit may have begun after the pre-spawn check and before this task
+        // got to run. Returning drops `_guard`, so `creating` resets.
+        if !may_build_window(&SHUTTING_DOWN) {
+            info!("window create skipped: shutting down");
+            return;
+        }
         let started = Instant::now();
         let Some(cfg) = app.config().app.windows.first().cloned() else {
             error!("window create failed: no window in the config");
@@ -137,6 +196,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     let shutdown = CancellationToken::new();
     let shutdown_for_event = shutdown.clone();
+    // The driver task sends on `driver_done_tx` once `Driver::run` has killed
+    // and reaped its children; the exit handler waits on the receiver.
+    let (driver_done_tx, driver_done_rx) = oneshot::channel::<()>();
+    let mut driver_done_rx = Some(driver_done_rx);
 
     let result = tauri::Builder::default()
         // Single instance must be registered first so a second launch is
@@ -149,6 +212,7 @@ pub fn run() {
                 .with_state_flags(window_state_flags())
                 .build(),
         )
+        .plugin(window_aspect::plugin())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -171,6 +235,7 @@ pub fn run() {
             commands::open_login,
             commands::open_log_dir,
             commands::get_snapshot_raw,
+            window_aspect::set_content_height,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -200,10 +265,8 @@ pub fn run() {
             // Seed accounts on first start (spec 6.1).
             let home = paths::home_dir()?;
             let candidates = discovery::enumerate_profiles(&home);
-            let seeded = store.seed_accounts_if_empty(
-                &candidates,
-                chrono::Utc::now().timestamp_millis(),
-            )?;
+            let seeded =
+                store.seed_accounts_if_empty(&candidates, chrono::Utc::now().timestamp_millis())?;
             info!(seeded, discovered = candidates.len(), "accounts loaded");
 
             // D10: prune once at startup; the driver repeats it every 24 h.
@@ -262,10 +325,8 @@ pub fn run() {
             // while the real, interactive one never changes. This builder is
             // the sole creator of the tray.
             let open = MenuItem::with_id(app, MENU_OPEN, "Open", true, None::<&str>)?;
-            let refresh =
-                MenuItem::with_id(app, MENU_REFRESH, "Refresh now", true, None::<&str>)?;
-            let logs =
-                MenuItem::with_id(app, MENU_LOGS, "Open log folder", true, None::<&str>)?;
+            let refresh = MenuItem::with_id(app, MENU_REFRESH, "Refresh now", true, None::<&str>)?;
+            let logs = MenuItem::with_id(app, MENU_LOGS, "Open log folder", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &refresh, &logs, &quit])?;
 
@@ -283,10 +344,9 @@ pub fn run() {
                         // this handler runs on the UI thread.
                         let poll_core = Arc::clone(&menu_core);
                         tauri::async_runtime::spawn(async move {
-                            let result = commands::blocking(move || {
-                                commands::core_poll_now(&poll_core)
-                            })
-                            .await;
+                            let result =
+                                commands::blocking(move || commands::core_poll_now(&poll_core))
+                                    .await;
                             match result {
                                 Ok(s) => info!(result = %s, "tray refresh"),
                                 Err(e) => error!(error = %e, "tray refresh failed"),
@@ -341,7 +401,11 @@ pub fn run() {
                 shutdown.clone(),
                 Arc::clone(&pid_slot),
             );
-            tauri::async_runtime::spawn(driver.run());
+            tauri::async_runtime::spawn(async move {
+                driver.run().await;
+                // The receiver is gone only if the app already exited.
+                let _ = driver_done_tx.send(());
+            });
             tauri::async_runtime::spawn(system::run_sampler(
                 Arc::clone(&core),
                 events,
@@ -406,16 +470,30 @@ pub fn run() {
                 ExitAction::Shutdown => {}
             }
             api.prevent_exit();
+            // A second request while the first is waiting must not start a
+            // second wait: the receiver is taken once.
+            if !begin_shutdown(&SHUTTING_DOWN) {
+                debug!("exit requested again; shutdown already running");
+                return;
+            }
             info!("exit requested; shutting the poller down");
-            SHUTTING_DOWN.store(true, Ordering::SeqCst);
             shutdown_for_event.cancel();
 
+            let driver_done = driver_done_rx.take();
             let handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 // `app.exit()` ends in `process::exit`, which skips
                 // destructors, so the driver's own shutdown path must have
-                // killed and waited on any child before we get here.
-                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                // killed and waited on any child before we get here. Wait for
+                // that signal; the bound only caps a driver that hangs.
+                let started = Instant::now();
+                let outcome = await_driver_stop(driver_done, DRIVER_STOP_MAX).await;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                if matches!(outcome, StopOutcome::TimedOut | StopOutcome::DriverGone) {
+                    warn!(?outcome, elapsed_ms, "driver stop awaited");
+                } else {
+                    info!(?outcome, elapsed_ms, "driver stop awaited");
+                }
                 EXIT_APPROVED.store(true, Ordering::SeqCst);
                 handle.exit(0);
             });
@@ -435,11 +513,100 @@ mod tests {
         assert!(!may_build_window(&flag));
     }
 
+    const MAX: Duration = Duration::from_millis(2500);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signal_sent_before_the_wait_resolves_at_once() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).expect("receiver alive");
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(Some(rx), MAX).await, StopOutcome::Stopped);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signal_during_the_wait_resolves_when_it_arrives() {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = tx.send(());
+        });
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(Some(rx), MAX).await, StopOutcome::Stopped);
+        assert_eq!(start.elapsed(), Duration::from_millis(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_signal_times_out_at_exactly_the_bound() {
+        // Keep the sender alive: dropping it would count as a stop.
+        let (_tx, rx) = oneshot::channel::<()>();
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            await_driver_stop(Some(rx), MAX).await,
+            StopOutcome::TimedOut
+        );
+        assert_eq!(start.elapsed(), MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_receiver_means_no_driver_and_no_wait() {
+        let start = tokio::time::Instant::now();
+        assert_eq!(await_driver_stop(None, MAX).await, StopOutcome::NoDriver);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_sender_waits_out_the_whole_bound() {
+        // A panicked driver no longer supervises its cycle task, which still
+        // needs time to kill its child; the exit must not run ahead of it.
+        let (tx, rx) = oneshot::channel::<()>();
+        drop(tx);
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            await_driver_stop(Some(rx), MAX).await,
+            StopOutcome::DriverGone
+        );
+        assert_eq!(start.elapsed(), MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sender_dropped_mid_wait_still_ends_at_the_bound_from_the_start() {
+        let (tx, rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(tx);
+        });
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            await_driver_stop(Some(rx), MAX).await,
+            StopOutcome::DriverGone
+        );
+        assert_eq!(start.elapsed(), MAX);
+    }
+
+    #[test]
+    fn the_first_shutdown_request_wins_and_sets_the_flag() {
+        let flag = AtomicBool::new(false);
+        assert!(begin_shutdown(&flag));
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_repeat_shutdown_request_is_refused() {
+        let flag = AtomicBool::new(false);
+        assert!(begin_shutdown(&flag));
+        assert!(!begin_shutdown(&flag));
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn a_failed_window_call_is_logged_and_becomes_none() {
         let log = crate::test_log::captured(|| {
             assert_eq!(ok_or_warn("show", Ok::<u8, String>(7)), Some(7));
-            assert_eq!(ok_or_warn("outer_size", Err::<u8, String>("gone".into())), None);
+            assert_eq!(
+                ok_or_warn("outer_size", Err::<u8, String>("gone".into())),
+                None
+            );
         });
         assert!(log.contains("WARN"), "{log}");
         assert!(log.contains("outer_size"), "{log}");

@@ -5,6 +5,7 @@ import { AccountsTable } from "./components/AccountsTable";
 import { FailureDetail } from "./components/FailureDetail";
 import { Header } from "./components/Header";
 import { Settings } from "./components/Settings";
+import { useContentHeight } from "./hooks/useContentHeight";
 import { useDashboard } from "./hooks/useDashboard";
 import { usePrefs } from "./hooks/usePrefs";
 import { useSystem } from "./hooks/useSystem";
@@ -12,19 +13,18 @@ import { useViewport } from "./hooks/useViewport";
 import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
 import { errorMessage } from "./lib/errors";
-import { autoHiddenColumns, layoutFor, shellStyle } from "./lib/layout";
-import { SIZES } from "./lib/theme";
+import { shellStyle, windowZoom } from "./lib/layout";
 import "./styles.css";
 
 export default function App(): JSX.Element {
   const { dashboard, history, now, cycle, error, refetch } = useDashboard();
   const { report: system, error: systemError } = useSystem();
   const { prefs, update } = usePrefs();
-  const viewportWidth = useViewport();
-  const zoom = SIZES[prefs.size].zoom;
-  const layout = layoutFor(viewportWidth, zoom);
-  const effectiveHidden = [...prefs.hiddenColumns, ...autoHiddenColumns(layout)];
-  const visible = visibleColumns(prefs.columnOrder, effectiveHidden);
+  const viewport = useViewport();
+  const appRef = useRef<HTMLElement>(null);
+  const contentH = useContentHeight(appRef, dashboard !== null, viewport);
+  const zoom = windowZoom(viewport.width, viewport.height, contentH);
+  const visible = visibleColumns(prefs.columnOrder, prefs.hiddenColumns);
   const [showSettings, setShowSettings] = useState(false);
   const [failureId, setFailureId] = useState<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -52,7 +52,7 @@ export default function App(): JSX.Element {
     return () => { cancelled = true; };
   }, [prefs.alwaysOnTop, showError]);
 
-  const style = shellStyle(zoom);
+  const style = shellStyle(zoom, viewport.height);
 
   if (dashboard === null) {
     return (
@@ -63,22 +63,23 @@ export default function App(): JSX.Element {
   }
 
   return (
-    <main className="app" style={style}>
+    <main className="app" style={style} ref={appRef}>
       <div className="app-inner">
         <Header
           dashboard={dashboard}
           settingsOpen={showSettings}
-          compact={layout === "cards"}
           system={system}
           systemError={systemError}
           now={now}
           stayOnTop={prefs.alwaysOnTop}
           onToggleStayOnTop={() => update({ alwaysOnTop: !prefs.alwaysOnTop })}
+          view={prefs.view}
+          onViewChange={(view) => update({ view })}
           onToggleSettings={() => setShowSettings((v) => !v)}
           onChanged={refetch}
           onError={showError}
         />
-        {layout === "cards" ? (
+        {prefs.view === "rings" ? (
           <div className="cards" role="list" aria-label="Accounts">
             {dashboard.accounts.map((row) => (
               <AccountCard key={row.account.id} row={row} now={now} onShowFailure={(id) => setFailureId(id)} />
@@ -92,7 +93,7 @@ export default function App(): JSX.Element {
             cycle={cycle}
             zoom={zoom}
             columnOrder={visible}
-            onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, effectiveHidden, from, to) })}
+            onColumnMove={(from, to) => update({ columnOrder: moveVisible(prefs.columnOrder, prefs.hiddenColumns, from, to) })}
             onChanged={refetch}
             onError={showError}
             onShowFailure={(id) => setFailureId(id)}
@@ -102,7 +103,6 @@ export default function App(): JSX.Element {
           <Settings
             binary={dashboard.binary}
             prefs={prefs}
-            layout={layout}
             onPrefs={update}
             onClose={() => setShowSettings(false)}
             onChanged={refetch}

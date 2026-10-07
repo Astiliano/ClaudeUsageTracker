@@ -71,7 +71,9 @@ fn main() {
             // removing specific names rather than wiping the environment.
             let mut lines: Vec<String> = std::env::vars()
                 .filter(|(k, _)| {
-                    k.starts_with("ANTHROPIC_") || k.starts_with("CLAUDE_") || k.starts_with("CUT_TEST_")
+                    k.starts_with("ANTHROPIC_")
+                        || k.starts_with("CLAUDE_")
+                        || k.starts_with("CUT_TEST_")
                 })
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();

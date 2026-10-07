@@ -33,8 +33,9 @@ restart until you clear it.
 
 Accounts can be reordered by dragging rows with the grip handle, or with the
 Move up/Move down buttons inside a row's edit drawer. Column headers can also
-be dragged to reorder; column order and text size persist per
-machine in the webview's local storage. Columns other than Account can also
+be dragged to reorder; column order persists per machine in the webview's
+local storage. The UI scales with the window (base 980x640, zoom 0.75 to
+2.5), so there is no text size setting. Columns other than Account can also
 be hidden from Settings. Click a row's sparkline to open the
 history drawer, which offers range presets from 1 hour to 30 days, a
 granularity override and a metric picker. Removing an account (in a row's edit drawer) asks for

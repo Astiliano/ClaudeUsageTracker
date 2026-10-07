@@ -4,7 +4,7 @@ import { backend } from "../lib/backend";
 import { COLUMNS, type ColumnKey, gridTemplate } from "../lib/columns";
 import { type Rect, colDragTarget, colLineX, rowDragTarget, settlePendingRows, toLocal } from "../lib/drag";
 import { errorMessage } from "../lib/errors";
-import { ROW_HEIGHT } from "../lib/layout";
+import { ROW_BORDER, ROW_HEIGHT } from "../lib/layout";
 import { moveItem } from "../lib/reorder";
 import type { AccountRow as AccountRowData, HistoryPoint } from "../lib/types";
 import { AccountRow } from "./AccountRow";
@@ -174,7 +174,7 @@ export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, on
   const startRowDrag = (e: ReactPointerEvent<HTMLDivElement>, index: number): void => {
     e.preventDefault();
     const grid = e.currentTarget.parentElement;
-    rowH.current = grid !== null ? grid.offsetHeight + 1 : ROW_HEIGHT;
+    rowH.current = grid !== null ? grid.offsetHeight + ROW_BORDER : ROW_HEIGHT + ROW_BORDER;
     beginBodyDrag();
     setChartId(null);
     setEditingId(null);
@@ -238,7 +238,7 @@ export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, on
         )}
         {order.map((row, idx) => (
           <AccountRow key={row.account.id} row={row} index={idx} total={order.length}
-            points={history[row.account.id] ?? []} now={now} cycle={cycle} zoom={zoom} columnOrder={columnOrder} gridCols={gridCols}
+            points={history[row.account.id] ?? []} now={now} cycle={cycle} columnOrder={columnOrder} gridCols={gridCols}
             hotColumn={colDrag?.index ?? null} drag={drag} rowH={rowH.current}
             chartOpen={chartId === row.account.id} editing={editingId === row.account.id}
             onHandleDown={(e) => startRowDrag(e, idx)}

@@ -40,7 +40,10 @@ pub fn available_commit_bytes() -> Option<u64> {
     };
 
     let cb = std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32;
-    let mut pi = PERFORMANCE_INFORMATION { cb, ..Default::default() };
+    let mut pi = PERFORMANCE_INFORMATION {
+        cb,
+        ..Default::default()
+    };
     // SAFETY: `pi` is a live, initialised out-param and `cb` is its exact size.
     let ok = unsafe { K32GetPerformanceInfo(&mut pi, cb) };
     if ok == 0 {
@@ -101,7 +104,10 @@ pub fn process_peak(handle: std::os::windows::io::RawHandle) -> Option<ChildPeak
     };
 
     let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    let mut c = PROCESS_MEMORY_COUNTERS { cb, ..Default::default() };
+    let mut c = PROCESS_MEMORY_COUNTERS {
+        cb,
+        ..Default::default()
+    };
     // A process handle is an opaque kernel id that this function never
     // dereferences: an invalid one makes the call fail with BOOL 0. It
     // travels as an integer so the safe signature does not trip

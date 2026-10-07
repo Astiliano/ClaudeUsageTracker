@@ -307,9 +307,11 @@ Hold lifetime:
 
 - Any `Run` that polls every enabled account (Timer, Presence, Manual,
   Startup) clears `hold`. Manual still refreshes while held. An
-  `AccountChanged` `Run` polls only a subset, so it leaves `hold` untouched:
-  the held full refresh is still owed, and the sampler's recovery wake must
-  still reach it.
+  `AccountChanged` `Run` that polls a strict subset of the enabled accounts
+  leaves `hold` untouched: the held full refresh is still owed, and the
+  sampler's recovery wake must still reach it. An `AccountChanged` `Run` whose
+  accounts include every enabled account is a full refresh and clears `hold`
+  like any other.
 - A `Timer` decision that ends in any skip other than `LowMemory` clears it
   too, early return or not (`Halted`, `Busy`, `NoBinary`,
   `NoEnabledAccounts`, `GateIdle`, `AllBackedOff`). That decision is the
@@ -633,19 +635,28 @@ The constants in src/lib/layout.ts and src/lib/columns.ts are the contract.
 TS owns them, and the CSS reads them through custom properties (D9).
 
 - Homes: `APP_GUTTER = 6`, `ROW_HEIGHT = 40`, `ROW_PAD_X = 8`,
-  `PANEL_BORDER = 1`, `RING_MIN_PX = 36` and `RING_MAX_PX = 120` live in
-  layout.ts (chart.ts imports layout.ts, never the reverse); `GRID_GAP`
+  `PANEL_BORDER = 1`, `ROW_BORDER = 1` (the `.row` bottom border),
+  `RING_MIN_PX = 36` and `RING_MAX_PX = 120` live in layout.ts (chart.ts imports layout.ts, never the reverse); `GRID_GAP`
   (now 8) stays in columns.ts. layout.ts's `./columns` import becomes a
   value import, and `NARROW_HIDDEN` moves above `BREAKPOINTS` (reading a
   `const` before its declaration at module load is a TDZ error).
 - layout.ts exports `shellVars(): Record<string, string>`, returning
   `--gutter: 6px`, `--row-h: 40px`, `--row-pad-x: 8px`, `--grid-gap: 8px`,
-  `--panel-border: 1px`, `--ring-min` and `--ring-max` (from `RING_MIN_PX`
+  `--panel-border: 1px`, `--row-border: 1px`, `--ring-min` and `--ring-max` (from `RING_MIN_PX`
   and `RING_MAX_PX` above; §7 uses them), and
   `shellStyle(zoom): CSSProperties`, which returns `{zoom, ...shellVars()}`
   (the one typed cast at App.tsx:56-61 moves with it). App.tsx uses
   `shellStyle(zoom)` in place of its inline object, so the spread is
   tested in layout.test, not only seen in M7.
+- Update 2026-10-06 (zoom from the window): `shellStyle(zoom,
+  viewportHeightPx)` also sets `--viewport-h` (window height in local px,
+  `toLocal(h, zoom)`, 0px when the height is 0), which `.app` `min-height`
+  and `.modal-body` `max-height` (`calc(0.8 * var(--viewport-h))`) read;
+  styles.css contains no `vh`/`vw` unit, because Chromium multiplies them by
+  CSS zoom. The zoom now comes from `windowZoom(width, height)` in layout.ts
+  (`clamp(min(w/980, h/640), 0.75, 2.5)`, base = the window in
+  tauri.conf.json, 1 for a non-positive or non-finite size), and the Text
+  size pref is gone (a stored `size` key is ignored).
 - styles.css uses only the variables for those lengths:
   - `.app { padding: var(--gutter) }`; `.app-inner` loses `max-width` and
     centering, and its gap is `var(--gutter)`;
@@ -686,14 +697,15 @@ History chart, sized in JS (D10):
   /** Local px height that makes row + drawer equal the viewport, clamped. */
   export function chartHeightPx(f: ChartFit): number;
   // clamp(CHART_MIN_PX,
-  //       Math.floor(f.viewportPx / f.zoom - (ROW_HEIGHT + 1) - f.chromePx / f.zoom),
-  //       CHART_MAX_PX)      // + 1 is the row's bottom border
+  //       Math.floor(f.viewportPx / f.zoom - (ROW_HEIGHT + ROW_BORDER) - f.chromePx / f.zoom),
+  //       CHART_MAX_PX)      // ROW_BORDER is the row's bottom border
   ```
   `viewportPx` and `chromePx` are viewport (post-zoom) px; the row is
   `ROW_HEIGHT` local px from layout.ts, not measured (the drawer sits in
   its own `role="row"` wrapper, AccountRow.tsx:103-106, a sibling of the
   row grid at :85; both sit in the outer `.row` div at :84, whose 1 px
-  `border-bottom` is the + 1); the result is local px for the inline
+  `border-bottom`, `ROW_BORDER`, is the border term; AccountsTable's row-drag
+  stride is likewise `offsetHeight + ROW_BORDER`); the result is local px for the inline
   `height`.
 - A new `src/hooks/useChartHeight.ts(drawerRef, chartRef, rowRef, zoom)`.
   `zoom` travels as a prop: AccountsTable (already has it, :19) ->

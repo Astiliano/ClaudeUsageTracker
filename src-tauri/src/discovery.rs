@@ -288,8 +288,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
         }
     }
 
@@ -424,7 +423,13 @@ mod tests {
         let labels: Vec<&str> = found.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["claude", "claude-free", "claude-kilofree", "claude2", "claude3"]
+            vec![
+                "claude",
+                "claude-free",
+                "claude-kilofree",
+                "claude2",
+                "claude3"
+            ]
         );
     }
 

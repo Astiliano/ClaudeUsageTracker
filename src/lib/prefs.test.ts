@@ -17,13 +17,22 @@ describe("parsePrefs", () => {
     expect(parsePrefs("42")).toEqual(DEFAULT_PREFS);
   });
   it("keeps valid fields and defaults invalid ones independently", () => {
-    const parsed = parsePrefs(JSON.stringify({ size: "huge", columnOrder: ["account"] }));
-    expect(parsed).toEqual({ size: "md", columnOrder: [...DEFAULT_ORDER], hiddenColumns: [], alwaysOnTop: false });
+    const parsed = parsePrefs(JSON.stringify({ columnOrder: ["account"], alwaysOnTop: "yes" }));
+    expect(parsed).toEqual({ columnOrder: [...DEFAULT_ORDER], hiddenColumns: [], alwaysOnTop: false, view: "table" });
   });
   it("accepts a full valid record", () => {
     const order = [...DEFAULT_ORDER].reverse();
-    const raw = JSON.stringify({ size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
-    expect(parsePrefs(raw)).toEqual({ size: "xl", columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true });
+    const raw = JSON.stringify({ columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true, view: "rings" });
+    expect(parsePrefs(raw)).toEqual({ columnOrder: order, hiddenColumns: ["session"], alwaysOnTop: true, view: "rings" });
+  });
+  it("ignores a stored size key without throwing and keeps the other fields", () => {
+    const order = [...DEFAULT_ORDER].reverse();
+    const raw = JSON.stringify({ size: "lg", columnOrder: order, alwaysOnTop: true });
+    let parsed: ReturnType<typeof parsePrefs> | undefined;
+    expect(() => { parsed = parsePrefs(raw); }).not.toThrow();
+    expect(parsed).toBeDefined();
+    expect("size" in (parsed ?? {})).toBe(false);
+    expect(parsed).toEqual({ columnOrder: order, hiddenColumns: [], alwaysOnTop: true, view: "table" });
   });
   it("ignores a stored font key", () => {
     const parsed = parsePrefs(JSON.stringify({ font: "plex" }));
@@ -56,6 +65,24 @@ describe("parsePrefs", () => {
     expect(b.hiddenColumns).toEqual([]);
     expect(b.alwaysOnTop).toBe(true);
   });
+  it("defaults view to table and accepts only table or rings", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parsePrefs(null).view).toBe("table");
+    expect(parsePrefs(JSON.stringify({ view: "rings" })).view).toBe("rings");
+    expect(parsePrefs(JSON.stringify({ view: "table" })).view).toBe("table");
+    for (const bad of ["cards", "", 3, null, true, ["rings"], {}]) {
+      expect(parsePrefs(JSON.stringify({ view: bad })).view).toBe("table");
+    }
+    expect(warn).toHaveBeenCalledTimes(7);
+    warn.mockRestore();
+  });
+  it("a bad view does not discard the other fields", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const parsed = parsePrefs(JSON.stringify({ view: "bogus", alwaysOnTop: true, hiddenColumns: ["model"] }));
+    expect(parsed.view).toBe("table");
+    expect(parsed.alwaysOnTop).toBe(true);
+    expect(parsed.hiddenColumns).toEqual(["model"]);
+  });
   it("warns when a stored hiddenColumns value is unusable", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     parsePrefs(JSON.stringify({ hiddenColumns: 42 }));
@@ -72,7 +99,7 @@ describe("parsePrefs", () => {
 describe("loadPrefs / savePrefs", () => {
   it("round-trips through a store under the versioned key", () => {
     const store = new MemoryStore();
-    const prefs = { size: "lg" as const, columnOrder: [...DEFAULT_ORDER], hiddenColumns: ["updated" as const], alwaysOnTop: true };
+    const prefs = { columnOrder: [...DEFAULT_ORDER], hiddenColumns: ["updated" as const], alwaysOnTop: true, view: "rings" as const };
     savePrefs(store, prefs);
     expect(store.data.has(PREFS_KEY)).toBe(true);
     expect(loadPrefs(store)).toEqual(prefs);

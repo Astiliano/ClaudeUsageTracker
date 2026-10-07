@@ -33,8 +33,7 @@ fn label_for(dir: &Path) -> String {
         .unwrap_or_else(|| dir.to_string_lossy().to_string())
 }
 
-const SELECT_COLS: &str =
-    "id, label, config_dir, enabled, disabled_reason, created_at, sort_order";
+const SELECT_COLS: &str = "id, label, config_dir, enabled, disabled_reason, created_at, sort_order";
 
 /// True for a UNIQUE or PRIMARY KEY constraint violation, which is the
 /// signature of a raced insert against the `accounts.config_dir` UNIQUE
@@ -85,8 +84,7 @@ fn build_account(
             config_dir.display()
         )));
     }
-    let canonical =
-        dunce::canonicalize(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
+    let canonical = dunce::canonicalize(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
     let canonical_str = canonical.to_string_lossy().to_string();
     let account = Account {
         id: uuid::Uuid::new_v4().to_string(),
@@ -118,7 +116,11 @@ fn next_sort_order(conn: &Connection) -> AppResult<i64> {
 /// this check somehow raced (e.g. a future refactor calls this per-row
 /// inside a shared transaction with yielding), the mapped `INSERT` failure
 /// still reports `duplicate`, never a bare `db` error.
-fn insert_account(conn: &rusqlite::Connection, account: &Account, canonical_str: &str) -> AppResult<()> {
+fn insert_account(
+    conn: &rusqlite::Connection,
+    account: &Account,
+    canonical_str: &str,
+) -> AppResult<()> {
     let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM accounts WHERE config_dir = ?1",
         params![canonical_str],
@@ -220,7 +222,11 @@ impl Store {
             })?;
         }
         if let Some(on) = enabled {
-            let reason = if on { None } else { Some(DisabledReason::User.as_str()) };
+            let reason = if on {
+                None
+            } else {
+                Some(DisabledReason::User.as_str())
+            };
             self.with_conn(|c| {
                 c.execute(
                     "UPDATE accounts SET enabled = ?2, disabled_reason = ?3 WHERE id = ?1",
@@ -246,9 +252,8 @@ impl Store {
     }
 
     pub fn remove_account(&self, id: &str) -> AppResult<()> {
-        let removed = self.with_conn(|c| {
-            Ok(c.execute("DELETE FROM accounts WHERE id = ?1", params![id])?)
-        })?;
+        let removed =
+            self.with_conn(|c| Ok(c.execute("DELETE FROM accounts WHERE id = ?1", params![id])?))?;
         if removed == 0 {
             return Err(AppError::NotFound(format!("no such account: {id}")));
         }
@@ -262,8 +267,7 @@ impl Store {
     /// interleave and double-seed.
     pub fn seed_accounts_if_empty(&self, candidates: &[Candidate], now: i64) -> AppResult<usize> {
         self.with_conn(|c| {
-            let existing: i64 =
-                c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
+            let existing: i64 = c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
             if existing > 0 {
                 return Ok(0);
             }
@@ -293,11 +297,7 @@ impl Store {
     }
 
     /// Spec 6.1: a rescan adds new candidates **disabled** (reason `user`).
-    pub fn rescan_accounts(
-        &self,
-        candidates: &[Candidate],
-        now: i64,
-    ) -> AppResult<Vec<Account>> {
+    pub fn rescan_accounts(&self, candidates: &[Candidate], now: i64) -> AppResult<Vec<Account>> {
         let known: Vec<PathBuf> = self
             .list_accounts()?
             .into_iter()
@@ -425,7 +425,12 @@ mod tests {
     fn add_account_rejects_a_missing_directory() {
         let store = Store::open_in_memory().expect("open");
         let err = store
-            .add_account(&PathBuf::from("/definitely/not/here/.claude9"), true, None, NOW)
+            .add_account(
+                &PathBuf::from("/definitely/not/here/.claude9"),
+                true,
+                None,
+                NOW,
+            )
             .expect_err("must reject");
         assert_eq!(err.code(), "not_found");
     }
@@ -601,7 +606,10 @@ mod tests {
         let two = make_dir(tmp.path(), ".claude3");
 
         let n = store
-            .seed_accounts_if_empty(&[candidate(&one, "claude"), candidate(&two, "claude3")], NOW)
+            .seed_accounts_if_empty(
+                &[candidate(&one, "claude"), candidate(&two, "claude3")],
+                NOW,
+            )
             .expect("seed");
         assert_eq!(n, 2);
 
@@ -621,7 +629,10 @@ mod tests {
         store.add_account(&one, true, None, NOW).expect("add");
 
         let n = store
-            .seed_accounts_if_empty(&[candidate(&one, "claude"), candidate(&two, "claude3")], NOW)
+            .seed_accounts_if_empty(
+                &[candidate(&one, "claude"), candidate(&two, "claude3")],
+                NOW,
+            )
             .expect("seed");
         assert_eq!(n, 0);
         assert_eq!(store.list_accounts().expect("list").len(), 1);

@@ -93,7 +93,10 @@ pub fn write_login_script(
 #[cfg(windows)]
 fn launch(script: &Path) -> AppResult<()> {
     use std::os::windows::process::CommandExt;
-    let attempted = format!("cmd.exe /s /c start \"\" cmd.exe /k \"{}\"", script.display());
+    let attempted = format!(
+        "cmd.exe /s /c start \"\" cmd.exe /k \"{}\"",
+        script.display()
+    );
     std::process::Command::new("cmd.exe")
         .raw_arg(format!(
             "/s /c \"start \"\" cmd.exe /k \"{}\"\"",
@@ -252,7 +255,9 @@ mod tests {
         let path = write_login_script(tmp.path(), &binary, &second).expect("second");
         let body = std::fs::read_to_string(&path).expect("read");
         assert!(body.contains(".claude3"));
-        assert!(!body.contains("CLAUDE_CONFIG_DIR=") || body.matches("CLAUDE_CONFIG_DIR").count() == 1);
+        assert!(
+            !body.contains("CLAUDE_CONFIG_DIR=") || body.matches("CLAUDE_CONFIG_DIR").count() == 1
+        );
     }
 
     #[cfg(windows)]

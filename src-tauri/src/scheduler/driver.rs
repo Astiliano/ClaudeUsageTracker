@@ -181,8 +181,13 @@ fn flush_deferred_presence(core: &Core, deferred: &mut bool) {
 /// just tripped the quota guard — with `disable_account` never having run
 /// either. A store write that fails is logged and the cycle is abandoned
 /// exactly as before; the difference is only that polling stays closed.
-async fn arm_and_perform_halt<S>(core: &Arc<Core>, sink: S, now_ms: i64, raw: String, reason: String)
-where
+async fn arm_and_perform_halt<S>(
+    core: &Arc<Core>,
+    sink: S,
+    now_ms: i64,
+    raw: String,
+    reason: String,
+) where
     S: HaltSink + Send + 'static,
 {
     core.halt_latched.store(true, Ordering::SeqCst);
@@ -313,12 +318,20 @@ async fn run_cycle(inputs: CycleInputs, _token: CycleToken) {
                 if let Some(available) = read_memory(&*g.probe, &g.lost) {
                     if available < g.floor_bytes {
                         let now = chrono::Utc::now().timestamp_millis();
-                        let reopened = lock_machine(&machine)
-                            .hold_mid_cycle(available, g.floor_bytes, now, closed_gate);
+                        let reopened = lock_machine(&machine).hold_mid_cycle(
+                            available,
+                            g.floor_bytes,
+                            now,
+                            closed_gate,
+                        );
                         publish_status(&machine, &core.status, now);
                         events.memory_hold_changed();
                         if let Some(gate) = reopened {
-                            info!(gate = gate.as_str(), trigger = "memory_hold", "gate changed");
+                            info!(
+                                gate = gate.as_str(),
+                                trigger = "memory_hold",
+                                "gate changed"
+                            );
                             events.gate_changed(gate.as_str());
                         }
                         info!(
@@ -843,7 +856,11 @@ impl Driver {
                 gate_transition,
             } => {
                 if let Some(gate) = gate_transition {
-                    info!(gate = gate.as_str(), trigger = reason.as_str(), "gate changed");
+                    info!(
+                        gate = gate.as_str(),
+                        trigger = reason.as_str(),
+                        "gate changed"
+                    );
                     self.events.gate_changed(gate.as_str());
                 }
                 let binary = binary_path?;
@@ -890,7 +907,8 @@ impl Driver {
                 floor_bytes = floor,
                 "memory hold"
             ),
-            (HoldChange::Released, Some(prior), _) => match self.release_figure(trigger, available) {
+            (HoldChange::Released, Some(prior), _) => match self.release_figure(trigger, available)
+            {
                 Some(figure) => info!(
                     available_bytes = figure,
                     floor_bytes = floor,
@@ -1279,13 +1297,13 @@ mod tests {
     fn test_core() -> (tempfile::TempDir, Arc<Core>, String) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(crate::store::Store::open_in_memory().expect("open"));
-        store.save_settings(&test_settings()).expect("seed settings");
+        store
+            .save_settings(&test_settings())
+            .expect("seed settings");
         let dir = tmp.path().join(".claude3");
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("settings.json"), "{}").expect("marker");
-        let account = store
-            .add_account(&dir, true, None, 1)
-            .expect("add account");
+        let account = store.add_account(&dir, true, None, 1).expect("add account");
         let (settings_tx, _rx) = tokio::sync::watch::channel(test_settings());
         let core = Arc::new(Core {
             store,
@@ -1320,7 +1338,11 @@ mod tests {
     }
 
     fn prior_hold() -> MemoryHold {
-        MemoryHold { available_bytes: 1, floor_bytes: 2, since: 1_000 }
+        MemoryHold {
+            available_bytes: 1,
+            floor_bytes: 2,
+            since: 1_000,
+        }
     }
 
     #[tokio::test]
@@ -1333,7 +1355,10 @@ mod tests {
             driver.log_hold_change(&Trigger::Manual, Some(prior_hold()), None, None, 2, 5_000)
         });
         assert!(log.contains("memory hold released"), "{log}");
-        assert!(log.contains("available_bytes=18446744073709551615"), "{log}");
+        assert!(
+            log.contains("available_bytes=18446744073709551615"),
+            "{log}"
+        );
     }
 
     #[tokio::test]
@@ -1356,7 +1381,10 @@ mod tests {
         let driver = Driver::new(
             Arc::clone(&core),
             Arc::new(SilentEvents),
-            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(CountingProcess {
+                running: true,
+                calls: Arc::clone(&calls),
+            }),
             Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
@@ -1365,8 +1393,16 @@ mod tests {
 
         {
             let _token = begin_cycle(&driver.machine, 1);
-            assert_eq!(driver.probe_if_free().await, None, "busy must short-circuit");
-            assert_eq!(calls.load(Ordering::SeqCst), 0, "no check may be spent while busy");
+            assert_eq!(
+                driver.probe_if_free().await,
+                None,
+                "busy must short-circuit"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "no check may be spent while busy"
+            );
         }
 
         assert_eq!(driver.probe_if_free().await, Some(true));
@@ -1381,7 +1417,10 @@ mod tests {
         let driver = Driver::new(
             Arc::clone(&core),
             Arc::new(SilentEvents),
-            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(CountingProcess {
+                running: true,
+                calls: Arc::clone(&calls),
+            }),
             Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             shutdown.clone(),
@@ -1501,7 +1540,10 @@ mod tests {
         let driver = Driver::new(
             Arc::clone(&core),
             Arc::new(SilentEvents),
-            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(CountingProcess {
+                running: true,
+                calls: Arc::clone(&calls),
+            }),
             Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
@@ -1521,7 +1563,10 @@ mod tests {
                     .is_none(),
                 "busy, so nothing runs"
             );
-            assert!(presence_deferred, "a wake consumed while busy must be deferred");
+            assert!(
+                presence_deferred,
+                "a wake consumed while busy must be deferred"
+            );
             assert_eq!(
                 calls.load(Ordering::SeqCst),
                 0,
@@ -1531,7 +1576,10 @@ mod tests {
 
         // The cycle has ended; the flush point must re-arm the wake.
         flush_deferred_presence(&core, &mut presence_deferred);
-        assert!(!presence_deferred, "the flag is cleared once the wake is re-armed");
+        assert!(
+            !presence_deferred,
+            "the flag is cleared once the wake is re-armed"
+        );
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(200),
@@ -1550,7 +1598,10 @@ mod tests {
         let driver = Driver::new(
             Arc::clone(&core),
             Arc::new(SilentEvents),
-            Arc::new(CountingProcess { running: true, calls: Arc::clone(&calls) }),
+            Arc::new(CountingProcess {
+                running: true,
+                calls: Arc::clone(&calls),
+            }),
             Arc::new(AmpleMemory),
             Arc::new(FakeBinary(tmp.path().join("claude.exe"))),
             CancellationToken::new(),
@@ -1646,7 +1697,9 @@ mod tests {
     #[tokio::test]
     async fn an_account_changed_skipped_while_halted_keeps_its_ids() {
         let (tmp, core, id) = test_core();
-        core.store.set_polling_halted("guard_tripped:1").expect("halt");
+        core.store
+            .set_polling_halted("guard_tripped:1")
+            .expect("halt");
         core.triggers.account_changed(vec![id.clone()]);
 
         let driver = test_driver(Arc::clone(&core), tmp.path());
@@ -1750,8 +1803,13 @@ mod tests {
     #[test]
     fn a_halt_persists_the_flag_first_then_logs_then_persists_the_outcome() {
         let sink = RecordingHalt::default();
-        perform_halt(&sink, 1_700_000_000_000, "{\"type\":\"result\"}", "no local_command")
-            .expect("halt");
+        perform_halt(
+            &sink,
+            1_700_000_000_000,
+            "{\"type\":\"result\"}",
+            "no local_command",
+        )
+        .expect("halt");
         assert_eq!(
             sink.steps.into_inner(),
             vec![
@@ -1814,7 +1872,10 @@ mod tests {
         let outcome = PollOutcome::Timeout(30);
         let (stored, reason) = halt_decision(&outcome, Recorded::Continue);
         assert_eq!(reason, None);
-        assert_eq!(stored.kind().as_str(), PollOutcome::Timeout(30).kind().as_str());
+        assert_eq!(
+            stored.kind().as_str(),
+            PollOutcome::Timeout(30).kind().as_str()
+        );
     }
 
     #[test]

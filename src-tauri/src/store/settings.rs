@@ -127,8 +127,7 @@ impl Store {
             log_level: self
                 .get_raw("log_level")?
                 .unwrap_or_else(|| "info".to_string()),
-            min_free_memory_mb: self
-                .get_u32("min_free_memory_mb", DEFAULT_MIN_FREE_MEMORY_MB)?,
+            min_free_memory_mb: self.get_u32("min_free_memory_mb", DEFAULT_MIN_FREE_MEMORY_MB)?,
         })
     }
 
@@ -399,7 +398,10 @@ mod tests {
         let err = store.save_settings(&s).expect_err("must reject");
         assert_eq!(err.code(), "out_of_range");
         assert_eq!(store.get_raw("min_free_memory_mb").expect("raw"), None);
-        assert_eq!(store.stored_settings().expect("read").min_free_memory_mb, 1536);
+        assert_eq!(
+            store.stored_settings().expect("read").min_free_memory_mb,
+            1536
+        );
     }
 
     #[test]
@@ -428,7 +430,9 @@ mod tests {
             let store = Store::open(&path).expect("open");
             store.set_raw("interval_secs", "120").expect("set");
             store.set_raw("timeout_secs", "45").expect("set");
-            store.set_raw("claude_binary", "C:/bin/claude.exe").expect("set");
+            store
+                .set_raw("claude_binary", "C:/bin/claude.exe")
+                .expect("set");
             store.set_raw("close_to_tray", "0").expect("set");
             store.set_raw("log_level", "debug").expect("set");
             assert_eq!(store.get_raw("min_free_memory_mb").expect("raw"), None);
@@ -455,7 +459,10 @@ mod tests {
         s.min_free_memory_mb = 0;
         store.save_settings(&s).expect("save");
         let back = store.stored_settings().expect("read");
-        assert_eq!(back.min_free_memory_mb, 0, "0 (never hold) is a stored value, not a missing one");
+        assert_eq!(
+            back.min_free_memory_mb, 0,
+            "0 (never hold) is a stored value, not a missing one"
+        );
         assert_eq!(back.interval_secs, 90);
     }
 
@@ -463,7 +470,10 @@ mod tests {
     fn an_unparseable_stored_floor_reads_the_default() {
         let store = Store::open_in_memory().expect("open");
         store.set_raw("min_free_memory_mb", "lots").expect("set");
-        assert_eq!(store.stored_settings().expect("read").min_free_memory_mb, 1536);
+        assert_eq!(
+            store.stored_settings().expect("read").min_free_memory_mb,
+            1536
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createMockBackend } from "./mockBackend";
 import type { UserSettings } from "./types";
 
@@ -44,5 +44,18 @@ describe("mock set_settings: min_free_memory_mb", () => {
     const b = createMockBackend("");
     const d = await b.invoke<{ memory_hold: unknown }>("get_dashboard");
     expect(d.memory_hold).toBeNull();
+  });
+});
+
+describe("mock setContentHeight", () => {
+  it("setContentHeight records calls and resolves alreadyFitted", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const b = createMockBackend("");
+      await expect(b.setContentHeight(640)).resolves.toBe("alreadyFitted");
+      expect(info).toHaveBeenCalledWith("mock: setContentHeight", 640);
+    } finally {
+      info.mockRestore();
+    }
   });
 });

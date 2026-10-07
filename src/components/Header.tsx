@@ -3,18 +3,20 @@ import { backend } from "../lib/backend";
 import { bannerFor } from "../lib/banner";
 import { errorMessage } from "../lib/errors";
 import { accountCountLabel, chipFor, countPlacement } from "../lib/present";
+import type { ViewMode } from "../lib/prefs";
 import type { Dashboard, SystemReport } from "../lib/types";
 import { SystemLine } from "./SystemLine";
 
 interface Props {
   dashboard: Dashboard;
   settingsOpen: boolean;
-  compact: boolean;
   system: SystemReport | null;
   systemError: string | null;
   now: number;
   stayOnTop: boolean;
   onToggleStayOnTop: () => void;
+  view: ViewMode;
+  onViewChange: (view: ViewMode) => void;
   onToggleSettings: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
@@ -23,19 +25,20 @@ interface Props {
 export function Header({
   dashboard,
   settingsOpen,
-  compact,
   system,
   systemError,
   now,
   stayOnTop,
   onToggleStayOnTop,
+  view,
+  onViewChange,
   onToggleSettings,
   onChanged,
   onError,
 }: Props): JSX.Element {
   const banner = bannerFor(dashboard);
   const count = system?.stats?.claude_count ?? null;
-  const placement = countPlacement(banner?.kind ?? "idle", compact);
+  const placement = countPlacement(banner?.kind ?? "idle");
   const chip = chipFor(dashboard, placement === "chip" ? count : null);
 
   const run = async (command: string): Promise<void> => {
@@ -50,12 +53,10 @@ export function Header({
   return (
     <header className="header">
       <div className="topbar">
-        {!compact && (
-          <div className="topbar-left">
-            <h1 className="topbar-title">Usage Tracker</h1>
-            <span className="topbar-count">{accountCountLabel(dashboard.accounts.length)}</span>
-          </div>
-        )}
+        <div className="topbar-left">
+          <h1 className="topbar-title">Usage Tracker</h1>
+          <span className="topbar-count">{accountCountLabel(dashboard.accounts.length)}</span>
+        </div>
         <div className="topbar-actions">
           <div className="chip" title={banner?.text}>
             <span className={`chip-dot chip-dot-${chip.dot}`} />
@@ -72,6 +73,15 @@ export function Header({
             onClick={onToggleStayOnTop}
           >
             on top
+          </button>
+          <button
+            type="button"
+            className={"btn" + (view === "rings" ? " btn-edit-on" : "")}
+            aria-pressed={view === "rings"}
+            title="Switch view"
+            onClick={() => onViewChange(view === "rings" ? "table" : "rings")}
+          >
+            {view === "rings" ? "Rings" : "Table"}
           </button>
           <button type="button" className={`btn${settingsOpen ? " btn-edit-on" : ""}`} onClick={onToggleSettings}>
             settings

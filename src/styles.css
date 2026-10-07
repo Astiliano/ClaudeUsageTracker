@@ -37,7 +37,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); font-size: 14px; }
 input, select, button { font-family: inherit; }
 
 /* ---- shell ---- */
-.app { min-height: 100vh; padding: var(--gutter); display: flex; font-family: var(--ui); }
+.app { width: var(--base-w); margin: 0 auto; padding: var(--gutter); display: flex; font-family: var(--ui); }
 .app-inner { width: 100%; display: flex; flex-direction: column; gap: var(--gutter); }
 
 /* ---- header ---- */
@@ -194,14 +194,14 @@ button.pill { cursor: pointer; background: transparent; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 
-/* ---- compact cards ---- */
-.cards { display: flex; flex-direction: column; gap: 10px; }
+/* ---- rings view: a grid of cards, three per row in the fixed-width box ---- */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .card {
-  display: flex; flex-direction: column; gap: 10px;
+  display: flex; flex-direction: column; gap: 10px; min-width: 0;
   padding: 8px; border: 1px solid var(--line); border-radius: 0; background: var(--panel);
 }
 .card-rings { display: flex; flex-wrap: wrap; gap: 10px 14px; container-type: inline-size; }
-.ring { display: flex; flex-direction: column; align-items: center; gap: 4px; width: clamp(var(--ring-min), 28cqi, var(--ring-max)); }
+.ring { display: flex; flex-direction: column; align-items: center; gap: 4px; width: clamp(36px, 28cqi, 120px); }
 .ring svg, .ring-sm svg { width: 100%; height: auto; aspect-ratio: 1; }
 .ring-value { font-family: var(--mono); font-size: 11px; fill: #dbe1e6; font-variant-numeric: tabular-nums; }
 .ring-label { font-family: var(--mono); font-size: 10px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -224,7 +224,7 @@ button.pill { cursor: pointer; background: transparent; }
 .drawer-label { text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); }
 .drawer-stats { display: flex; gap: 14px; color: var(--muted); }
 .chart {
-  position: relative; border: 1px solid var(--line-head); border-radius: 0;
+  position: relative; height: var(--chart-h); border: 1px solid var(--line-head); border-radius: 0;
   background: var(--chart); padding: 6px 8px;
 }
 .chart svg { width: 100%; height: 100%; overflow: visible; }
@@ -316,7 +316,7 @@ button.pill { cursor: pointer; background: transparent; }
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; z-index: 50; }
 .modal-body {
   background: var(--panel); border: 1px solid var(--line); border-radius: 0;
-  padding: 20px 22px; max-width: 720px; max-height: 80vh; overflow: auto;
+  padding: 20px 22px; max-width: 720px; max-height: calc(var(--viewport-h) - 2 * var(--gutter)); overflow: auto;
 }
 .modal-body pre {
   background: var(--input-bg); border: 1px solid var(--btn-border); border-radius: 8px;

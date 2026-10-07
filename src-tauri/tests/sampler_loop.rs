@@ -30,7 +30,9 @@ struct CountingSink {
 
 impl CountingSink {
     fn new() -> Arc<CountingSink> {
-        Arc::new(CountingSink { samples: AtomicUsize::new(0) })
+        Arc::new(CountingSink {
+            samples: AtomicUsize::new(0),
+        })
     }
 
     fn count(&self) -> usize {
@@ -79,9 +81,12 @@ async fn barrier(core: &Core, sink: &CountingSink) {
 
 async fn no_wake(core: &Core) {
     assert!(
-        timeout(Duration::from_millis(100), core.triggers.notified_memory_recovered())
-            .await
-            .is_err(),
+        timeout(
+            Duration::from_millis(100),
+            core.triggers.notified_memory_recovered()
+        )
+        .await
+        .is_err(),
         "the sampler woke the driver"
     );
 }
@@ -113,7 +118,10 @@ fn spawn_sampler(
 async fn stop(shutdown: CancellationToken, handle: tokio::task::JoinHandle<()>) {
     shutdown.cancel();
     let joined = timeout(Duration::from_secs(10), handle).await;
-    assert!(matches!(joined, Ok(Ok(()))), "the sampler did not stop cleanly");
+    assert!(
+        matches!(joined, Ok(Ok(()))),
+        "the sampler did not stop cleanly"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -126,8 +134,15 @@ async fn a_held_tick_above_the_floor_wakes_the_driver() {
     memory.script(&[Some(u64::MAX)]);
 
     let (shutdown, handle) = spawn_sampler(&core, &sink, &memory);
-    let woke = timeout(Duration::from_secs(10), core.triggers.notified_memory_recovered()).await;
-    assert!(woke.is_ok(), "a held tick above the floor must wake the driver");
+    let woke = timeout(
+        Duration::from_secs(10),
+        core.triggers.notified_memory_recovered(),
+    )
+    .await;
+    assert!(
+        woke.is_ok(),
+        "a held tick above the floor must wake the driver"
+    );
     stop(shutdown, handle).await;
 }
 
@@ -178,7 +193,11 @@ async fn a_hidden_sampler_waits_longer_than_the_open_interval() {
     let (shutdown, handle) = spawn_sampler(&core, &sink, &memory);
     wait_for_count(&sink, 1, Duration::from_secs(10)).await;
     sleep(VISIBLE_INTERVAL + Duration::from_millis(500)).await;
-    assert_eq!(sink.count(), 1, "a hidden sampler must not sample at the open cadence");
+    assert_eq!(
+        sink.count(),
+        1,
+        "a hidden sampler must not sample at the open cadence"
+    );
     stop(shutdown, handle).await;
 }
 
@@ -205,7 +224,10 @@ async fn the_floor_is_read_from_the_settings_watch() {
     hold_memory(&core);
     memory.script(&[Some(2048 * MIB)]);
     core.settings_tx
-        .send(UserSettings { min_free_memory_mb: 4096, ..defaults() })
+        .send(UserSettings {
+            min_free_memory_mb: 4096,
+            ..defaults()
+        })
         .expect("send 4096");
 
     let (shutdown, handle) = spawn_sampler(&core, &sink, &memory);
@@ -213,10 +235,20 @@ async fn the_floor_is_read_from_the_settings_watch() {
     no_wake(&core).await;
 
     core.settings_tx
-        .send(UserSettings { min_free_memory_mb: 1024, ..defaults() })
+        .send(UserSettings {
+            min_free_memory_mb: 1024,
+            ..defaults()
+        })
         .expect("send 1024");
     core.sampler_kick.notify_one();
-    let woke = timeout(Duration::from_secs(10), core.triggers.notified_memory_recovered()).await;
-    assert!(woke.is_ok(), "lowering the floor under the reading must wake the driver");
+    let woke = timeout(
+        Duration::from_secs(10),
+        core.triggers.notified_memory_recovered(),
+    )
+    .await;
+    assert!(
+        woke.is_ok(),
+        "lowering the floor under the reading must wake the driver"
+    );
     stop(shutdown, handle).await;
 }

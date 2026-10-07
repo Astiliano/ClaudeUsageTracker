@@ -1,21 +1,28 @@
 import { type ColumnKey, DEFAULT_ORDER, normalizeColumnOrder, normalizeHiddenColumns } from "./columns";
-import { type SizeKey, isSizeKey } from "./theme";
 
 export interface Prefs {
-  size: SizeKey;
   columnOrder: ColumnKey[];
   /** Columns the user hid in Settings; "account" is never in here. */
   hiddenColumns: ColumnKey[];
   alwaysOnTop: boolean;
+  /** Accounts as the table or as a grid of ring cards. */
+  view: ViewMode;
+}
+
+export const VIEW_MODES = ["table", "rings"] as const;
+export type ViewMode = (typeof VIEW_MODES)[number];
+
+function isViewMode(v: unknown): v is ViewMode {
+  return typeof v === "string" && (VIEW_MODES as readonly string[]).includes(v);
 }
 
 export const PREFS_KEY = "usage-tracker.prefs.v1";
 
 export const DEFAULT_PREFS: Readonly<Prefs> = {
-  size: "md",
   columnOrder: [...DEFAULT_ORDER],
   hiddenColumns: [],
   alwaysOnTop: false,
+  view: "table",
 };
 
 /** The subset of the Web Storage API the app touches; injectable for tests. */
@@ -26,10 +33,10 @@ export interface PrefsStore {
 
 function fresh(): Prefs {
   return {
-    size: DEFAULT_PREFS.size,
     columnOrder: [...DEFAULT_ORDER],
     hiddenColumns: [],
     alwaysOnTop: DEFAULT_PREFS.alwaysOnTop,
+    view: DEFAULT_PREFS.view,
   };
 }
 
@@ -45,7 +52,6 @@ export function parsePrefs(raw: string | null): Prefs {
   }
   if (typeof parsed !== "object" || parsed === null) return out;
   const rec = parsed as Record<string, unknown>;
-  if (isSizeKey(rec.size)) out.size = rec.size;
   const order = normalizeColumnOrder(rec.columnOrder);
   if (order !== null) out.columnOrder = order;
   if (Array.isArray(rec.columnOrder) && JSON.stringify(order) !== JSON.stringify(rec.columnOrder)) {
@@ -57,6 +63,8 @@ export function parsePrefs(raw: string | null): Prefs {
     console.warn("prefs: stored hiddenColumns was unusable; showing every column", rec.hiddenColumns);
   }
   if (typeof rec.alwaysOnTop === "boolean") out.alwaysOnTop = rec.alwaysOnTop;
+  if (isViewMode(rec.view)) out.view = rec.view;
+  else if (rec.view !== undefined) console.warn("prefs: stored view was unusable; showing the table", rec.view);
   return out;
 }
 

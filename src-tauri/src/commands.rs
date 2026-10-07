@@ -11,7 +11,10 @@ use crate::logging::LogHandle;
 use crate::scheduler::machine::{preview_manual, DriverStatus, MemoryHold};
 use crate::scheduler::triggers::Triggers;
 use crate::store::settings::{driver_relevant_changed, validate_settings, UserSettings};
-use crate::store::{HistoryMetric, HistoryPoint, Store, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS, RETENTION_MS};
+use crate::store::{
+    HistoryMetric, HistoryPoint, Store, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS,
+    RANGE_SLACK_MS, RETENTION_MS,
+};
 use crate::usage::{Account, SnapshotDto};
 #[cfg(test)]
 use crate::usage::{DisabledReason, PollOutcome};
@@ -217,22 +220,36 @@ pub struct SystemReport {
 /// touches the store.
 pub fn core_get_system(core: &Core) -> SystemReport {
     let slot = lock_system(&core.system);
-    SystemReport { stats: slot.stats.clone(), stopped: slot.stopped }
+    SystemReport {
+        stats: slot.stats.clone(),
+        stopped: slot.stopped,
+    }
 }
 
 /// Spec §3.1: every limit is checked here, never in the store. Errors name
 /// the argument and the bound so a mis-built request is diagnosable from
 /// the toast alone.
-fn validate_history_request(now: i64, since: i64, bucket_ms: i64, metric: &HistoryMetric) -> AppResult<()> {
+fn validate_history_request(
+    now: i64,
+    since: i64,
+    bucket_ms: i64,
+    metric: &HistoryMetric,
+) -> AppResult<()> {
     if bucket_ms < MIN_BUCKET_MS {
-        return Err(AppError::OutOfRange(format!("bucket_ms must be >= {MIN_BUCKET_MS}, got {bucket_ms}")));
+        return Err(AppError::OutOfRange(format!(
+            "bucket_ms must be >= {MIN_BUCKET_MS}, got {bucket_ms}"
+        )));
     }
     if since > now {
-        return Err(AppError::OutOfRange(format!("since must not be in the future (since={since}, now={now})")));
+        return Err(AppError::OutOfRange(format!(
+            "since must not be in the future (since={since}, now={now})"
+        )));
     }
     let range = now.saturating_sub(since);
     if range > MAX_RANGE_MS + RANGE_SLACK_MS {
-        return Err(AppError::OutOfRange(format!("range must be <= {MAX_RANGE_MS} ms (+{RANGE_SLACK_MS} slack), got {range}")));
+        return Err(AppError::OutOfRange(format!(
+            "range must be <= {MAX_RANGE_MS} ms (+{RANGE_SLACK_MS} slack), got {range}"
+        )));
     }
     // bucket_ms is already known >= MIN_BUCKET_MS > 0 and range >= 0 here, so plain
     // division plus a remainder check computes the ceiling without the intermediate
@@ -241,7 +258,9 @@ fn validate_history_request(now: i64, since: i64, bucket_ms: i64, metric: &Histo
     // toolchain — `int_roundings` is not stabilised for signed integers.)
     let buckets = range / bucket_ms + i64::from(range % bucket_ms != 0);
     if buckets > MAX_BUCKETS {
-        return Err(AppError::OutOfRange(format!("request spans {buckets} buckets; max is {MAX_BUCKETS}")));
+        return Err(AppError::OutOfRange(format!(
+            "request spans {buckets} buckets; max is {MAX_BUCKETS}"
+        )));
     }
     if let HistoryMetric::Model { label } = metric {
         let trimmed = label.trim();
@@ -249,7 +268,9 @@ fn validate_history_request(now: i64, since: i64, bucket_ms: i64, metric: &Histo
             return Err(AppError::OutOfRange("model label must not be blank".into()));
         }
         if trimmed.chars().count() > MAX_LABEL_LEN {
-            return Err(AppError::OutOfRange(format!("model label must be <= {MAX_LABEL_LEN} characters")));
+            return Err(AppError::OutOfRange(format!(
+                "model label must be <= {MAX_LABEL_LEN} characters"
+            )));
         }
     }
     Ok(())
@@ -268,7 +289,14 @@ pub fn core_get_history(
         return Err(e);
     }
     let points = core.store.history(account_id, since, bucket_ms, metric)?;
-    debug!(account_id, since, bucket_ms, ?metric, points = points.len(), "history");
+    debug!(
+        account_id,
+        since,
+        bucket_ms,
+        ?metric,
+        points = points.len(),
+        "history"
+    );
     Ok(points)
 }
 
@@ -306,8 +334,7 @@ fn halted_value(core: &Core) -> AppResult<Option<String>> {
 /// snapshot, and it is exact because a Manual trigger bypasses both the gate
 /// and backoff.
 pub fn core_poll_now(core: &Core) -> AppResult<String> {
-    let halted =
-        core.halt_latched.load(Ordering::SeqCst) || core.store.polling_halted()?.is_some();
+    let halted = core.halt_latched.load(Ordering::SeqCst) || core.store.polling_halted()?.is_some();
     let binary_present = lock_binary(&core.binary).is_some();
     let enabled = core.store.enabled_account_ids()?;
     let status = lock_status(&core.status).clone();
@@ -409,7 +436,8 @@ pub fn core_set_settings(core: &Core, next: &UserSettings) -> AppResult<()> {
         }
     }
 
-    core.close_to_tray.store(next.close_to_tray, Ordering::SeqCst);
+    core.close_to_tray
+        .store(next.close_to_tray, Ordering::SeqCst);
 
     let scheduler_affected = driver_relevant_changed(&previous, next);
     if scheduler_affected && core.settings_tx.send(next.clone()).is_err() {
@@ -498,7 +526,8 @@ pub async fn get_history(
     metric: HistoryMetric,
 ) -> AppResult<Vec<HistoryPoint>> {
     let core = Arc::clone(&core);
-    blocking(move || core_get_history(&core, &account_id, now_ms(), since, bucket_ms, &metric)).await
+    blocking(move || core_get_history(&core, &account_id, now_ms(), since, bucket_ms, &metric))
+        .await
 }
 
 #[tauri::command]
@@ -687,7 +716,9 @@ mod tests {
     use super::*;
     use crate::scheduler::machine::Gate;
     use crate::store::settings::UserSettings;
-    use crate::store::{HistoryMetric, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS};
+    use crate::store::{
+        HistoryMetric, MAX_BUCKETS, MAX_LABEL_LEN, MAX_RANGE_MS, MIN_BUCKET_MS, RANGE_SLACK_MS,
+    };
     use crate::system::SystemStats;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -751,8 +782,14 @@ mod tests {
 
         lock_system(&core.system).stopped = true;
         let report = core_get_system(&core);
-        assert!(report.stopped, "a dead sampler must be distinguishable from a warming one");
-        assert!(report.stats.is_some(), "the last sample is kept for the stale rule");
+        assert!(
+            report.stopped,
+            "a dead sampler must be distinguishable from a warming one"
+        );
+        assert!(
+            report.stats.is_some(),
+            "the last sample is kept for the stale rule"
+        );
     }
 
     /// Pretend the driver found a binary at its last check.
@@ -770,8 +807,7 @@ mod tests {
     #[test]
     fn add_account_rejects_a_missing_directory() {
         let (tmp, core) = core();
-        let err = core_add_account(&core, &tmp.path().join("nope"), 1)
-            .expect_err("must reject");
+        let err = core_add_account(&core, &tmp.path().join("nope"), 1).expect_err("must reject");
         assert_eq!(err.code(), "not_found");
     }
 
@@ -820,7 +856,10 @@ mod tests {
             s.timeout_secs = timeout;
             core_set_settings(&core, &s).unwrap_or_else(|e| panic!("{interval}/{timeout}: {e}"));
         }
-        assert_eq!(core.store.stored_settings().expect("read").interval_secs, 3600);
+        assert_eq!(
+            core.store.stored_settings().expect("read").interval_secs,
+            3600
+        );
     }
 
     #[test]
@@ -833,7 +872,10 @@ mod tests {
             let err = core_set_settings(&core, &s).expect_err("must reject");
             assert_eq!(err.code(), "out_of_range");
         }
-        assert_eq!(core.store.stored_settings().expect("read").interval_secs, 60);
+        assert_eq!(
+            core.store.stored_settings().expect("read").interval_secs,
+            60
+        );
     }
 
     #[test]
@@ -948,7 +990,9 @@ mod tests {
         let (tmp, core) = core();
         let d = make_dir(tmp.path(), ".claude3");
         core_add_account(&core, &d, 1).expect("add");
-        core.store.set_polling_halted("guard_tripped:1").expect("halt");
+        core.store
+            .set_polling_halted("guard_tripped:1")
+            .expect("halt");
         with_binary(&core);
         assert_eq!(core_poll_now(&core).expect("poll"), "skipped:halted");
     }
@@ -1027,7 +1071,6 @@ mod tests {
         assert!(core.close_to_tray.load(Ordering::SeqCst));
     }
 
-
     #[test]
     fn autostart_change_is_a_noop_when_already_off() {
         assert_eq!(autostart_change(Some(false), false), None);
@@ -1067,17 +1110,22 @@ mod tests {
         // like before M4.
         assert_eq!(core_poll_now(&core).expect("poll"), "skipped:no_binary");
 
-        let exe = tmp
-            .path()
-            .join(if cfg!(windows) { "claude.exe" } else { "claude" });
-        std::fs::write(&exe, b"#!/bin/sh
+        let exe = tmp.path().join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
+        std::fs::write(
+            &exe,
+            b"#!/bin/sh
 exit 0
-").expect("write");
+",
+        )
+        .expect("write");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
 
         seed_binary_slot(&core.binary, &exe.to_string_lossy());
@@ -1194,8 +1242,8 @@ exit 0
         let (tmp, core) = core();
         let a = core_add_account(&core, &make_dir(tmp.path(), ".claudeA"), 1).expect("a");
 
-        let err = core_reorder_accounts(&core, vec![a.id, "nope".to_string()])
-            .expect_err("must reject");
+        let err =
+            core_reorder_accounts(&core, vec![a.id, "nope".to_string()]).expect_err("must reject");
         assert_eq!(err.code(), "not_found");
     }
 
@@ -1208,7 +1256,10 @@ exit 0
 
         let added = core_rescan_profiles(&core, tmp.path(), 2).expect("rescan");
         assert_eq!(added.len(), 1);
-        assert_eq!(added[0].config_dir, dunce::canonicalize(&two).unwrap_or(two));
+        assert_eq!(
+            added[0].config_dir,
+            dunce::canonicalize(&two).unwrap_or(two)
+        );
         assert!(!added[0].enabled);
 
         core_remove_account(&core, &a.id).expect("remove");
@@ -1238,9 +1289,21 @@ exit 0
 
     fn ok_week(pct: u8) -> PollOutcome {
         PollOutcome::Ok(crate::usage::Parsed {
-            session: crate::usage::Window { pct: 1, resets_at: None },
-            week_all: crate::usage::Window { pct, resets_at: None },
-            week_models: vec![("Fable".to_string(), crate::usage::Window { pct: 7, resets_at: None })],
+            session: crate::usage::Window {
+                pct: 1,
+                resets_at: None,
+            },
+            week_all: crate::usage::Window {
+                pct,
+                resets_at: None,
+            },
+            week_models: vec![(
+                "Fable".to_string(),
+                crate::usage::Window {
+                    pct: 7,
+                    resets_at: None,
+                },
+            )],
         })
     }
 
@@ -1250,16 +1313,33 @@ exit 0
         let d = make_dir(tmp.path(), ".claude3");
         let a = core_add_account(&core, &d, 1).expect("add");
         let since = 1_000_000_000i64;
-        for (t, pct) in [(since + 1000, 4u8), (since + 2000, 9), (since + 3_600_000, 6)] {
-            core.store.insert_snapshot(&a.id, t, &ok_week(pct), None, 1).expect("snapshot");
+        for (t, pct) in [
+            (since + 1000, 4u8),
+            (since + 2000, 9),
+            (since + 3_600_000, 6),
+        ] {
+            core.store
+                .insert_snapshot(&a.id, t, &ok_week(pct), None, 1)
+                .expect("snapshot");
         }
         let now = since + 8 * 3_600_000;
-        let points = core_get_history(&core, &a.id, now, since, 3_600_000, &HistoryMetric::WeekAll).expect("history");
+        let points = core_get_history(&core, &a.id, now, since, 3_600_000, &HistoryMetric::WeekAll)
+            .expect("history");
         assert_eq!(points.len(), 2);
         assert_eq!((points[0].t, points[0].pct), (since, 9));
         assert_eq!((points[1].t, points[1].pct), (since + 3_600_000, 6));
 
-        let fable = core_get_history(&core, &a.id, now, since, 3_600_000, &HistoryMetric::Model { label: "Fable".into() }).expect("model");
+        let fable = core_get_history(
+            &core,
+            &a.id,
+            now,
+            since,
+            3_600_000,
+            &HistoryMetric::Model {
+                label: "Fable".into(),
+            },
+        )
+        .expect("model");
         assert_eq!(fable.iter().map(|p| p.pct).collect::<Vec<u8>>(), vec![7, 7]);
     }
 
@@ -1273,26 +1353,143 @@ exit 0
         let code = |r: AppResult<Vec<HistoryPoint>>| r.map(|_| ()).map_err(|e| e.code());
 
         // bucket_ms
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS - 1, &week)), Err("out_of_range"));
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &week)), Ok(()));
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - 3_600_000,
+                MIN_BUCKET_MS - 1,
+                &week
+            )),
+            Err("out_of_range")
+        );
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - 3_600_000,
+                MIN_BUCKET_MS,
+                &week
+            )),
+            Ok(())
+        );
         // since in the future
-        assert_eq!(code(core_get_history(&core, &a.id, now, now + 1, MIN_BUCKET_MS, &week)), Err("out_of_range"));
-        assert_eq!(code(core_get_history(&core, &a.id, now, now, MIN_BUCKET_MS, &week)), Ok(()));
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now + 1,
+                MIN_BUCKET_MS,
+                &week
+            )),
+            Err("out_of_range")
+        );
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now,
+                MIN_BUCKET_MS,
+                &week
+            )),
+            Ok(())
+        );
         // range (with slack)
         let limit = MAX_RANGE_MS + RANGE_SLACK_MS;
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - limit - 1, 86_400_000, &week)), Err("out_of_range"));
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - limit, 86_400_000, &week)), Ok(()));
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - limit - 1,
+                86_400_000,
+                &week
+            )),
+            Err("out_of_range")
+        );
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - limit,
+                86_400_000,
+                &week
+            )),
+            Ok(())
+        );
         // bucket count: 1000 * 60s = 60_000_000 ms of range at the minimum bucket
         let full = MAX_BUCKETS * MIN_BUCKET_MS;
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - full - 1, MIN_BUCKET_MS, &week)), Err("out_of_range"));
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - full, MIN_BUCKET_MS, &week)), Ok(()));
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - full - 1,
+                MIN_BUCKET_MS,
+                &week
+            )),
+            Err("out_of_range")
+        );
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - full,
+                MIN_BUCKET_MS,
+                &week
+            )),
+            Ok(())
+        );
         // labels
-        let blank = HistoryMetric::Model { label: " \t ".into() };
-        let long = HistoryMetric::Model { label: "é".repeat(MAX_LABEL_LEN + 1) };
-        let max = HistoryMetric::Model { label: "é".repeat(MAX_LABEL_LEN) };
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &blank)), Err("out_of_range"));
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &long)), Err("out_of_range"));
-        assert_eq!(code(core_get_history(&core, &a.id, now, now - 3_600_000, MIN_BUCKET_MS, &max)), Ok(()), "64 chars, not bytes");
+        let blank = HistoryMetric::Model {
+            label: " \t ".into(),
+        };
+        let long = HistoryMetric::Model {
+            label: "é".repeat(MAX_LABEL_LEN + 1),
+        };
+        let max = HistoryMetric::Model {
+            label: "é".repeat(MAX_LABEL_LEN),
+        };
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - 3_600_000,
+                MIN_BUCKET_MS,
+                &blank
+            )),
+            Err("out_of_range")
+        );
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - 3_600_000,
+                MIN_BUCKET_MS,
+                &long
+            )),
+            Err("out_of_range")
+        );
+        assert_eq!(
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                now - 3_600_000,
+                MIN_BUCKET_MS,
+                &max
+            )),
+            Ok(()),
+            "64 chars, not bytes"
+        );
     }
 
     #[test]
@@ -1308,7 +1505,14 @@ exit 0
         // overflowing, and i64::MAX is far past the range cap, so this is rejected on the
         // range check rather than panicking.
         assert_eq!(
-            code(core_get_history(&core, &a.id, now, i64::MIN, MIN_BUCKET_MS, &week)),
+            code(core_get_history(
+                &core,
+                &a.id,
+                now,
+                i64::MIN,
+                MIN_BUCKET_MS,
+                &week
+            )),
             Err("out_of_range"),
         );
 
@@ -1317,7 +1521,8 @@ exit 0
         // overflow the old `(range + bucket_ms - 1) / bucket_ms` formula would hit, so this
         // succeeds (no data for the account yet, hence an empty result) instead of panicking.
         assert_eq!(
-            core_get_history(&core, &a.id, now, now - 3_600_000, i64::MAX, &week).expect("no panic"),
+            core_get_history(&core, &a.id, now, now - 3_600_000, i64::MAX, &week)
+                .expect("no panic"),
             Vec::<HistoryPoint>::new(),
         );
     }
@@ -1328,9 +1533,20 @@ exit 0
         let d = make_dir(tmp.path(), ".claude3");
         let a = core_add_account(&core, &d, 1).expect("add");
         let now = 10_000_000_000i64;
-        let points = core_get_history(&core, &a.id, now, now - 3_600_000, 86_400_000, &HistoryMetric::WeekAll)
-            .expect("a bucket wider than the range is still exactly one bucket");
-        assert_eq!(points, Vec::<HistoryPoint>::new(), "no data yet, but no error either");
+        let points = core_get_history(
+            &core,
+            &a.id,
+            now,
+            now - 3_600_000,
+            86_400_000,
+            &HistoryMetric::WeekAll,
+        )
+        .expect("a bucket wider than the range is still exactly one bucket");
+        assert_eq!(
+            points,
+            Vec::<HistoryPoint>::new(),
+            "no data yet, but no error either"
+        );
     }
 
     #[test]
@@ -1339,11 +1555,22 @@ exit 0
         let d = make_dir(tmp.path(), ".claude3");
         let a = core_add_account(&core, &d, 1).expect("add");
         let now = 10_000_000_000i64;
-        core.store.insert_snapshot(&a.id, now - 1000, &ok_week(1), None, 1).expect("recent");
         core.store
-            .insert_snapshot(&a.id, now - crate::store::RETENTION_MS - 1, &ok_week(1), None, 1)
+            .insert_snapshot(&a.id, now - 1000, &ok_week(1), None, 1)
+            .expect("recent");
+        core.store
+            .insert_snapshot(
+                &a.id,
+                now - crate::store::RETENTION_MS - 1,
+                &ok_week(1),
+                None,
+                1,
+            )
             .expect("too old (would already be pruned in production)");
-        assert_eq!(core_get_history_models(&core, &a.id, now).expect("labels"), vec!["Fable".to_string()]);
+        assert_eq!(
+            core_get_history_models(&core, &a.id, now).expect("labels"),
+            vec!["Fable".to_string()]
+        );
     }
 
     #[test]
@@ -1351,7 +1578,10 @@ exit 0
         let (_tmp, c) = core();
         let g = begin_create(&c);
         assert!(g.is_some(), "the first create takes the guard");
-        assert!(begin_create(&c).is_none(), "a second create while one runs is refused");
+        assert!(
+            begin_create(&c).is_none(),
+            "a second create while one runs is refused"
+        );
         drop(g);
         assert!(begin_create(&c).is_some(), "dropping the guard releases it");
     }

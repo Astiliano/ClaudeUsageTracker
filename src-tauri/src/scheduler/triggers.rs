@@ -213,8 +213,14 @@ mod tests {
             .expect("memory notification");
         let presence =
             tokio::time::timeout(Duration::from_millis(200), t.notified_presence()).await;
-        assert!(presence.is_err(), "a memory wake must not fire the presence channel");
+        assert!(
+            presence.is_err(),
+            "a memory wake must not fire the presence channel"
+        );
         let manual = tokio::time::timeout(Duration::from_millis(200), t.notified_manual()).await;
-        assert!(manual.is_err(), "a memory wake must not fire the manual channel");
+        assert!(
+            manual.is_err(),
+            "a memory wake must not fire the manual channel"
+        );
     }
 }
