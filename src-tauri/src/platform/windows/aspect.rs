@@ -4,8 +4,8 @@
 
 use crate::error::{AppError, AppResult};
 use crate::window_aspect::{
-    client_bounds, fit_rect, run_guarded, step, AspectState, Edge, FitAction, FitPlan, Rect, Size,
-    Step, WindowFacts,
+    client_bounds, fit_rect, log_fitted, run_guarded, step, AspectState, Edge, FitAction, FitPlan,
+    Rect, Size, Step, WindowFacts,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -275,24 +275,7 @@ fn resume(hwnd: HWND, d: &SubclassData) -> Resume {
 /// Logs the outcome of a resume that was not part of a size-move end.
 fn log_resume(d: &SubclassData, source: &str, resume: &Resume) {
     match resume {
-        Resume::Applied(FitPlan::Resize {
-            outer,
-            client_w,
-            client_h,
-            capped,
-        }) => {
-            let ratio = d.state.ratio().unwrap_or(0.0);
-            tracing::info!(
-                label = d.label,
-                source,
-                client_w,
-                client_h,
-                top = outer.top,
-                capped,
-                ratio = format!("{ratio:.6}"),
-                "window fitted"
-            );
-        }
+        Resume::Applied(plan) => log_fitted(&d.label, source, plan, &d.state),
         other => tracing::debug!(
             label = d.label,
             source,

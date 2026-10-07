@@ -7,9 +7,13 @@
 //! `floor`/`ceil`/`round`.
 
 use crate::error::{AppError, AppResult};
+use crate::platform;
 use serde::Serialize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use tauri::plugin::TauriPlugin;
+use tauri::{Manager, Runtime, State, Window};
 
 /// Logical width of the layout; equals tauri.conf.json `width` and TS `BASE_WIDTH`.
 pub const BASE_WIDTH_PX: f64 = 980.0;
@@ -397,6 +401,258 @@ pub fn outcome_of(step: &Step) -> Option<FitOutcome> {
         Step::Skip(FitAction::Defer) => Some(FitOutcome::Deferred),
         Step::Skip(FitAction::Fit) => None,
     }
+}
+
+/// `WindowFacts` from tauri's getters, for the command and the ready hook. Conversions saturate
+/// instead of panicking; `dpi` is the scale factor against the 96-dpi baseline.
+pub fn facts_from_getters(
+    inner: (u32, u32),
+    outer_pos: (i32, i32),
+    outer: (u32, u32),
+    scale: f64,
+    work: Option<Rect>,
+    maximized: bool,
+    minimized: bool,
+) -> WindowFacts {
+    let px = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+    let (left, top) = outer_pos;
+    WindowFacts {
+        client: Size {
+            w: px(inner.0),
+            h: px(inner.1),
+        },
+        outer: Rect {
+            left,
+            top,
+            right: left.saturating_add(px(outer.0)),
+            bottom: top.saturating_add(px(outer.1)),
+        },
+        work,
+        dpi: (scale * 96.0).round() as u32,
+        maximized,
+        minimized,
+    }
+}
+
+/// Decides one fit and applies it. A failed apply re-marks the fit pending so the next resume
+/// path (size-move end, restore, DPI change, the next report) retries it.
+fn run_step(
+    state: &AspectState,
+    facts: &WindowFacts,
+    apply: impl FnOnce(&FitPlan) -> AppResult<()>,
+) -> AppResult<Step> {
+    let decision = step(state, facts);
+    if let Step::Apply(plan) = &decision {
+        if let Err(e) = apply(plan) {
+            state.mark_pending();
+            return Err(e);
+        }
+    }
+    Ok(decision)
+}
+
+/// The command's whole decision, with the window reads and the apply passed in so it runs
+/// without a window. A rejected report returns before `facts` is called; once accepted the ratio
+/// stays stored whatever happens next.
+pub fn handle_report(
+    state: &AspectState,
+    content_h: f64,
+    facts: impl FnOnce() -> AppResult<WindowFacts>,
+    apply: impl FnOnce(&FitPlan) -> AppResult<()>,
+) -> AppResult<(FitOutcome, Option<FitPlan>)> {
+    accept_report(state, content_h)?;
+    let facts = facts()?;
+    let decision = run_step(state, &facts, apply)?;
+    let outcome = outcome_of(&decision)
+        .ok_or_else(|| AppError::Internal("ratio missing after report".into()))?;
+    let plan = match decision {
+        Step::Apply(plan) => Some(plan),
+        _ => None,
+    };
+    Ok((outcome, plan))
+}
+
+/// The camelCase name the frontend sees; a test ties it to the serde output.
+fn outcome_name(outcome: FitOutcome) -> &'static str {
+    match outcome {
+        FitOutcome::Applied => "applied",
+        FitOutcome::AlreadyFitted => "alreadyFitted",
+        FitOutcome::Capped => "capped",
+        FitOutcome::SkippedMaximized => "skippedMaximized",
+        FitOutcome::SkippedMinimized => "skippedMinimized",
+        FitOutcome::Deferred => "deferred",
+    }
+}
+
+/// The one "window fitted" line, for every source (report, ready, restored, dpi).
+pub(crate) fn log_fitted(label: &str, source: &str, plan: &FitPlan, state: &AspectState) {
+    if let FitPlan::Resize {
+        outer,
+        client_w,
+        client_h,
+        capped,
+    } = plan
+    {
+        let ratio = state.ratio().unwrap_or(0.0);
+        tracing::info!(
+            label,
+            source,
+            client_w,
+            client_h,
+            top = outer.top,
+            capped,
+            ratio = format!("{ratio:.6}"),
+            "window fitted"
+        );
+    }
+}
+
+fn getter_error(label: &str, getter: &str, e: tauri::Error) -> AppError {
+    tracing::warn!(label, error = %e, "window facts unavailable");
+    AppError::Internal(format!("window {getter} unavailable: {e}"))
+}
+
+/// The window's facts from tauri's getters. This is the one work-area owner outside the proc.
+fn window_facts<R: Runtime>(window: &Window<R>) -> AppResult<WindowFacts> {
+    let label = window.label();
+    let maximized = window
+        .is_maximized()
+        .map_err(|e| getter_error(label, "maximized state", e))?;
+    let minimized = window
+        .is_minimized()
+        .map_err(|e| getter_error(label, "minimized state", e))?;
+    let inner = window
+        .inner_size()
+        .map_err(|e| getter_error(label, "inner size", e))?;
+    let pos = window
+        .outer_position()
+        .map_err(|e| getter_error(label, "position", e))?;
+    let outer = window
+        .outer_size()
+        .map_err(|e| getter_error(label, "outer size", e))?;
+    let scale = window
+        .scale_factor()
+        .map_err(|e| getter_error(label, "scale factor", e))?;
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| getter_error(label, "monitor", e))?;
+    let work = monitor.map(|m| {
+        let area = m.work_area();
+        let px = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        Rect {
+            left: area.position.x,
+            top: area.position.y,
+            right: area.position.x.saturating_add(px(area.size.width)),
+            bottom: area.position.y.saturating_add(px(area.size.height)),
+        }
+    });
+    Ok(facts_from_getters(
+        (inner.width, inner.height),
+        (pos.x, pos.y),
+        (outer.width, outer.height),
+        scale,
+        work,
+        maximized,
+        minimized,
+    ))
+}
+
+fn log_report(
+    label: &str,
+    state: &AspectState,
+    content_h: f64,
+    result: &AppResult<(FitOutcome, Option<FitPlan>)>,
+) {
+    let ratio = format!("{:.6}", state.ratio().unwrap_or(0.0));
+    match result {
+        Ok((outcome, plan)) => {
+            tracing::debug!(
+                label,
+                content_h,
+                ratio,
+                outcome = outcome_name(*outcome),
+                "content height report"
+            );
+            if let Some(plan) = plan {
+                log_fitted(label, "report", plan, state);
+            }
+            match outcome {
+                FitOutcome::SkippedMaximized => {
+                    tracing::info!(label, reason = "maximized", pending = true, "fit skipped")
+                }
+                FitOutcome::SkippedMinimized => {
+                    tracing::info!(label, reason = "minimized", pending = true, "fit skipped")
+                }
+                FitOutcome::Deferred => tracing::debug!(label, "fit deferred"),
+                FitOutcome::Applied | FitOutcome::AlreadyFitted | FitOutcome::Capped => {}
+            }
+        }
+        Err(AppError::OutOfRange(_)) => {
+            tracing::warn!(label, content_h, "content height rejected");
+        }
+        Err(e) => tracing::debug!(
+            label,
+            content_h,
+            ratio,
+            outcome = "error",
+            error = %e,
+            "content height report"
+        ),
+    }
+}
+
+/// The frontend's measured content height: stores the ratio, then fits the window to it now.
+/// Runs on the main thread (a sync command), the thread that owns the window.
+#[tauri::command]
+pub fn set_content_height(
+    window: tauri::Window,
+    state: State<'_, Arc<AspectState>>,
+    content_h: f64,
+) -> AppResult<FitOutcome> {
+    let result = handle_report(
+        &state,
+        content_h,
+        || window_facts(&window),
+        |plan| platform::apply_fit(&window, plan),
+    );
+    log_report(window.label(), &state, content_h, &result);
+    result.map(|(outcome, _)| outcome)
+}
+
+/// Fits a window from the stored ratio without a report: a window rebuilt after close-to-tray
+/// is sized right before the frontend measures again.
+pub fn fit_now<R: Runtime>(window: &Window<R>, state: &AspectState, source: &str) {
+    let label = window.label();
+    let Ok(facts) = window_facts(window) else {
+        return;
+    };
+    match run_step(state, &facts, |plan| platform::apply_fit(window, plan)) {
+        Ok(Step::NoRatio) => tracing::debug!(label, "fit skipped: ratio unknown"),
+        Ok(Step::Apply(plan)) => log_fitted(label, source, &plan, state),
+        Ok(Step::Unchanged | Step::Skip(_)) => {}
+        Err(e) => tracing::warn!(label, error = %e, "window fit failed"),
+    }
+}
+
+/// Registers the shared state and, for every window, the subclass and a first fit. Must be
+/// registered before any window exists, which `tauri::Builder` guarantees for a plugin.
+pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
+    tauri::plugin::Builder::<R>::new("window-aspect")
+        .setup(|app, _api| {
+            app.manage(Arc::new(AspectState::default()));
+            Ok(())
+        })
+        .on_window_ready(|window| {
+            let label = window.label().to_string();
+            let Some(state) = window.try_state::<Arc<AspectState>>() else {
+                tracing::warn!(label, "window aspect state missing");
+                return;
+            };
+            let state = Arc::clone(state.inner());
+            platform::install(&window, Arc::clone(&state));
+            fit_now(&window, &state, "ready");
+        })
+        .build()
 }
 
 #[cfg(test)]
@@ -964,5 +1220,167 @@ mod tests {
     fn zoom_max_matches_layout_ts() {
         let layout = include_str!("../../src/lib/layout.ts");
         assert!(layout.contains(&format!("export const ZOOM_MAX = {ZOOM_MAX};")));
+    }
+
+    // ---- Task 7: the command glue ----
+
+    #[test]
+    fn facts_from_getters_rounds_dpi() {
+        let f = facts_from_getters((1000, 654), (10, 20), (1016, 693), 1.5, None, false, false);
+        assert_eq!(f.dpi, 144);
+        assert_eq!(f.client, Size { w: 1000, h: 654 });
+        assert_eq!(f.outer, rect(10, 20, 1026, 713));
+        let g = facts_from_getters((1000, 654), (10, 20), (1016, 693), 1.25, None, true, false);
+        assert_eq!(g.dpi, 120);
+        assert!(g.maximized && !g.minimized);
+    }
+
+    #[test]
+    fn facts_from_getters_without_a_monitor_has_no_work_area() {
+        let f = facts_from_getters((1, 1), (0, 0), (1, 1), 1.0, None, false, false);
+        assert_eq!(f.work, None);
+        let g = facts_from_getters((1, 1), (0, 0), (1, 1), 1.0, Some(WORK), false, true);
+        assert_eq!(g.work, Some(WORK));
+        assert!(g.minimized);
+    }
+
+    #[test]
+    fn facts_from_getters_saturates_without_panicking() {
+        let f = facts_from_getters(
+            (u32::MAX, u32::MAX),
+            (i32::MAX, i32::MAX),
+            (u32::MAX, u32::MAX),
+            1.0,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(
+            f.client,
+            Size {
+                w: i32::MAX,
+                h: i32::MAX
+            }
+        );
+        assert_eq!(f.outer, rect(i32::MAX, i32::MAX, i32::MAX, i32::MAX));
+    }
+
+    #[test]
+    fn handle_report_rejects_without_reading_facts() {
+        let state = AspectState::default();
+        let r = handle_report(
+            &state,
+            0.0,
+            || panic!("facts must not be read for a rejected report"),
+            |_| panic!("nothing is applied for a rejected report"),
+        );
+        assert!(out_of_range(r));
+        assert_eq!(state.ratio(), None);
+    }
+
+    #[test]
+    fn handle_report_maximized_skips_and_marks_pending() {
+        let state = AspectState::default();
+        let f = WindowFacts {
+            maximized: true,
+            ..facts(1000, 700, 0)
+        };
+        let r = handle_report(
+            &state,
+            640.0,
+            || Ok(f),
+            |_| panic!("a skipped fit applies nothing"),
+        );
+        assert!(matches!(r, Ok((FitOutcome::SkippedMaximized, None))));
+        assert!(state.is_pending());
+        assert_eq!(state.ratio(), Some(RATIO));
+    }
+
+    #[test]
+    fn handle_report_in_a_size_move_is_deferred() {
+        let state = AspectState::default();
+        state.begin_size_move();
+        let r = handle_report(
+            &state,
+            640.0,
+            || Ok(facts(1000, 700, 0)),
+            |_| panic!("a deferred fit applies nothing"),
+        );
+        assert!(matches!(r, Ok((FitOutcome::Deferred, None))));
+        assert!(state.is_pending());
+    }
+
+    #[test]
+    fn handle_report_fitted_window_is_already_fitted() {
+        let state = AspectState::default();
+        let r = handle_report(
+            &state,
+            640.0,
+            || Ok(facts(1000, 654, 0)),
+            |_| panic!("a fitted window applies nothing"),
+        );
+        assert!(matches!(r, Ok((FitOutcome::AlreadyFitted, None))));
+        assert!(!state.is_pending());
+    }
+
+    #[test]
+    fn handle_report_off_shape_applies() {
+        let state = AspectState::default();
+        let seen = std::cell::Cell::new(None);
+        let r = handle_report(
+            &state,
+            640.0,
+            || Ok(facts(1000, 700, 0)),
+            |plan| {
+                seen.set(Some(*plan));
+                Ok(())
+            },
+        );
+        let want = resize(100, 0, 1000, 654, false);
+        assert!(matches!(r, Ok((FitOutcome::Applied, Some(p))) if p == want));
+        assert_eq!(seen.get(), Some(want));
+        assert!(!state.is_pending());
+    }
+
+    #[test]
+    fn handle_report_facts_error_keeps_the_ratio() {
+        let state = AspectState::default();
+        let r = handle_report(
+            &state,
+            640.0,
+            || Err(AppError::Internal("no facts".into())),
+            |_| panic!("nothing is applied without facts"),
+        );
+        assert!(matches!(r, Err(AppError::Internal(m)) if m == "no facts"));
+        assert_eq!(state.ratio(), Some(RATIO));
+    }
+
+    #[test]
+    fn handle_report_apply_failure_errs_and_keeps_pending() {
+        let state = AspectState::default();
+        let r = handle_report(
+            &state,
+            640.0,
+            || Ok(facts(1000, 700, 0)),
+            |_| Err(AppError::Internal("apply failed".into())),
+        );
+        assert!(matches!(r, Err(AppError::Internal(m)) if m == "apply failed"));
+        assert!(state.is_pending());
+        assert_eq!(state.ratio(), Some(RATIO));
+    }
+
+    #[test]
+    fn outcome_name_matches_the_serialized_name() {
+        for outcome in [
+            FitOutcome::Applied,
+            FitOutcome::AlreadyFitted,
+            FitOutcome::Capped,
+            FitOutcome::SkippedMaximized,
+            FitOutcome::SkippedMinimized,
+            FitOutcome::Deferred,
+        ] {
+            let json = serde_json::to_string(&outcome).expect("serializes");
+            assert_eq!(json, format!("\"{}\"", outcome_name(outcome)));
+        }
     }
 }

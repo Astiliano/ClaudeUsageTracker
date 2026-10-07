@@ -212,6 +212,7 @@ pub fn run() {
                 .with_state_flags(window_state_flags())
                 .build(),
         )
+        .plugin(window_aspect::plugin())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -234,6 +235,7 @@ pub fn run() {
             commands::open_login,
             commands::open_log_dir,
             commands::get_snapshot_raw,
+            window_aspect::set_content_height,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
