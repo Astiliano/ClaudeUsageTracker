@@ -20,7 +20,7 @@ export default function App(): JSX.Element {
   const { report: system, error: systemError } = useSystem();
   const { prefs, update } = usePrefs();
   const viewport = useViewport();
-  const zoom = windowZoom(viewport.width, viewport.height);
+  const zoom = windowZoom(viewport.width, viewport.height, null);
   const layout = layoutFor(viewport.width, zoom);
   const effectiveHidden = [...prefs.hiddenColumns, ...autoHiddenColumns(layout)];
   const visible = visibleColumns(prefs.columnOrder, effectiveHidden);

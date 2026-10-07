@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ORDER, gridMinWidth, visibleColumns } from "./columns";
 import {
-  BASE_HEIGHT,
   BASE_WIDTH,
   BREAKPOINTS,
   ROW_BORDER,
@@ -19,40 +18,46 @@ import {
 } from "./layout";
 
 describe("windowZoom", () => {
-  it("is 1 at the base canvas", () => {
-    expect(windowZoom(BASE_WIDTH, BASE_HEIGHT)).toBe(1);
+  it("fitted window: both terms agree", () => {
+    expect(windowZoom(1470, 960, 640)).toBeCloseTo(1.5, 10);
   });
-  it("doubles at twice the base canvas", () => {
-    expect(windowZoom(1960, 1280)).toBe(2);
+  it("taller than needed: width term wins", () => {
+    expect(windowZoom(1470, 980, 640)).toBeCloseTo(1.5, 10);
   });
-  it("is limited by the width when the window is relatively narrow", () => {
-    expect(windowZoom(1470, 1920)).toBeCloseTo(1.5, 10);
+  it("maximized: height term wins", () => {
+    expect(windowZoom(1920, 1032, 900)).toBeCloseTo(1032 / 900, 10);
   });
-  it("is limited by the height when the window is relatively short", () => {
-    expect(windowZoom(2940, 800)).toBeCloseTo(1.25, 10);
+  it("null contentH: width term only", () => {
+    expect(windowZoom(1470, 300, null)).toBeCloseTo(1.5, 10);
   });
-  it("clamps to the floor and the ceiling", () => {
-    expect(windowZoom(100, 100)).toBe(ZOOM_MIN);
-    expect(windowZoom(100000, 100000)).toBe(ZOOM_MAX);
+  it("bad contentH falls back to the width term", () => {
+    for (const c of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(windowZoom(1470, 300, c)).toBeCloseTo(1.5, 10);
+    }
+  });
+  it("bad width or height gives 1", () => {
+    expect(windowZoom(0, 0, 640)).toBe(1);
+    expect(windowZoom(0, 640, 640)).toBe(1);
+    expect(windowZoom(980, 0, 640)).toBe(1);
+    expect(windowZoom(-5, 640, 640)).toBe(1);
+    expect(windowZoom(Number.NaN, 640, 640)).toBe(1);
+    expect(windowZoom(980, Number.NaN, 640)).toBe(1);
+    expect(windowZoom(Number.POSITIVE_INFINITY, 640, 640)).toBe(1);
+  });
+  it("clamps", () => {
+    expect(windowZoom(500, 2000, 640)).toBe(ZOOM_MIN);
+    expect(windowZoom(4000, 4000, 640)).toBe(ZOOM_MAX);
     expect(ZOOM_MIN).toBe(0.75);
     expect(ZOOM_MAX).toBe(2.5);
   });
-  it("is 1 for zero, negative, NaN and infinite input, never 0 or NaN", () => {
-    expect(windowZoom(0, 0)).toBe(1);
-    expect(windowZoom(0, 640)).toBe(1);
-    expect(windowZoom(980, 0)).toBe(1);
-    expect(windowZoom(-5, 640)).toBe(1);
-    expect(windowZoom(Number.NaN, 640)).toBe(1);
-    expect(windowZoom(980, Number.NaN)).toBe(1);
-    expect(windowZoom(Number.POSITIVE_INFINITY, 640)).toBe(1);
-  });
-  it("the base canvas is the window configured in tauri.conf.json", () => {
+  it("the window config matches the base canvas", () => {
     const conf = JSON.parse(
       readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
-    ) as { app: { windows: { width: number; height: number }[] } };
+    ) as { app: { windows: { width: number; minWidth: number; minHeight?: number }[] } };
     const win = conf.app.windows[0];
     expect(win?.width).toBe(BASE_WIDTH);
-    expect(win?.height).toBe(BASE_HEIGHT);
+    expect(win?.minWidth).toBe(BASE_WIDTH * ZOOM_MIN);
+    expect(win?.minHeight).toBeUndefined();
   });
 });
 

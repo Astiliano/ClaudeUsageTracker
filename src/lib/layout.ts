@@ -82,22 +82,24 @@ export function shellStyle(zoom: number, viewportHeightPx: number): CSSPropertie
  * src-tauri/tauri.conf.json (layout.test.ts fails if the two drift).
  */
 export const BASE_WIDTH = 980;
-export const BASE_HEIGHT = 640;
 /** Bounds of the window-derived zoom. */
 export const ZOOM_MIN = 0.75;
 export const ZOOM_MAX = 2.5;
 
 /**
- * The CSS zoom for a window of the given size: the largest scale at which the
- * base canvas still fits, clamped to [ZOOM_MIN, ZOOM_MAX]. A non-finite or
- * non-positive dimension (jsdom reports 0 before mount) gives 1: a zoom of 0
- * or NaN would blank the page.
+ * The CSS zoom for a window of the given size: `min(w / BASE_WIDTH, h / contentH)`,
+ * clamped to [ZOOM_MIN, ZOOM_MAX]. `contentH` is the content's height in local
+ * px; a null, non-finite or non-positive one leaves the width term alone. A
+ * non-finite or non-positive window dimension (jsdom reports 0 before mount)
+ * gives 1: a zoom of 0 or NaN would blank the page.
  */
-export function windowZoom(widthPx: number, heightPx: number): number {
+export function windowZoom(widthPx: number, heightPx: number, contentH: number | null): number {
   if (!Number.isFinite(widthPx) || !Number.isFinite(heightPx) || widthPx <= 0 || heightPx <= 0) {
     return 1;
   }
-  const fit = Math.min(widthPx / BASE_WIDTH, heightPx / BASE_HEIGHT);
+  const widthTerm = widthPx / BASE_WIDTH;
+  const usable = contentH !== null && Number.isFinite(contentH) && contentH > 0;
+  const fit = usable ? Math.min(widthTerm, heightPx / contentH) : widthTerm;
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fit));
 }
 
