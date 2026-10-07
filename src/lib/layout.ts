@@ -14,12 +14,14 @@ export type Layout = "full" | "narrow" | "cards";
 export const APP_GUTTER = 6;
 /** `.row-grid` height. */
 export const ROW_HEIGHT = 40;
-/** `.row` bottom border width (chartHeightPx adds it to ROW_HEIGHT). */
+/** `.row` bottom border width (the reorder drag stride adds it to ROW_HEIGHT). */
 export const ROW_BORDER = 1;
 /** `.row-grid` and `.thead` horizontal padding. */
 export const ROW_PAD_X = 8;
 /** `.panel` border width. */
 export const PANEL_BORDER = 1;
+/** Local px height of the drawer's history chart (`.chart`); independent of the window, so the content height never depends on it. */
+export const CHART_HEIGHT = 220;
 /** Bounds of the card-layout ring (read by `.ring`). */
 export const RING_MIN_PX = 36;
 export const RING_MAX_PX = 120;
@@ -56,6 +58,8 @@ export function shellVars(): Record<string, string> {
     "--panel-border": `${PANEL_BORDER}px`,
     "--ring-min": `${RING_MIN_PX}px`,
     "--ring-max": `${RING_MAX_PX}px`,
+    "--base-w": `${BASE_WIDTH}px`,
+    "--chart-h": `${CHART_HEIGHT}px`,
   };
 }
 

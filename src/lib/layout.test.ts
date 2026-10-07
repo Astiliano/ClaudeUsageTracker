@@ -109,6 +109,8 @@ describe("shellVars and shellStyle", () => {
       "--panel-border": "1px",
       "--ring-min": "36px",
       "--ring-max": "120px",
+      "--base-w": "980px",
+      "--chart-h": "220px",
     });
   });
   it("shellStyle sets the zoom and spreads every shell variable", () => {

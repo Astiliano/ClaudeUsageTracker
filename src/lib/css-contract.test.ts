@@ -18,7 +18,7 @@ function decl(body: string, prop: string): string | undefined {
 }
 
 /** Every custom property the assertions below expect the stylesheet to read. */
-const ASSERTED_VARS = ["--gutter", "--row-h", "--row-border", "--row-pad-x", "--grid-gap", "--panel-border", "--ring-min", "--ring-max"] as const;
+const ASSERTED_VARS = ["--gutter", "--row-h", "--row-border", "--row-pad-x", "--grid-gap", "--panel-border", "--ring-min", "--ring-max", "--base-w", "--chart-h"] as const;
 /** Variables shellStyle sets from the window rather than from a constant. */
 const STYLE_VARS = ["--viewport-h"] as const;
 
@@ -34,11 +34,15 @@ describe("styles.css reads the shell variables (D9)", () => {
     const keys = Object.keys(shellStyle(1, 640));
     for (const v of STYLE_VARS) expect(keys).toContain(v);
   });
-  it(".app min-height is the viewport variable", () => {
-    expect(decl(rule(".app"), "min-height")).toBe("var(--viewport-h)");
+  it(".app is content-sized and fixed-width", () => {
+    const body = rule(".app");
+    expect(decl(body, "height")).toBeUndefined();
+    expect(decl(body, "min-height")).toBeUndefined();
+    expect(decl(body, "width")).toBe("var(--base-w)");
+    expect(decl(body, "margin")).toBe("0 auto");
   });
-  it(".modal-body max-height is 0.8 of the viewport variable", () => {
-    expect(decl(rule(".modal-body"), "max-height")).toBe("calc(0.8 * var(--viewport-h))");
+  it(".modal-body max-height is the window less the gutters", () => {
+    expect(decl(rule(".modal-body"), "max-height")).toBe("calc(var(--viewport-h) - 2 * var(--gutter))");
   });
   it("no viewport unit appears anywhere (Chromium multiplies them by CSS zoom)", () => {
     const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -78,8 +82,8 @@ describe("styles.css reads the shell variables (D9)", () => {
   it(".chart has no border-radius (flat look)", () => {
     expect(decl(rule(".chart"), "border-radius")).toBe("0");
   });
-  it(".chart declares no height (useChartHeight sizes it inline)", () => {
-    expect(decl(rule(".chart"), "height")).toBeUndefined();
+  it(".chart height reads --chart-h", () => {
+    expect(decl(rule(".chart"), "height")).toBe("var(--chart-h)");
   });
   it(".banner has no border-radius (flat look)", () => {
     expect(decl(rule(".banner"), "border-radius")).toBe("0");

@@ -1,6 +1,5 @@
-import type { JSX, MouseEvent as ReactMouseEvent, RefObject } from "react";
+import type { JSX, MouseEvent as ReactMouseEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useChartHeight } from "../hooks/useChartHeight";
 import { backend } from "../lib/backend";
 import { errorMessage } from "../lib/errors";
 import {
@@ -18,10 +17,6 @@ interface Props {
   latest: SnapshotDto | null;
   /** Bumped by useDashboard on every cycle:finished; a change refetches. */
   cycle: number;
-  /** The shell zoom factor (from windowZoom); the chart height divides by it. */
-  zoom: number;
-  /** The outer `.row`; scrolled to the viewport top when the chart first sizes. */
-  rowRef: RefObject<HTMLDivElement | null>;
   onError: (message: string) => void;
   onCollapse: () => void;
 }
@@ -48,7 +43,7 @@ function latestValue(latest: SnapshotDto | null, metric: Metric): number {
   }
 }
 
-export function HistoryDrawer({ accountId, latest, cycle, zoom, rowRef, onError, onCollapse }: Props): JSX.Element {
+export function HistoryDrawer({ accountId, latest, cycle, onError, onCollapse }: Props): JSX.Element {
   const [preset, setPreset] = useState<PresetKey>("30d");
   const [unitOverride, setUnitOverride] = useState<UnitKey | null>(null);
   const [metric, setMetric] = useState<Metric>(WEEK_ALL);
@@ -56,9 +51,6 @@ export function HistoryDrawer({ accountId, latest, cycle, zoom, rowRef, onError,
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(false);
   const [tip, setTip] = useState<Tip | null>(null);
-  const drawerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<HTMLDivElement>(null);
-  useChartHeight(drawerRef, chartRef, rowRef, zoom);
   // Only the most recently started request may write `result`.
   const seq = useRef(0);
   const onErrorRef = useRef(onError);
@@ -149,7 +141,7 @@ export function HistoryDrawer({ accountId, latest, cycle, zoom, rowRef, onError,
   };
 
   return (
-    <div className="drawer" ref={drawerRef}>
+    <div className="drawer">
       <div className="drawer-head">
         <span className="drawer-label">
           Last {PRESETS[shownPreset].label} · {metricLabel(shownMetric)} · {shownUnit}{loading ? " · loading" : ""}
@@ -180,7 +172,7 @@ export function HistoryDrawer({ accountId, latest, cycle, zoom, rowRef, onError,
           {options.map((label) => <option key={label} value={`model:${label}`}>{label}</option>)}
         </select>
       </div>
-      <div className="chart" ref={chartRef}>
+      <div className="chart">
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricLabel(shownMetric)}, last ${PRESETS[shownPreset].label}`}>
           {[0, 50, 100].map((y) => <line key={y} x1={0} y1={y} x2={100} y2={y} stroke="#1e252a" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
           {line !== "" && (

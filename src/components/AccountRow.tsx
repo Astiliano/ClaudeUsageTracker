@@ -1,4 +1,3 @@
-import { useRef } from "react";
 import type { CSSProperties, JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { type ColumnKey } from "../lib/columns";
 import { rowShift } from "../lib/drag";
@@ -21,7 +20,6 @@ interface Props {
   points: HistoryPoint[];
   now: number;
   cycle: number;
-  zoom: number;
   columnOrder: readonly ColumnKey[];
   gridCols: string;
   hotColumn: number | null;
@@ -40,11 +38,10 @@ interface Props {
 
 export function AccountRow(props: Props): JSX.Element {
   const {
-    row, index, total, points, now, cycle, zoom, columnOrder, gridCols, hotColumn, drag, rowH,
+    row, index, total, points, now, cycle, columnOrder, gridCols, hotColumn, drag, rowH,
     chartOpen, editing, onHandleDown, onToggleChart, onToggleEdit, onMove, onChanged, onError, onShowFailure,
   } = props;
 
-  const rowRef = useRef<HTMLDivElement>(null);
   const pill = statusPill(row, now);
   const session = row.latest?.session ?? null;
   const week = row.latest?.week_all ?? null;
@@ -85,7 +82,7 @@ export function AccountRow(props: Props): JSX.Element {
   };
 
   return (
-    <div className={["row", lifted ? "row-lifted" : "", parked ? "row-parked" : ""].filter(Boolean).join(" ")} role="presentation" style={style} ref={rowRef}>
+    <div className={["row", lifted ? "row-lifted" : "", parked ? "row-parked" : ""].filter(Boolean).join(" ")} role="presentation" style={style}>
       <div className="row-grid" role="row" style={{ gridTemplateColumns: gridCols }}>
         <div role="cell">
           <div className="grip" role="button" tabIndex={0}
@@ -105,7 +102,7 @@ export function AccountRow(props: Props): JSX.Element {
       </div>
       {chartOpen && (
         <div role="row"><div role="cell">
-          <HistoryDrawer accountId={row.account.id} latest={row.latest} cycle={cycle} zoom={zoom} rowRef={rowRef} onError={onError} onCollapse={onToggleChart} />
+          <HistoryDrawer accountId={row.account.id} latest={row.latest} cycle={cycle} onError={onError} onCollapse={onToggleChart} />
         </div></div>
       )}
       {editing && (

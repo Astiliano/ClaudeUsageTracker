@@ -238,7 +238,7 @@ export function AccountsTable({ rows, history, now, cycle, zoom, columnOrder, on
         )}
         {order.map((row, idx) => (
           <AccountRow key={row.account.id} row={row} index={idx} total={order.length}
-            points={history[row.account.id] ?? []} now={now} cycle={cycle} zoom={zoom} columnOrder={columnOrder} gridCols={gridCols}
+            points={history[row.account.id] ?? []} now={now} cycle={cycle} columnOrder={columnOrder} gridCols={gridCols}
             hotColumn={colDrag?.index ?? null} drag={drag} rowH={rowH.current}
             chartOpen={chartId === row.account.id} editing={editingId === row.account.id}
             onHandleDown={(e) => startRowDrag(e, idx)}
