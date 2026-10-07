@@ -13,6 +13,7 @@ pub mod system;
 mod test_log;
 pub mod tray;
 pub mod usage;
+pub mod window_aspect;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
