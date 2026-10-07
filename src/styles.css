@@ -194,7 +194,17 @@ button.pill { cursor: pointer; background: transparent; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 
-.ring-sm svg { width: 100%; height: auto; aspect-ratio: 1; }
+/* ---- rings view: a grid of cards, three per row in the fixed-width box ---- */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.card {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0;
+  padding: 8px; border: 1px solid var(--line); border-radius: 0; background: var(--panel);
+}
+.card-rings { display: flex; flex-wrap: wrap; gap: 10px 14px; container-type: inline-size; }
+.ring { display: flex; flex-direction: column; align-items: center; gap: 4px; width: clamp(36px, 28cqi, 120px); }
+.ring svg, .ring-sm svg { width: 100%; height: auto; aspect-ratio: 1; }
+.ring-value { font-family: var(--mono); font-size: 11px; fill: #dbe1e6; font-variant-numeric: tabular-nums; }
+.ring-label { font-family: var(--mono); font-size: 10px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- row actions ---- */
 .row-actions { display: flex; justify-content: flex-end; }

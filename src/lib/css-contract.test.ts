@@ -94,13 +94,35 @@ describe("styles.css reads the shell variables (D9)", () => {
     expect(decl(body, "height")).toBe("20px");
   });
   it(".ring-sm svg fills its wrapper", () => {
-    const body = rule(".ring-sm svg");
+    const body = rule(".ring svg, .ring-sm svg");
     expect(decl(body, "width")).toBe("100%");
     expect(decl(body, "height")).toBe("auto");
     expect(decl(body, "aspect-ratio")).toBe("1");
   });
-  it("no card-layout rules remain", () => {
-    expect(css).not.toMatch(/^\.(cards|card|card-rings|ring|ring-label|ring-value)(?![\w-])/m);
+  it(".cards is a three-column grid with a 10px gap", () => {
+    const body = rule(".cards");
+    expect(decl(body, "display")).toBe("grid");
+    expect(decl(body, "grid-template-columns")).toBe("repeat(3, 1fr)");
+    expect(decl(body, "gap")).toBe("10px");
+  });
+  it(".cards children may shrink below their content (minmax floor)", () => {
+    expect(decl(rule(".card"), "min-width")).toBe("0");
+  });
+  it(".card has no border-radius (flat look)", () => {
+    expect(decl(rule(".card"), "border-radius")).toBe("0");
+  });
+  it(".card-rings is an inline-size container", () => {
+    expect(decl(rule(".card-rings"), "container-type")).toBe("inline-size");
+  });
+  it(".ring width follows the card container, clamped", () => {
+    const w = decl(rule(".ring"), "width");
+    expect(w).toMatch(/^clamp\(\d+px, \d+cqi, \d+px\)$/);
+  });
+  it(".ring-label may use the full ring width", () => {
+    expect(decl(rule(".ring-label"), "max-width")).toBe("100%");
+  });
+  it(".ring-value sets a fill for the centre text", () => {
+    expect(decl(rule(".ring-value"), "fill")).toBeDefined();
   });
   it(".spark fills its grid cell", () => {
     expect(decl(rule(".spark"), "width")).toBe("100%");

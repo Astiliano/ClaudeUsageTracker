@@ -5,6 +5,15 @@ export interface Prefs {
   /** Columns the user hid in Settings; "account" is never in here. */
   hiddenColumns: ColumnKey[];
   alwaysOnTop: boolean;
+  /** Accounts as the table or as a grid of ring cards. */
+  view: ViewMode;
+}
+
+export const VIEW_MODES = ["table", "rings"] as const;
+export type ViewMode = (typeof VIEW_MODES)[number];
+
+function isViewMode(v: unknown): v is ViewMode {
+  return typeof v === "string" && (VIEW_MODES as readonly string[]).includes(v);
 }
 
 export const PREFS_KEY = "usage-tracker.prefs.v1";
@@ -13,6 +22,7 @@ export const DEFAULT_PREFS: Readonly<Prefs> = {
   columnOrder: [...DEFAULT_ORDER],
   hiddenColumns: [],
   alwaysOnTop: false,
+  view: "table",
 };
 
 /** The subset of the Web Storage API the app touches; injectable for tests. */
@@ -26,6 +36,7 @@ function fresh(): Prefs {
     columnOrder: [...DEFAULT_ORDER],
     hiddenColumns: [],
     alwaysOnTop: DEFAULT_PREFS.alwaysOnTop,
+    view: DEFAULT_PREFS.view,
   };
 }
 
@@ -52,6 +63,8 @@ export function parsePrefs(raw: string | null): Prefs {
     console.warn("prefs: stored hiddenColumns was unusable; showing every column", rec.hiddenColumns);
   }
   if (typeof rec.alwaysOnTop === "boolean") out.alwaysOnTop = rec.alwaysOnTop;
+  if (isViewMode(rec.view)) out.view = rec.view;
+  else if (rec.view !== undefined) console.warn("prefs: stored view was unusable; showing the table", rec.view);
   return out;
 }
 

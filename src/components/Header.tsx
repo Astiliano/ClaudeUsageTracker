@@ -3,6 +3,7 @@ import { backend } from "../lib/backend";
 import { bannerFor } from "../lib/banner";
 import { errorMessage } from "../lib/errors";
 import { accountCountLabel, chipFor, countPlacement } from "../lib/present";
+import type { ViewMode } from "../lib/prefs";
 import type { Dashboard, SystemReport } from "../lib/types";
 import { SystemLine } from "./SystemLine";
 
@@ -14,6 +15,8 @@ interface Props {
   now: number;
   stayOnTop: boolean;
   onToggleStayOnTop: () => void;
+  view: ViewMode;
+  onViewChange: (view: ViewMode) => void;
   onToggleSettings: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
@@ -27,6 +30,8 @@ export function Header({
   now,
   stayOnTop,
   onToggleStayOnTop,
+  view,
+  onViewChange,
   onToggleSettings,
   onChanged,
   onError,
@@ -68,6 +73,15 @@ export function Header({
             onClick={onToggleStayOnTop}
           >
             on top
+          </button>
+          <button
+            type="button"
+            className={"btn" + (view === "rings" ? " btn-edit-on" : "")}
+            aria-pressed={view === "rings"}
+            title="Switch view"
+            onClick={() => onViewChange(view === "rings" ? "table" : "rings")}
+          >
+            {view === "rings" ? "Rings" : "Table"}
           </button>
           <button type="button" className={`btn${settingsOpen ? " btn-edit-on" : ""}`} onClick={onToggleSettings}>
             settings

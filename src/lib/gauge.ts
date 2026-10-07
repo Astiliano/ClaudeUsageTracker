@@ -1,5 +1,6 @@
-/** Ring gauge geometry: the 20px glyph on the system line, arc from 12 o'clock. */
+/** Ring gauge geometry, arc from 12 o'clock: 44px in the cards view, 20px glyph on the system line. */
 export const RING_SIZES = {
+  md: { size: 44, stroke: 5, radius: 19.5 },
   sm: { size: 20, stroke: 3, radius: 8.5 },
 } as const;
 
