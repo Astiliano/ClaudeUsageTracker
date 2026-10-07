@@ -1,12 +1,15 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { FitOutcome } from "./fit";
 
 /** The backend primitives the UI uses. Swappable for a browser mock. */
 export interface Backend {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen(event: string, handler: () => void): Promise<() => void>;
   setAlwaysOnTop(flag: boolean): Promise<void>;
+  /** Reports the content height in local px; the window is fitted to it. */
+  setContentHeight(localPx: number): Promise<FitOutcome>;
 }
 
 const real: Backend = {
@@ -17,6 +20,8 @@ const real: Backend = {
     return () => off();
   },
   setAlwaysOnTop: (flag) => getCurrentWindow().setAlwaysOnTop(flag),
+  // Tauri maps the Rust parameter `content_h` to the camelCase key `contentH`.
+  setContentHeight: (localPx) => tauriInvoke<FitOutcome>("set_content_height", { contentH: localPx }),
 };
 
 let current: Backend = real;

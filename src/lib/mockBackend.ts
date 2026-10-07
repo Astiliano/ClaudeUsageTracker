@@ -512,5 +512,9 @@ export function createMockBackend(search: string = window.location.search): Back
       return Promise.resolve(() => window.clearInterval(timer));
     },
     setAlwaysOnTop: async (flag) => { console.info("mock: setAlwaysOnTop", flag); },
+    setContentHeight: async (localPx) => {
+      console.info("mock: setContentHeight", localPx);
+      return "alreadyFitted";
+    },
   };
 }

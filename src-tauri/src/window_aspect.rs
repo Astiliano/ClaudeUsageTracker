@@ -1222,6 +1222,41 @@ mod tests {
         assert!(layout.contains(&format!("export const ZOOM_MAX = {ZOOM_MAX};")));
     }
 
+    #[test]
+    fn fit_outcomes_match_fit_ts() {
+        let ts = include_str!("../../src/lib/fit.ts");
+        let line = ts
+            .lines()
+            .find(|l| l.starts_with("export const FIT_OUTCOMES"))
+            .expect("FIT_OUTCOMES line in fit.ts");
+        let list = line
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(inside, _)| inside)
+            .expect("bracketed list");
+        let ts_names: Vec<&str> = list
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .collect();
+        let rust_names: Vec<String> = [
+            FitOutcome::Applied,
+            FitOutcome::AlreadyFitted,
+            FitOutcome::Capped,
+            FitOutcome::SkippedMaximized,
+            FitOutcome::SkippedMinimized,
+            FitOutcome::Deferred,
+        ]
+        .iter()
+        .map(|o| {
+            serde_json::to_string(o)
+                .expect("serialize")
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect();
+        assert_eq!(ts_names, rust_names);
+    }
+
     // ---- Task 7: the command glue ----
 
     #[test]

@@ -4,6 +4,7 @@ import { AccountsTable } from "./components/AccountsTable";
 import { FailureDetail } from "./components/FailureDetail";
 import { Header } from "./components/Header";
 import { Settings } from "./components/Settings";
+import { useContentHeight } from "./hooks/useContentHeight";
 import { useDashboard } from "./hooks/useDashboard";
 import { usePrefs } from "./hooks/usePrefs";
 import { useSystem } from "./hooks/useSystem";
@@ -19,7 +20,9 @@ export default function App(): JSX.Element {
   const { report: system, error: systemError } = useSystem();
   const { prefs, update } = usePrefs();
   const viewport = useViewport();
-  const zoom = windowZoom(viewport.width, viewport.height, null);
+  const appRef = useRef<HTMLElement>(null);
+  const contentH = useContentHeight(appRef, dashboard !== null, viewport);
+  const zoom = windowZoom(viewport.width, viewport.height, contentH);
   const visible = visibleColumns(prefs.columnOrder, prefs.hiddenColumns);
   const [showSettings, setShowSettings] = useState(false);
   const [failureId, setFailureId] = useState<number | null>(null);
@@ -59,7 +62,7 @@ export default function App(): JSX.Element {
   }
 
   return (
-    <main className="app" style={style}>
+    <main className="app" style={style} ref={appRef}>
       <div className="app-inner">
         <Header
           dashboard={dashboard}
