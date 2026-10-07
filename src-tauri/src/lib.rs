@@ -5,6 +5,7 @@ pub mod logging;
 pub mod login;
 pub mod memory;
 pub mod paths;
+pub mod platform;
 pub mod process;
 pub mod scheduler;
 pub mod store;
