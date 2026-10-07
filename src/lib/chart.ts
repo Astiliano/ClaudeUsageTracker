@@ -10,7 +10,7 @@ export interface ChartFit {
   viewportPx: number;
   /** Drawer height minus chart height, viewport (post-zoom) px. */
   chromePx: number;
-  /** The Text size zoom factor on the shell. */
+  /** The shell zoom factor (from windowZoom). */
   zoom: number;
 }
 

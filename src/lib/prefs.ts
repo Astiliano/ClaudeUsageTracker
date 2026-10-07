@@ -1,8 +1,6 @@
 import { type ColumnKey, DEFAULT_ORDER, normalizeColumnOrder, normalizeHiddenColumns } from "./columns";
-import { type SizeKey, isSizeKey } from "./theme";
 
 export interface Prefs {
-  size: SizeKey;
   columnOrder: ColumnKey[];
   /** Columns the user hid in Settings; "account" is never in here. */
   hiddenColumns: ColumnKey[];
@@ -12,7 +10,6 @@ export interface Prefs {
 export const PREFS_KEY = "usage-tracker.prefs.v1";
 
 export const DEFAULT_PREFS: Readonly<Prefs> = {
-  size: "md",
   columnOrder: [...DEFAULT_ORDER],
   hiddenColumns: [],
   alwaysOnTop: false,
@@ -26,7 +23,6 @@ export interface PrefsStore {
 
 function fresh(): Prefs {
   return {
-    size: DEFAULT_PREFS.size,
     columnOrder: [...DEFAULT_ORDER],
     hiddenColumns: [],
     alwaysOnTop: DEFAULT_PREFS.alwaysOnTop,
@@ -45,7 +41,6 @@ export function parsePrefs(raw: string | null): Prefs {
   }
   if (typeof parsed !== "object" || parsed === null) return out;
   const rec = parsed as Record<string, unknown>;
-  if (isSizeKey(rec.size)) out.size = rec.size;
   const order = normalizeColumnOrder(rec.columnOrder);
   if (order !== null) out.columnOrder = order;
   if (Array.isArray(rec.columnOrder) && JSON.stringify(order) !== JSON.stringify(rec.columnOrder)) {

@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  SIZES, SIZE_KEYS, THEME, THRESHOLDS,
-  isSizeKey, metricColor, metricTone,
-} from "./theme";
+import { THEME, THRESHOLDS, metricColor, metricTone } from "./theme";
 
 describe("metricTone", () => {
   it("is ok below the warn threshold", () => {
@@ -22,21 +19,5 @@ describe("metricTone", () => {
     expect(metricColor(10)).toBe(THEME.ok);
     expect(metricColor(80)).toBe(THEME.warn);
     expect(metricColor(99)).toBe(THEME.crit);
-  });
-});
-
-describe("size keys", () => {
-  it("lists every key of the maps in a stable order", () => {
-    expect(SIZE_KEYS).toEqual(["sm", "md", "lg", "xl"]);
-    expect(Object.keys(SIZES).sort()).toEqual([...SIZE_KEYS].sort());
-  });
-  it("guards accept only known keys", () => {
-    expect(isSizeKey("xl")).toBe(true);
-    expect(isSizeKey("xxl")).toBe(false);
-    expect(isSizeKey(null)).toBe(false);
-  });
-  it("default size has zoom 1 and every zoom is positive", () => {
-    expect(SIZES.md.zoom).toBe(1);
-    for (const key of SIZE_KEYS) expect(SIZES[key].zoom).toBeGreaterThan(0);
   });
 });

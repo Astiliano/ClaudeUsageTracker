@@ -59,11 +59,42 @@ export function shellVars(): Record<string, string> {
   };
 }
 
-/** The shell's inline style: the text-size zoom plus every shell variable. */
-export function shellStyle(zoom: number): CSSProperties {
+/**
+ * The shell's inline style: the window zoom, every shell variable, and
+ * `--viewport-h`, the window height in local px. styles.css never uses `vh`:
+ * Chromium multiplies viewport units by CSS zoom, so `100vh` under a zoom
+ * of 1.1 is 110% of the window and the page scrolls.
+ */
+export function shellStyle(zoom: number, viewportHeightPx: number): CSSProperties {
+  const h = toLocal(viewportHeightPx, zoom);
+  const viewportH = Number.isFinite(h) && h > 0 ? h : 0;
   // `zoom` and the custom properties are valid inline styles that
   // CSSProperties does not list; this is the one typed cast.
-  return { zoom, ...shellVars() } as CSSProperties;
+  return { zoom, ...shellVars(), "--viewport-h": `${viewportH}px` } as CSSProperties;
+}
+
+/**
+ * The canvas the UI is designed for: the window configured in
+ * src-tauri/tauri.conf.json (layout.test.ts fails if the two drift).
+ */
+export const BASE_WIDTH = 980;
+export const BASE_HEIGHT = 640;
+/** Bounds of the window-derived zoom. */
+export const ZOOM_MIN = 0.75;
+export const ZOOM_MAX = 2.5;
+
+/**
+ * The CSS zoom for a window of the given size: the largest scale at which the
+ * base canvas still fits, clamped to [ZOOM_MIN, ZOOM_MAX]. A non-finite or
+ * non-positive dimension (jsdom reports 0 before mount) gives 1: a zoom of 0
+ * or NaN would blank the page.
+ */
+export function windowZoom(widthPx: number, heightPx: number): number {
+  if (!Number.isFinite(widthPx) || !Number.isFinite(heightPx) || widthPx <= 0 || heightPx <= 0) {
+    return 1;
+  }
+  const fit = Math.min(widthPx / BASE_WIDTH, heightPx / BASE_HEIGHT);
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fit));
 }
 
 export function layoutFor(viewportWidthPx: number, zoom: number): Layout {

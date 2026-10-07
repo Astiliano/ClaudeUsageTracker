@@ -5,7 +5,6 @@ import { ALWAYS_VISIBLE, COLUMNS, type ColumnKey, DEFAULT_ORDER } from "../lib/c
 import { errorMessage } from "../lib/errors";
 import { autoHiddenColumns, BREAKPOINTS, type Layout } from "../lib/layout";
 import type { Prefs } from "../lib/prefs";
-import { SIZE_KEYS, SIZES } from "../lib/theme";
 import type { BinaryInfo, UserSettings } from "../lib/types";
 import { Toggle } from "./Toggle";
 
@@ -143,22 +142,6 @@ export function Settings({
         <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
           close
         </button>
-      </div>
-
-      <div className="section">
-        <div className="section-label">Text size</div>
-        <div className="choices">
-          {SIZE_KEYS.map((k) => (
-            <button
-              key={k}
-              type="button"
-              className={"choice choice-size" + (prefs.size === k ? " choice-on" : "")}
-              onClick={() => onPrefs({ size: k })}
-            >
-              {SIZES[k].label}
-            </button>
-          ))}
-        </div>
       </div>
 
       <div className="section">

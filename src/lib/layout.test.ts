@@ -1,15 +1,60 @@
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ORDER, gridMinWidth, visibleColumns } from "./columns";
 import {
+  BASE_HEIGHT,
+  BASE_WIDTH,
   BREAKPOINTS,
   ROW_BORDER,
   ROW_HEIGHT,
   SHELL_PADDING,
+  ZOOM_MAX,
+  ZOOM_MIN,
   autoHiddenColumns,
   layoutFor,
   shellStyle,
   shellVars,
+  windowZoom,
 } from "./layout";
+
+describe("windowZoom", () => {
+  it("is 1 at the base canvas", () => {
+    expect(windowZoom(BASE_WIDTH, BASE_HEIGHT)).toBe(1);
+  });
+  it("doubles at twice the base canvas", () => {
+    expect(windowZoom(1960, 1280)).toBe(2);
+  });
+  it("is limited by the width when the window is relatively narrow", () => {
+    expect(windowZoom(1470, 1920)).toBeCloseTo(1.5, 10);
+  });
+  it("is limited by the height when the window is relatively short", () => {
+    expect(windowZoom(2940, 800)).toBeCloseTo(1.25, 10);
+  });
+  it("clamps to the floor and the ceiling", () => {
+    expect(windowZoom(100, 100)).toBe(ZOOM_MIN);
+    expect(windowZoom(100000, 100000)).toBe(ZOOM_MAX);
+    expect(ZOOM_MIN).toBe(0.75);
+    expect(ZOOM_MAX).toBe(2.5);
+  });
+  it("is 1 for zero, negative, NaN and infinite input, never 0 or NaN", () => {
+    expect(windowZoom(0, 0)).toBe(1);
+    expect(windowZoom(0, 640)).toBe(1);
+    expect(windowZoom(980, 0)).toBe(1);
+    expect(windowZoom(-5, 640)).toBe(1);
+    expect(windowZoom(Number.NaN, 640)).toBe(1);
+    expect(windowZoom(980, Number.NaN)).toBe(1);
+    expect(windowZoom(Number.POSITIVE_INFINITY, 640)).toBe(1);
+  });
+  it("the base canvas is the window configured in tauri.conf.json", () => {
+    const conf = JSON.parse(
+      readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+    ) as { app: { windows: { width: number; height: number }[] } };
+    const win = conf.app.windows[0];
+    expect(win?.width).toBe(BASE_WIDTH);
+    expect(win?.height).toBe(BASE_HEIGHT);
+  });
+});
 
 describe("layoutFor", () => {
   it("switches at the breakpoints, measured in local px", () => {
@@ -19,7 +64,7 @@ describe("layoutFor", () => {
     expect(layoutFor(573, 1)).toBe("narrow");
     expect(layoutFor(572, 1)).toBe("cards");
   });
-  it("divides the viewport width by the text-size zoom", () => {
+  it("divides the viewport width by the zoom", () => {
     expect(layoutFor(924, 1.22)).toBe("full");
     expect(layoutFor(923, 1.22)).toBe("narrow");
     expect(layoutFor(700, 1.22)).toBe("narrow");
@@ -67,10 +112,19 @@ describe("shellVars and shellStyle", () => {
     });
   });
   it("shellStyle sets the zoom and spreads every shell variable", () => {
-    const style = shellStyle(1.22) as Record<string, unknown>;
+    const style = shellStyle(1.22, 900) as Record<string, unknown>;
     expect(style["zoom"]).toBe(1.22);
     for (const [name, value] of Object.entries(shellVars())) {
       expect(style[name]).toBe(value);
     }
+  });
+  it("shellStyle emits --viewport-h in local px (window px / zoom)", () => {
+    expect((shellStyle(2, 1280) as Record<string, unknown>)["--viewport-h"]).toBe("640px");
+    expect((shellStyle(1, 640) as Record<string, unknown>)["--viewport-h"]).toBe("640px");
+  });
+  it("shellStyle emits 0px for a zero, NaN or negative viewport height", () => {
+    expect((shellStyle(1.5, 0) as Record<string, unknown>)["--viewport-h"]).toBe("0px");
+    expect((shellStyle(1.5, Number.NaN) as Record<string, unknown>)["--viewport-h"]).toBe("0px");
+    expect((shellStyle(1.5, -10) as Record<string, unknown>)["--viewport-h"]).toBe("0px");
   });
 });

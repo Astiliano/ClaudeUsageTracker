@@ -12,17 +12,16 @@ import { useViewport } from "./hooks/useViewport";
 import { backend } from "./lib/backend";
 import { moveVisible, visibleColumns } from "./lib/columns";
 import { errorMessage } from "./lib/errors";
-import { autoHiddenColumns, layoutFor, shellStyle } from "./lib/layout";
-import { SIZES } from "./lib/theme";
+import { autoHiddenColumns, layoutFor, shellStyle, windowZoom } from "./lib/layout";
 import "./styles.css";
 
 export default function App(): JSX.Element {
   const { dashboard, history, now, cycle, error, refetch } = useDashboard();
   const { report: system, error: systemError } = useSystem();
   const { prefs, update } = usePrefs();
-  const viewportWidth = useViewport();
-  const zoom = SIZES[prefs.size].zoom;
-  const layout = layoutFor(viewportWidth, zoom);
+  const viewport = useViewport();
+  const zoom = windowZoom(viewport.width, viewport.height);
+  const layout = layoutFor(viewport.width, zoom);
   const effectiveHidden = [...prefs.hiddenColumns, ...autoHiddenColumns(layout)];
   const visible = visibleColumns(prefs.columnOrder, effectiveHidden);
   const [showSettings, setShowSettings] = useState(false);
@@ -52,7 +51,7 @@ export default function App(): JSX.Element {
     return () => { cancelled = true; };
   }, [prefs.alwaysOnTop, showError]);
 
-  const style = shellStyle(zoom);
+  const style = shellStyle(zoom, viewport.height);
 
   if (dashboard === null) {
     return (

@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows
 - `tauri-plugin-window-state`: the window returns at its last size, position and
   maximized state.
 - The history chart, rings and sparkline scale with the window.
+- UI scales with the window size (base 980x640, zoom 0.75..2.5).
 
 ### Changed
 
@@ -31,4 +32,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- The Text size setting (replaced by window-derived zoom). A stored `size`
+  preference is ignored.
 - The font picker and the three `@fontsource` packages.
+
+### Fixed
+
+- A scrollbar appeared at the larger text sizes because `100vh` is multiplied by
+  CSS zoom; the shell now sizes from `--viewport-h` and the stylesheet has no
+  viewport units.

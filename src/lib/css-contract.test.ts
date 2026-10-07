@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { shellVars } from "./layout";
+import { shellStyle, shellVars } from "./layout";
 
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
@@ -19,6 +19,8 @@ function decl(body: string, prop: string): string | undefined {
 
 /** Every custom property the assertions below expect the stylesheet to read. */
 const ASSERTED_VARS = ["--gutter", "--row-h", "--row-border", "--row-pad-x", "--grid-gap", "--panel-border", "--ring-min", "--ring-max"] as const;
+/** Variables shellStyle sets from the window rather than from a constant. */
+const STYLE_VARS = ["--viewport-h"] as const;
 
 describe("styles.css reads the shell variables (D9)", () => {
   it("the stylesheet was read", () => {
@@ -27,6 +29,20 @@ describe("styles.css reads the shell variables (D9)", () => {
   it("every asserted variable is a key of shellVars()", () => {
     const keys = Object.keys(shellVars());
     for (const v of ASSERTED_VARS) expect(keys).toContain(v);
+  });
+  it("every window-derived variable is a key of shellStyle()", () => {
+    const keys = Object.keys(shellStyle(1, 640));
+    for (const v of STYLE_VARS) expect(keys).toContain(v);
+  });
+  it(".app min-height is the viewport variable", () => {
+    expect(decl(rule(".app"), "min-height")).toBe("var(--viewport-h)");
+  });
+  it(".modal-body max-height is 0.8 of the viewport variable", () => {
+    expect(decl(rule(".modal-body"), "max-height")).toBe("calc(0.8 * var(--viewport-h))");
+  });
+  it("no viewport unit appears anywhere (Chromium multiplies them by CSS zoom)", () => {
+    const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(withoutComments).not.toMatch(/[\d.]\s*(?:vh|vw|vmin|vmax|dvh|dvw|svh|svw|lvh|lvw)\b/i);
   });
   it(".app padding is the gutter", () => {
     expect(decl(rule(".app"), "padding")).toBe("var(--gutter)");

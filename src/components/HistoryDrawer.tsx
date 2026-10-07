@@ -18,7 +18,7 @@ interface Props {
   latest: SnapshotDto | null;
   /** Bumped by useDashboard on every cycle:finished; a change refetches. */
   cycle: number;
-  /** The Text size zoom factor; the chart height divides by it. */
+  /** The shell zoom factor (from windowZoom); the chart height divides by it. */
   zoom: number;
   /** The outer `.row`; scrolled to the viewport top when the chart first sizes. */
   rowRef: RefObject<HTMLDivElement | null>;

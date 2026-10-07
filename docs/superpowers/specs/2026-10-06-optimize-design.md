@@ -648,6 +648,15 @@ TS owns them, and the CSS reads them through custom properties (D9).
   (the one typed cast at App.tsx:56-61 moves with it). App.tsx uses
   `shellStyle(zoom)` in place of its inline object, so the spread is
   tested in layout.test, not only seen in M7.
+- Update 2026-10-06 (zoom from the window): `shellStyle(zoom,
+  viewportHeightPx)` also sets `--viewport-h` (window height in local px,
+  `toLocal(h, zoom)`, 0px when the height is 0), which `.app` `min-height`
+  and `.modal-body` `max-height` (`calc(0.8 * var(--viewport-h))`) read;
+  styles.css contains no `vh`/`vw` unit, because Chromium multiplies them by
+  CSS zoom. The zoom now comes from `windowZoom(width, height)` in layout.ts
+  (`clamp(min(w/980, h/640), 0.75, 2.5)`, base = the window in
+  tauri.conf.json, 1 for a non-positive or non-finite size), and the Text
+  size pref is gone (a stored `size` key is ignored).
 - styles.css uses only the variables for those lengths:
   - `.app { padding: var(--gutter) }`; `.app-inner` loses `max-width` and
     centering, and its gap is `var(--gutter)`;
