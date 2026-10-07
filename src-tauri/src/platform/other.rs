@@ -1,7 +1,8 @@
 //! Non-Windows window-platform code: no live aspect lock, a portable `apply_fit`.
 
 use crate::error::{AppError, AppResult};
-use crate::window_aspect::FitPlan;
+use crate::window_aspect::{AspectState, FitPlan};
+use std::sync::{Arc, Once};
 use tauri::{PhysicalPosition, PhysicalSize, Runtime, Window};
 
 /// Applies a fit through Tauri's setters: `set_position` only when the top changes, then
@@ -31,4 +32,12 @@ pub fn apply_fit<R: Runtime>(window: &Window<R>, plan: &FitPlan) -> AppResult<()
     window
         .set_size(PhysicalSize::new(w, h))
         .map_err(|e| AppError::Internal(format!("set_size failed: {e}")))
+}
+
+/// There is no live aspect lock off Windows: the fit applies only on a report. Logs once per
+/// process and returns false.
+pub fn install<R: Runtime>(_window: &Window<R>, _state: Arc<AspectState>) -> bool {
+    static LOGGED: Once = Once::new();
+    LOGGED.call_once(|| tracing::info!("live aspect lock unsupported on this platform"));
+    false
 }
